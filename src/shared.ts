@@ -1,0 +1,68 @@
+/**
+ * Constants shared by the server and the frontend. Kept free of runtime
+ * dependencies so the browser bundle stays small.
+ */
+
+export const WORKSPACE_MODES = ["worktree", "local"] as const;
+export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
+
+/** T3 Code runtime modes, from packages/contracts/src/orchestration.ts. */
+export const RUNTIME_MODES = [
+  "approval-required",
+  "auto-accept-edits",
+  "auto",
+  "full-access",
+] as const;
+export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+
+/**
+ * GitHub webhook events the UI suggests. The key is `<event>.<action>` (or
+ * just `<event>` when the payload has no action). Any other key can be typed
+ * by hand; matching is a plain string compare.
+ */
+export const SUGGESTED_EVENTS = [
+  { key: "pull_request.review_requested", label: "PR: review requested" },
+  { key: "pull_request.opened", label: "PR: opened" },
+  { key: "pull_request.ready_for_review", label: "PR: ready for review" },
+  { key: "pull_request.synchronize", label: "PR: new commits pushed" },
+  { key: "pull_request.reopened", label: "PR: reopened" },
+  { key: "pull_request.labeled", label: "PR: labeled" },
+  { key: "pull_request_review.submitted", label: "PR review: submitted" },
+  { key: "pull_request_review_comment.created", label: "PR review comment: created" },
+  { key: "issue_comment.created", label: "Issue/PR comment: created" },
+  { key: "issues.opened", label: "Issue: opened" },
+  { key: "issues.assigned", label: "Issue: assigned" },
+  { key: "issues.labeled", label: "Issue: labeled" },
+] as const;
+
+/** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts. */
+export const TEMPLATE_VARS = [
+  "repo",
+  "repo_url",
+  "default_branch",
+  "event",
+  "action",
+  "sender",
+  "pr_number",
+  "pr_title",
+  "pr_url",
+  "pr_body",
+  "pr_author",
+  "pr_head",
+  "pr_base",
+  "pr_head_sha",
+  "requested_reviewer",
+  "issue_number",
+  "issue_title",
+  "issue_url",
+  "issue_body",
+  "issue_author",
+  "comment_body",
+  "comment_author",
+  "comment_url",
+  "review_state",
+  "review_body",
+  "review_author",
+  "label",
+] as const;
+export type TemplateVar = (typeof TEMPLATE_VARS)[number];
