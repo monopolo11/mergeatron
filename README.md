@@ -50,6 +50,21 @@ cp .env.example .env
    content type `application/json`, your secret, and the events you want
    (Pull requests, Pull request reviews, Issue comments, Issues).
 
+## Run as a service (macOS)
+
+To keep the orchestrator running without a terminal, install it as a launchd
+user agent. It starts at login and launchd restarts it if it crashes:
+
+```sh
+bun service.ts install
+```
+
+`bun service.ts status` shows pid and last exit code, `logs` tails
+`~/Library/Logs/t3-review-orchestrator/orchestrator.log`, `restart` picks up
+code or `.env` changes, and `uninstall` stops it and removes the agent. The agent
+runs `bun index.ts` from this directory, so `.env` and `data/` are the same ones
+used when running by hand. Reinstall after moving the checkout.
+
 ## Rules
 
 Each rule has:
