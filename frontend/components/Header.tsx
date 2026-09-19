@@ -25,11 +25,15 @@ export function Dot({ tone }: { tone: "ok" | "warn" | "err" | "idle" }) {
   );
 }
 
+export type View = "rules" | "analytics";
+
 export function Header({
   status,
   projects,
   providers,
   settings,
+  view,
+  onViewChange,
   onSettingsSaved,
   onThreadStarted,
 }: {
@@ -37,6 +41,8 @@ export function Header({
   projects: T3Project[];
   providers: T3Provider[] | null;
   settings: Settings | null;
+  view: View;
+  onViewChange: (view: View) => void;
   onSettingsSaved: (settings: Settings) => void;
   onThreadStarted: () => void;
 }) {
@@ -56,6 +62,14 @@ export function Header({
         <code className="font-mono text-[11.5px]">POST {location.origin}/webhooks/github</code>
         <span>{projects.length} projects</span>
       </div>
+      <Button
+        size="sm"
+        variant="ghost"
+        className={cn(view === "analytics" && "bg-muted")}
+        onClick={() => onViewChange(view === "analytics" ? "rules" : "analytics")}
+      >
+        Analytics
+      </Button>
       <TestThread projects={projects} onStarted={onThreadStarted} />
       {settings && <SettingsPopover settings={settings} providers={providers} onSaved={onSettingsSaved} />}
     </header>

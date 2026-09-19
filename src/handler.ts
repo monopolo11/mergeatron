@@ -61,6 +61,8 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
       deliveryId: delivery.deliveryId,
       event: key,
       repo: ctx.repo,
+      source: "github",
+      author: ctx.pr_author ?? ctx.issue_author ?? ctx.sender ?? null,
       status: "started",
       detail: "starting thread",
       threadId: null,

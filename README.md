@@ -73,6 +73,14 @@ Each rule has:
 GitHub retries deliveries; the same delivery id never starts a second thread for
 the same rule. Recent runs and their thread links show at the bottom of the UI.
 
+## Analytics
+
+**Analytics** in the header swaps the editor for run counts: totals, runs per PR
+or issue author, and runs per trigger source, each split into started, skipped
+and failed. Sources are `github` (webhook), `manual` (connection test) and
+`slack`, which is listed at zero until a Slack trigger exists. The same data is
+at `GET /api/analytics`.
+
 ## Development
 
 Storage is SQLite via Drizzle (`src/db/schema.ts`). Migrations in `drizzle/` run

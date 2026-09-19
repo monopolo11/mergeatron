@@ -16,6 +16,14 @@ export const RUNTIME_MODES = [
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /**
+ * How a run was triggered. `github` is the webhook endpoint, `manual` is the
+ * connection test in the header. `slack` is reserved for the Slack trigger and
+ * has no producer yet; it is listed so analytics show it at zero until it lands.
+ */
+export const RUN_SOURCES = ["github", "slack", "manual"] as const;
+export type RunSource = (typeof RUN_SOURCES)[number];
+
+/**
  * GitHub webhook events the UI suggests. The key is `<event>.<action>` (or
  * just `<event>` when the payload has no action). Any other key can be typed
  * by hand; matching is a plain string compare.
