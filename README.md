@@ -1,10 +1,11 @@
-# GitHub → T3 Code review orchestrator
+# GitHub / Slack → T3 Code review orchestrator
 
-Small Bun service that listens for GitHub webhooks and starts a
+Small Bun service that listens for GitHub webhooks and Slack messages (Socket Mode) and starts a
 [T3 Code](https://github.com/pingdotgg/t3code) thread with a prompt you configure.
-Typical use: when someone requests your review on a PR, a review thread opens in
-T3 Code on a worktree checked out at the PR head. The service starts the thread
-and is done; the agent takes it from there.
+Typical use: when someone requests your review on a PR, or drops a PR link in a
+Slack channel, a review thread opens in T3 Code on a worktree checked out at the
+PR head. The service starts the thread, watches for the turn to settle, and for
+Slack triggers posts the agent's reply back into the Slack thread.
 
 ## How it talks to T3 Code
 
@@ -50,14 +51,60 @@ cp .env.example .env
    content type `application/json`, your secret, and the events you want
    (Pull requests, Pull request reviews, Issue comments, Issues).
 
+### Slack (optional)
+
+Slack runs over Socket Mode: the service opens a WebSocket to Slack, so Slack
+needs no tunnel and keeps working when a quick tunnel's URL changes.
+
+1. Create the app at https://api.slack.com/apps → **Create New App** → **From a manifest**
+   and paste [`slack-app-manifest.yaml`](slack-app-manifest.yaml).
+2. **Basic Information → App-Level Tokens**: generate a token with scope
+   `connections:write`; put it in `.env` as `SLACK_APP_TOKEN`.
+3. **Install to Workspace**; put the `xoxb-` bot token (OAuth & Permissions) in `.env`
+   as `SLACK_BOT_TOKEN`.
+4. Restart the service (the header shows `slack connected`) and invite the bot to the
+   channel (`/invite @T3 Review`).
+
+Behind a TLS-inspecting proxy (Cloudflare WARP, Zscaler, ...) `fetch` to slack.com
+fails with `self signed certificate in certificate chain`. Export the CA bundle in
+the shell that launches `bun` (`SSL_CERT_FILE` or `NODE_EXTRA_CA_CERTS`); Bun reads
+these at startup, so putting them in `.env` does nothing.
+
+Then add a rule with event `slack.app_mention` (fires when the bot is mentioned)
+or `slack.message` (human messages in the channel that link a GitHub PR; set the
+channel filter). Channel chatter without a PR link is ignored.
+The first GitHub PR link in the message picks the repository and PR; the
+service fetches the head branch with the `gh` CLI so the worktree starts at the PR
+head. Without `gh` or access to the repository the thread runs in the local
+checkout instead, so add `gh pr checkout {{pr_number}}` to the prompt as a fallback.
+
+Mentioning the bot with "second pass" inside a review's Slack thread
+(`@T3 Review second pass`) re-reviews that PR in a new T3 thread. The PR comes
+from the message the thread hangs under (or a PR link in the mention). It fires
+rules with event `slack.second_pass`, whose prompt can use `{{previous_result}}`
+and `{{previous_thread_url}}` (the last finished review of that PR; also available
+to every other PR rule). Slack does not allow custom slash commands inside
+threads, hence a mention. The result is posted in the same thread.
+
+A message that reaches the rules but matches none gets a ⏩ reaction so the poster
+knows it was seen and skipped. While the review runs the message gets an 👀 reaction. When the turn settles the
+agent's final message is posted as a threaded reply and the reaction flips to ✅
+(or ❌ with the error). T3 thread links are never posted to Slack; they show in
+the run log.
+
 ## Rules
 
 Each rule has:
 
-- **Event**: `<event>.<action>` such as `pull_request.review_requested`.
-- **Repositories**: optional `owner/name` list. Empty matches every repo.
-- **Requested reviewer**: optional login or team slug. Handy so only reviews
-  requested from you fire, not every review request on the repo.
+- **Events**: one or more keys the rule fires on: `<event>.<action>` such as
+  `pull_request.review_requested`, or `slack.app_mention` / `slack.message` /
+  `slack.second_pass` for Slack. One rule can serve both sources.
+- **Repositories**: optional `owner/name` list. Empty matches every repo. For
+  Slack rules this is the repository of the PR linked in the message.
+- **Requested reviewer** (GitHub): optional login or team slug. Handy so only
+  reviews requested from you fire, not every review request on the repo.
+- **Slack channel** (Slack): optional channel id. Empty matches any channel the
+  bot is in.
 - **T3 project**: explicit, or auto-matched by comparing the webhook repository
   to each project's git remote.
 - **Workspace**: `worktree` asks T3 to start the thread in a new worktree from
@@ -68,10 +115,15 @@ Each rule has:
   Provider and model pickers are populated from T3's own provider config
   (`server.getConfig`), so only instances and models T3 knows about are offered.
 - **Prompt**: first message of the thread. `{{pr_url}}`, `{{pr_title}}`, `{{pr_head}}`,
-  `{{comment_body}}` and friends are substituted; see the chips in the editor.
+  `{{comment_body}}`, `{{slack_text}}` and friends are substituted; see the chips
+  in the editor.
 
-GitHub retries deliveries; the same delivery id never starts a second thread for
-the same rule. Recent runs and their thread links show at the bottom of the UI.
+GitHub and Slack retry deliveries; the same delivery id never starts a second
+thread for the same rule. A PR also gets one review at a time: while a run for
+it is still running, further triggers for that PR (any rule, any source) are
+logged as skipped and, on Slack, answered with a short note. Runs show in the right-hand log as `running` until the
+thread's first turn settles, then `done` with the agent's final message (or
+`failed`). Watchers survive restarts: runs still `running` are re-polled on boot.
 
 ## Development
 

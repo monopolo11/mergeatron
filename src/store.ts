@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { AppDatabase } from "./db/index.ts";
 import { rules, runs, settings } from "./db/schema.ts";
 import { DEFAULT_SETTINGS, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
@@ -71,7 +71,71 @@ export class Store {
       .get();
   }
 
-  updateRun(id: string, patch: Pick<Run, "status" | "detail" | "threadId" | "threadUrl">): void {
+  updateRun(id: string, patch: Partial<Omit<Run, "id" | "createdAt">>): void {
     this.db.update(runs).set(patch).where(eq(runs.id, id)).run();
+  }
+
+  getRun(id: string): Run | null {
+    return this.db.select().from(runs).where(eq(runs.id, id)).get() ?? null;
+  }
+
+  /** The run still reviewing this PR, if any. One review per PR at a time, across all rules and triggers. */
+  activeRunForPullRequest(repo: string, prNumber: string): Run | null {
+    return (
+      this.db
+        .select()
+        .from(runs)
+        .where(
+          and(
+            eq(runs.status, "started"),
+            sql`lower(${runs.repo}) = lower(${repo})`,
+            sql`json_extract(${runs.context}, '$.pr_number') = ${prNumber}`,
+          ),
+        )
+        .orderBy(desc(runs.createdAt))
+        .get() ?? null
+    );
+  }
+
+  /** Most recent finished review of this PR with a reply, for `{{previous_result}}`. */
+  latestReviewForPullRequest(repo: string, prNumber: string): Run | null {
+    return (
+      this.db
+        .select()
+        .from(runs)
+        .where(
+          and(
+            eq(runs.status, "done"),
+            sql`${runs.result} is not null`,
+            sql`lower(${runs.repo}) = lower(${repo})`,
+            sql`json_extract(${runs.context}, '$.pr_number') = ${prNumber}`,
+          ),
+        )
+        .orderBy(desc(runs.createdAt))
+        .get() ?? null
+    );
+  }
+
+  /** The run started by this Slack message (the review a thread hangs under), for "second pass" mentions in that thread. */
+  runForSlackMessage(channel: string, ts: string): Run | null {
+    return (
+      this.db
+        .select()
+        .from(runs)
+        .where(
+          and(
+            sql`json_extract(${runs.context}, '$.slack_channel') = ${channel}`,
+            sql`json_extract(${runs.context}, '$.slack_ts') = ${ts}`,
+            sql`json_extract(${runs.context}, '$.pr_url') is not null`,
+          ),
+        )
+        .orderBy(desc(runs.createdAt))
+        .get() ?? null
+    );
+  }
+
+  /** Runs whose thread is still running as far as we know; re-watched after a restart. */
+  listUnsettledRuns(): Run[] {
+    return this.db.select().from(runs).where(eq(runs.status, "started")).all();
   }
 }

@@ -15,6 +15,27 @@
       "when": 1789749032731,
       "tag": "0001_dry_mulholland_black",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789751071795,
+      "tag": "0002_redundant_smiling_tiger",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789754737077,
+      "tag": "0003_rule_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789754737369,
+      "tag": "0004_drop_rule_event",
+      "breakpoints": true
     }
   ]
 }

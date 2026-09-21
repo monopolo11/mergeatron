@@ -6,7 +6,7 @@ import type { Rule, Run } from "../../src/rules.ts";
 
 const ALL = "__all__";
 
-/** Live list of webhook deliveries that matched a rule, newest first. */
+/** Live list of deliveries that matched a rule, newest first. Settled runs show the thread's final reply. */
 export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]; webhookUrl: string }) {
   const [filter, setFilter] = useState(ALL);
   const visible = filter === ALL ? runs : runs.filter((run) => run.ruleId === filter);
@@ -28,7 +28,7 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
 
       {visible.length === 0 ? (
         <p className="p-3 text-xs text-muted-foreground">
-          Nothing yet. Point a GitHub webhook at <code className="font-mono">{webhookUrl}</code> and matching deliveries show up here.
+          Nothing yet. Point a GitHub webhook at <code className="font-mono">{webhookUrl}</code> or post a PR link in a connected Slack channel and matching deliveries show up here.
         </p>
       ) : (
         <ul className="text-xs">
@@ -38,13 +38,13 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
               <li key={run.id} className="grid gap-0.5 border-b px-3 py-2">
                 <div className="flex items-baseline gap-2">
                   <span className="truncate font-medium text-foreground">{ruleNames.get(run.ruleId) ?? run.ruleName}</span>
-                  <span className={cn("ml-auto", run.status === "started" && "text-ok", run.status === "skipped" && "text-warn", run.status === "failed" && "text-destructive")}>
-                    {run.status}
+                  <span className={cn("ml-auto", run.status === "started" && "text-primary", run.status === "done" && "text-ok", run.status === "skipped" && "text-warn", run.status === "failed" && "text-destructive")}>
+                    {run.status === "started" ? "running" : run.status}
                   </span>
                 </div>
                 <div className="text-muted-foreground">
                   <span title={new Date(run.createdAt).toLocaleString()}>{timeAgo(run.createdAt)}</span>
-                  <span className="font-mono"> · {run.repo}{pr ? ` #${pr}` : ""}</span>
+                  <span className="font-mono"> · {run.repo || run.context?.slack_channel || run.event}{pr ? ` #${pr}` : ""}</span>
                 </div>
                 <div className={cn("break-words text-muted-foreground", run.status === "failed" && "text-destructive/90")}>
                   {run.detail}
@@ -55,6 +55,7 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
                     </>
                   )}
                 </div>
+                {run.result && <p className="line-clamp-3 break-words text-muted-foreground/80" title={run.result}>{run.result}</p>}
               </li>
             );
           })}

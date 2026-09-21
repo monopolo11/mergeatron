@@ -16,9 +16,10 @@ const ModelSelectionSchema = z.object({
 export const RuleInput = z.object({
   name: z.string().trim().min(1),
   enabled: z.boolean().default(true),
-  event: z.string().trim().min(1),
+  events: z.array(z.string().trim().min(1)).min(1),
   repos: z.array(z.string().trim().min(1)).default([]),
   reviewer: z.string().trim().min(1).nullable().default(null),
+  channel: z.string().trim().min(1).nullable().default(null),
   projectId: z.string().trim().min(1).nullable().default(null),
   workspace: z.enum(WORKSPACE_MODES).default("worktree"),
   model: ModelSelectionSchema.nullable().default(null),

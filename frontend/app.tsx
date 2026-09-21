@@ -18,9 +18,10 @@ You are checked out on the PR head. Read the diff against {{pr_base}}, then look
 const NEW_RULE: RuleInput = {
   name: "New rule",
   enabled: true,
-  event: "pull_request.review_requested",
+  events: ["pull_request.review_requested"],
   repos: [],
   reviewer: null,
+  channel: null,
   projectId: null,
   workspace: "worktree",
   model: null,
@@ -77,7 +78,7 @@ function App() {
 
   const selected = rules?.find((rule) => rule.id === selectedId) ?? null;
   const webhookUrl = `${location.origin}/webhooks/github`;
-  const startedCount = (ruleId: string) => runs.filter((run) => run.ruleId === ruleId && run.status === "started").length;
+  const startedCount = (ruleId: string) => runs.filter((run) => run.ruleId === ruleId && (run.status === "started" || run.status === "done")).length;
 
   return (
     <div className="grid h-screen grid-rows-[44px_1fr] overflow-hidden">
@@ -90,7 +91,7 @@ function App() {
             <Button size="xs" variant="ghost" className="text-primary normal-case tracking-normal" onClick={() => void createRule()}>+ New</Button>
           </div>
           {rules && rules.length === 0 && (
-            <p className="p-3 text-xs text-muted-foreground">No rules yet. A rule maps one GitHub event to a T3 thread with your prompt.</p>
+            <p className="p-3 text-xs text-muted-foreground">No rules yet. A rule maps GitHub or Slack events to a T3 thread with your prompt.</p>
           )}
           <ul>
             {rules?.map((rule) => (
@@ -109,7 +110,7 @@ function App() {
                 <span className="truncate">{rule.name || "Untitled rule"}</span>
                 <span className="font-mono text-[11px] text-muted-foreground">{startedCount(rule.id) || ""}</span>
                 <span className="col-start-2 col-end-4 truncate font-mono text-[11px] text-muted-foreground">
-                  {rule.event} · {rule.repos.length ? rule.repos.join(", ") : "any repo"}
+                  {rule.events.join(", ") || "no events"} · {rule.repos.length ? rule.repos.join(", ") : "any repo"}
                 </span>
               </li>
             ))}
@@ -122,7 +123,7 @@ function App() {
           ) : rules && rules.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
               <p className="max-w-sm text-muted-foreground">
-                Create a rule, point a GitHub webhook at <code className="font-mono text-xs">{webhookUrl}</code>, and matching events open threads in T3 Code.
+                Create a rule, point a GitHub webhook at <code className="font-mono text-xs">{webhookUrl}</code> or connect a Slack app, and matching events open threads in T3 Code.
               </p>
               <Button size="sm" onClick={() => void createRule()}>Create first rule</Button>
             </div>

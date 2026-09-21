@@ -1,0 +1,30 @@
+# Slack app manifest for the orchestrator's Slack trigger (Socket Mode, no public URL).
+# Create the app at https://api.slack.com/apps -> Create New App -> From a manifest
+# and paste this file. Then: Basic Information -> App-Level Tokens -> generate one
+# with scope connections:write (SLACK_APP_TOKEN); Install to Workspace and copy the
+# bot token from OAuth & Permissions (SLACK_BOT_TOKEN).
+display_information:
+  name: T3 Review
+  description: Starts a T3 Code review thread when a GitHub PR link is posted, replies with the result.
+  background_color: "#1f1f1f"
+features:
+  bot_user:
+    display_name: T3 Review
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read # slack.app_mention rules
+      - channels:history # slack.message rules in public channels
+      - groups:history # slack.message rules in private channels
+      - chat:write # threaded reply with the review
+      - reactions:write # eyes / check / x on the triggering message
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

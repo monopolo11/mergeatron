@@ -12,6 +12,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/Header";
@@ -19,7 +21,7 @@ import { timeAgo } from "@/lib/api";
 import { saveLabel, useAutosave } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import type { Rule, RuleInput, Run } from "../../src/rules.ts";
-import { SUGGESTED_EVENTS, TEMPLATE_VARS, WORKSPACE_MODES } from "../../src/shared.ts";
+import { SLACK_EVENT_PREFIX, SUGGESTED_EVENTS, TEMPLATE_VARS, WORKSPACE_MODES } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
 import { ModelPicker } from "@/components/ModelPicker";
 import { renderTemplate } from "../../src/template.ts";
@@ -53,17 +55,21 @@ export function RuleEditor({
       ...draft,
       repos: reposText.split(",").map((s) => s.trim()).filter(Boolean),
       reviewer: draft.reviewer?.trim() || null,
+      channel: draft.channel?.trim() || null,
     }),
     [draft, reposText],
   );
   const { state, error } = useAutosave(value, (input) => onSave(id, input));
 
   const patch = (partial: Partial<RuleInput>) => setDraft((d) => ({ ...d, ...partial }));
-  const isPullRequestEvent = draft.event.startsWith("pull_request");
+  const isSlackEvent = draft.events.some((event) => event.startsWith(SLACK_EVENT_PREFIX));
+  const isGitHubEvent = draft.events.some((event) => !event.startsWith(SLACK_EVENT_PREFIX));
+  // Slack messages carry PR variables once a PR link is found in the text.
+  const showsPullRequestVars = draft.events.some((event) => event.startsWith("pull_request")) || isSlackEvent;
   const project = projects.find((p) => p.id === draft.projectId);
 
   // Preview against the freshest delivery this rule (or this event) has seen.
-  const sample = runs.find((run) => run.context && (run.ruleId === id || run.event === draft.event));
+  const sample = runs.find((run) => run.context && (run.ruleId === id || draft.events.includes(run.event)));
   const preview = sample?.context ? renderTemplate(draft.prompt, sample.context) : null;
 
   const insertVar = (name: string) => {
@@ -95,19 +101,32 @@ export function RuleEditor({
           <Field label="Name">
             <Input className="h-8" autoFocus={rule.name === "New rule"} value={draft.name} onChange={(e) => patch({ name: e.target.value })} />
           </Field>
-          <Field label="Event" hint="<event>.<action> from the GitHub webhook">
-            <Input className={cn("h-8", mono)} list="events" value={draft.event} onChange={(e) => patch({ event: e.target.value })} />
-            <datalist id="events">
-              {SUGGESTED_EVENTS.map((event) => <option key={event.key} value={event.key}>{event.label}</option>)}
-            </datalist>
+          <Field
+            label="Events"
+            hint={
+              draft.events.includes("slack.message")
+                ? "slack.message fires only for channel messages that link a GitHub PR."
+                : draft.events.includes("slack.second_pass")
+                  ? "slack.second_pass fires when the bot is mentioned with 'second pass' inside a review thread. Use {{previous_result}} to hand the agent the first review."
+                  : "Any selected event starts this rule."
+            }
+          >
+            <EventPicker value={draft.events} onChange={(events) => patch({ events })} />
           </Field>
-          <Field label="Repositories" hint="owner/name, comma separated. Empty matches every repository.">
+          <Field label="Repositories" hint={isSlackEvent ? "owner/name of the PR linked in the message, comma separated. Empty matches any." : "owner/name, comma separated. Empty matches every repository."}>
             <Input className={cn("h-8", mono)} value={reposText} onChange={(e) => setReposText(e.target.value)} placeholder="owner/name" />
           </Field>
-          <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
-            <Input className="h-8" value={draft.reviewer ?? ""} onChange={(e) => patch({ reviewer: e.target.value || null })} placeholder="login or team slug" />
-          </Field>
-          <Field label="T3 project" hint={draft.projectId ? undefined : "Matched by comparing the webhook repository to each project's git remote."}>
+          {isSlackEvent && (
+            <Field label="Slack channel" hint="Channel id (C…), from the channel's details. Empty means any channel the bot is in.">
+              <Input className={cn("h-8", mono)} value={draft.channel ?? ""} onChange={(e) => patch({ channel: e.target.value || null })} placeholder="C0123456789" />
+            </Field>
+          )}
+          {isGitHubEvent && (
+            <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
+              <Input className="h-8" value={draft.reviewer ?? ""} onChange={(e) => patch({ reviewer: e.target.value || null })} placeholder="login or team slug" />
+            </Field>
+          )}
+          <Field label="T3 project" hint={draft.projectId ? undefined : isSlackEvent ? "Matched by comparing the PR linked in the message to each project's git remote." : "Matched by comparing the webhook repository to each project's git remote."}>
             <Select value={draft.projectId ?? AUTO_PROJECT} onValueChange={(v) => patch({ projectId: v === AUTO_PROJECT ? null : v })}>
               <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -152,10 +171,10 @@ export function RuleEditor({
           </Field>
         </div>
 
-        <Field label="Prompt" hint="First message of the thread. Click a variable to insert it at the cursor.">
+        <Field label="Prompt" hint={`First message of the thread. Click a variable to insert it at the cursor.${isSlackEvent ? " The final reply is posted back to the Slack thread." : ""}`}>
           <Textarea ref={promptRef} className={cn("min-h-52 leading-relaxed", mono)} value={draft.prompt} onChange={(e) => patch({ prompt: e.target.value })} />
           <div className="mt-1 flex flex-wrap gap-x-1 gap-y-0.5">
-            {TEMPLATE_VARS.filter((name) => isPullRequestEvent || !name.startsWith("pr_")).map((name) => (
+            {TEMPLATE_VARS.filter((name) => (showsPullRequestVars || !name.startsWith("pr_")) && (isSlackEvent || !name.startsWith("slack_"))).map((name) => (
               <Button key={name} type="button" variant="ghost" size="xs" className={cn("h-5 px-1 text-primary", mono)} onClick={() => insertVar(name)}>
                 {`{{${name}}}`}
               </Button>
@@ -172,6 +191,50 @@ export function RuleEditor({
         </Field>
       </div>
     </div>
+  );
+}
+
+const EVENT_GROUPS = [
+  { label: "GitHub", events: SUGGESTED_EVENTS.filter((e) => !e.key.startsWith(SLACK_EVENT_PREFIX)) },
+  { label: "Slack", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(SLACK_EVENT_PREFIX)) },
+];
+
+/** Multi-select of event keys. Keys saved via the API that are not in the list stay selected and show under "Custom". */
+function EventPicker({ value, onChange }: { value: string[]; onChange: (events: string[]) => void }) {
+  const known = new Set<string>(SUGGESTED_EVENTS.map((e) => e.key));
+  const custom = value.filter((key) => !known.has(key)).map((key) => ({ key, label: key }));
+  const groups = custom.length > 0 ? [...EVENT_GROUPS, { label: "Custom", events: custom }] : EVENT_GROUPS;
+  const toggle = (key: string, checked: boolean) => {
+    const next = checked ? [...value, key] : value.filter((k) => k !== key);
+    if (next.length > 0) onChange(next);
+  };
+  const labelOf = (key: string) => SUGGESTED_EVENTS.find((e) => e.key === key)?.label ?? key;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-8 w-full justify-start truncate font-normal">
+          <span className="truncate">{value.map(labelOf).join(", ") || "Pick events"}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-96 p-2">
+        {groups.map((group) => (
+          <div key={group.label} className="mb-2 last:mb-0">
+            <div className="px-2 py-1 text-[11px] tracking-wide text-muted-foreground uppercase">{group.label}</div>
+            {group.events.map((event) => {
+              const checked = value.includes(event.key);
+              return (
+                <label key={event.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-muted/60">
+                  <Checkbox checked={checked} disabled={checked && value.length === 1} onCheckedChange={(v) => toggle(event.key, v === true)} />
+                  <span>{event.label}</span>
+                  <span className={cn("ml-auto text-muted-foreground", mono)}>{event.key}</span>
+                </label>
+              );
+            })}
+          </div>
+        ))}
+      </PopoverContent>
+    </Popover>
   );
 }
 

@@ -1,10 +1,13 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import index from "./frontend/index.html";
-import { verifySignature } from "./src/github.ts";
+import { resumeWatchers, watchCompletion } from "./src/completion.ts";
+import { eventKey, extractContext, verifySignature } from "./src/github.ts";
 import { handleDelivery } from "./src/handler.ts";
 import { openDatabase } from "./src/db/index.ts";
 import { RuleInput, SettingsInput, TestThreadInput } from "./src/rules.ts";
+import { handleSlackEvent } from "./src/secondPass.ts";
+import { SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
 import { T3Client } from "./src/t3.ts";
 
@@ -31,9 +34,25 @@ if (!webhookSecret) {
   console.warn("GITHUB_WEBHOOK_SECRET is not set: webhook signatures will not be verified.");
 }
 
+const slackAppToken = process.env.SLACK_APP_TOKEN;
+const slackBotToken = process.env.SLACK_BOT_TOKEN;
+if ((slackAppToken || slackBotToken) && !(slackAppToken && slackBotToken)) {
+  console.warn("Slack needs both SLACK_APP_TOKEN and SLACK_BOT_TOKEN; the Slack trigger is disabled.");
+}
+
 const t3 = new T3Client(await resolveT3Origin(), token);
 const store = new Store(openDatabase(process.env.DATA_PATH ?? "data/orchestrator.sqlite"));
-const deps = { store, t3 };
+const deps = { store, t3, slack: slackAppToken && slackBotToken ? new SlackClient(slackBotToken) : null };
+resumeWatchers(deps);
+
+/**
+ * Slack events arrive over Socket Mode, not a webhook: each `event_callback`
+ * is treated like a delivery keyed `slack.<type>`; a "second pass" mention in
+ * a review thread re-reviews that PR in a new T3 thread. Slack redelivers
+ * unacked envelopes; `event_id` dedupes those.
+ */
+const slackSocket = slackAppToken && deps.slack ? new SlackSocket(slackAppToken, (payload) => handleSlackEvent(deps, payload)) : null;
+slackSocket?.start();
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const badRequest = (error: unknown) =>
@@ -50,6 +69,7 @@ const server = Bun.serve({
       return json({
         t3: { origin: t3.origin, environment },
         webhookSecretConfigured: Boolean(webhookSecret),
+        slack: slackSocket ? (slackSocket.connected ? "connected" : "connecting") : "off",
       });
     },
 
@@ -88,6 +108,7 @@ const server = Bun.serve({
           threadId: null,
           threadUrl: null,
           context: null,
+          result: null,
         });
         try {
           const thread = await t3.startThread({
@@ -102,6 +123,7 @@ const server = Bun.serve({
             pullRequest: null,
           });
           store.updateRun(run.id, { status: "started", detail: `checkout ${project.workspaceRoot}`, ...thread });
+          watchCompletion(deps, { ...run, threadId: thread.threadId });
           return json(thread, 201);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -161,8 +183,8 @@ const server = Bun.serve({
         }
         const result = handleDelivery(deps, {
           deliveryId: req.headers.get("x-github-delivery") ?? crypto.randomUUID(),
-          eventName,
-          payload,
+          event: eventKey(eventName, payload),
+          ctx: extractContext(eventName, payload),
         });
         console.log(`[webhook] ${result.event} ${result.repo} -> ${result.matched.length} rule(s)`);
         return json(result, 202);
@@ -172,4 +194,4 @@ const server = Bun.serve({
 });
 
 console.log(`GitHub -> T3 Code orchestrator on ${server.url}`);
-console.log(`T3 Code at ${t3.origin}; webhook endpoint POST ${server.url}webhooks/github`);
+console.log(`T3 Code at ${t3.origin}; webhook endpoint POST ${server.url}webhooks/github; Slack socket ${slackSocket ? "starting" : "off"}`);

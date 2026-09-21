@@ -43,7 +43,7 @@ export function Header({
   const environment = status?.t3.environment ?? null;
   return (
     <header className="flex h-11 items-center gap-5 border-b px-4">
-      <span className="text-[13px] font-semibold">GitHub → T3 Code</span>
+      <span className="text-[13px] font-semibold">GitHub + Slack → T3 Code</span>
       <div className="flex flex-1 items-center gap-4 text-xs text-muted-foreground">
         <span title={status?.t3.origin}>
           <Dot tone={environment ? "ok" : status ? "err" : "idle"} />
@@ -52,6 +52,10 @@ export function Header({
         <span>
           <Dot tone={status ? (status.webhookSecretConfigured ? "ok" : "warn") : "idle"} />
           {status && !status.webhookSecretConfigured ? "webhook secret not set" : "webhook secret"}
+        </span>
+        <span title={status?.slack === "off" ? "Set SLACK_APP_TOKEN and SLACK_BOT_TOKEN" : "Socket Mode connection"}>
+          <Dot tone={status ? (status.slack === "connected" ? "ok" : status.slack === "connecting" ? "warn" : "idle") : "idle"} />
+          {status ? `slack ${status.slack}` : "slack"}
         </span>
         <code className="font-mono text-[11.5px]">POST {location.origin}/webhooks/github</code>
         <span>{projects.length} projects</span>

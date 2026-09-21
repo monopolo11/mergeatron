@@ -16,9 +16,10 @@ export const RUNTIME_MODES = [
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /**
- * GitHub webhook events the UI suggests. The key is `<event>.<action>` (or
- * just `<event>` when the payload has no action). Any other key can be typed
- * by hand; matching is a plain string compare.
+ * Events offered by the rule editor's picker. GitHub keys are `<event>.<action>`
+ * (or just `<event>` when the payload has no action); Slack keys are
+ * `slack.<type>`. Matching is a plain string compare, so a rule saved with a
+ * key outside this list (via the API) still works and shows under "Custom".
  */
 export const SUGGESTED_EVENTS = [
   { key: "pull_request.review_requested", label: "PR: review requested" },
@@ -33,9 +34,15 @@ export const SUGGESTED_EVENTS = [
   { key: "issues.opened", label: "Issue: opened" },
   { key: "issues.assigned", label: "Issue: assigned" },
   { key: "issues.labeled", label: "Issue: labeled" },
+  { key: "slack.app_mention", label: "Slack: bot mentioned" },
+  { key: "slack.message", label: "Slack: PR link posted in channel" },
+  { key: "slack.second_pass", label: "Slack: 'second pass' mention in a review thread" },
 ] as const;
 
-/** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts. */
+/** Rules whose event starts with this prefix are fed by the Slack webhook, not GitHub. */
+export const SLACK_EVENT_PREFIX = "slack.";
+
+/** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts and slack.ts. */
 export const TEMPLATE_VARS = [
   "repo",
   "repo_url",
@@ -64,5 +71,12 @@ export const TEMPLATE_VARS = [
   "review_body",
   "review_author",
   "label",
+  "slack_channel",
+  "slack_user",
+  "slack_ts",
+  "slack_text",
+  "slack_thread_ts",
+  "previous_result",
+  "previous_thread_url",
 ] as const;
 export type TemplateVar = (typeof TEMPLATE_VARS)[number];

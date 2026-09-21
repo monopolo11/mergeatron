@@ -59,6 +59,17 @@ export type T3Environment = {
   serverVersion: string;
 };
 
+/** The slice of a thread snapshot needed to tell when a turn settles and what it said. */
+export type T3ThreadTurn = {
+  latestTurn: {
+    turnId: string;
+    state: "running" | "interrupted" | "completed" | "error";
+    assistantMessageId: string | null;
+  } | null;
+  messages: Array<{ id: string; role: "user" | "assistant" | "system"; text: string; turnId: string | null }>;
+  session: { lastError: string | null } | null;
+};
+
 export type StartThreadInput = {
   project: Pick<T3Project, "id" | "workspaceRoot">;
   title: string;
@@ -81,6 +92,17 @@ type RpcMessage =
   | { _tag: "Exit"; requestId: string; exit: RpcExit }
   | { _tag: "Defect"; defect: unknown }
   | { _tag: string };
+
+/** Non-2xx reply from T3's HTTP API; `status` lets callers tell "gone" (404) from "flaky". */
+export class T3HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "T3HttpError";
+  }
+}
 
 const DISPATCH_TIMEOUT_MS = 10 * 60_000;
 
@@ -132,6 +154,15 @@ export class T3Client {
     }));
     this.providersCache = { at: Date.now(), value };
     return value;
+  }
+
+  /** Latest turn of a thread with only that turn's messages (`turnLimit=1`). */
+  async thread(threadId: string): Promise<T3ThreadTurn> {
+    const snapshot = await this.request<{ thread: T3ThreadTurn }>(
+      "GET",
+      `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`,
+    );
+    return snapshot.thread;
   }
 
   /** Creates the thread (and worktree, when asked), sends the prompt, links the PR. */
@@ -273,7 +304,7 @@ export class T3Client {
       headers: options.authenticated === false ? {} : { authorization: `Bearer ${this.token}` },
     });
     if (!response.ok) {
-      throw new Error(`T3 ${method} ${path} failed: ${response.status} ${await response.text()}`);
+      throw new T3HttpError(response.status, `T3 ${method} ${path} failed: ${response.status} ${await response.text()}`);
     }
     return (await response.json()) as T;
   }
