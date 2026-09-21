@@ -66,9 +66,13 @@ needs no tunnel and keeps working when a quick tunnel's URL changes.
    channel (`/invite @T3 Review`).
 
 Behind a TLS-inspecting proxy (Cloudflare WARP, Zscaler, ...) `fetch` to slack.com
-fails with `self signed certificate in certificate chain`. Export the CA bundle in
-the shell that launches `bun` (`SSL_CERT_FILE` or `NODE_EXTRA_CA_CERTS`); Bun reads
-these at startup, so putting them in `.env` does nothing.
+fails with `self signed certificate in certificate chain` and the header stays on
+`slack connecting`. Bun reads `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS` at startup, so
+export the CA bundle in the shell that launches `bun` (`.env` is too late for a manual
+run). For the launchd service, `bun service.ts install` copies whichever of these is
+set in the installing shell or in `.env` into the agent's plist, since launchd does
+not source your shell profile. Re-run `install` (not `restart`) when the bundle path
+changes.
 
 Then add a rule with event `slack.app_mention` (fires when the bot is mentioned)
 or `slack.message` (human messages in the channel that link a GitHub PR; set the
@@ -105,7 +109,8 @@ bun service.ts install
 `~/Library/Logs/t3-review-orchestrator/orchestrator.log`, `restart` picks up
 code or `.env` changes, and `uninstall` stops it and removes the agent. The agent
 runs `bun index.ts` from this directory, so `.env` and `data/` are the same ones
-used when running by hand. Reinstall after moving the checkout.
+used when running by hand. Reinstall after moving the checkout or changing the CA
+bundle path (see the Slack section).
 
 ## Rules
 

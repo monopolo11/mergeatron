@@ -187,7 +187,7 @@ export class SlackSocket {
       console.warn(`[slack] connections.open failed: ${message}`);
       if (/certificate/i.test(message)) {
         console.warn(
-          "[slack] TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup, so export the CA bundle in the shell that launches bun; .env is too late.",
+          "[slack] TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup: export the CA bundle in the shell that launches bun, or set it in .env and re-run `bun service.ts install` so launchd gets it.",
         );
       }
       return this.retry();

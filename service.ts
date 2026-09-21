@@ -9,7 +9,8 @@
  *   bun service.ts logs        tail the service log
  *
  * The agent runs `bun index.ts` from this directory, so `.env` and the default
- * `data/` path resolve exactly as they do when run by hand.
+ * `data/` path resolve exactly as they do when run by hand. `install` also copies
+ * SSL_CERT_FILE / NODE_EXTRA_CA_CERTS into the plist; re-run it when they change.
  */
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,23 @@ const plistPath = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 const logDir = join(homedir(), "Library", "Logs", "t3-review-orchestrator");
 const logPath = join(logDir, "orchestrator.log");
 const domain = `gui/${process.getuid?.() ?? 501}`;
+
+/**
+ * CA bundle variables Bun reads at startup. launchd starts the agent with none of
+ * the shell's environment, so behind a TLS-inspecting proxy these must be baked
+ * into the plist or Slack never gets past "connecting". Taken from the installing
+ * shell, or from `.env` (Bun loads it when running this script from the project).
+ */
+const CA_ENV_KEYS = ["SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"] as const;
+
+function caCertEnv(): Record<string, string> {
+  return Object.fromEntries(
+    CA_ENV_KEYS.flatMap((key) => {
+      const value = process.env[key];
+      return value ? [[key, value]] : [];
+    }),
+  );
+}
 
 type PlistValue = string | number | boolean | PlistValue[] | { [key: string]: PlistValue };
 
@@ -56,6 +74,7 @@ function agentPlist(): string {
       NODE_ENV: "production",
       HOME: homedir(),
       PATH: [dirname(bunPath), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(":"),
+      ...caCertEnv(),
     },
   };
   return [
@@ -72,16 +91,32 @@ async function isLoaded(): Promise<boolean> {
   return (await $`launchctl print ${domain}/${LABEL}`.quiet().nothrow()).exitCode === 0;
 }
 
+/** `launchctl bootout` returns before the agent is gone; bootstrapping too early fails with I/O error 5. */
+async function bootoutAndWait(): Promise<void> {
+  await $`launchctl bootout ${domain}/${LABEL}`.quiet();
+  for (let attempt = 0; attempt < 50 && (await isLoaded()); attempt++) await Bun.sleep(100);
+}
+
 async function install() {
   if (!(await Bun.file(join(projectDir, ".env")).exists())) {
     console.warn("No .env in project directory; the service will exit until T3_TOKEN is set (see README).");
   }
+  const caEnv = caCertEnv();
+  for (const [key, path] of Object.entries(caEnv)) {
+    if (!(await Bun.file(path).exists())) throw new Error(`${key} points to a missing file: ${path}`);
+  }
   mkdirSync(dirname(plistPath), { recursive: true });
   mkdirSync(logDir, { recursive: true });
   await Bun.write(plistPath, agentPlist());
-  if (await isLoaded()) await $`launchctl bootout ${domain}/${LABEL}`.quiet();
+  if (await isLoaded()) await bootoutAndWait();
   await $`launchctl bootstrap ${domain} ${plistPath}`;
-  console.log(`Installed ${LABEL}\n  plist ${plistPath}\n  logs  ${logPath}`);
+  const caLine = Object.entries(caEnv)
+    .map(([key, path]) => `  ${key.toLowerCase().replaceAll("_", " ")} ${path}`)
+    .join("\n");
+  console.log(
+    [`Installed ${LABEL}`, `  plist ${plistPath}`, `  logs  ${logPath}`, caLine || "  no CA bundle baked in (SSL_CERT_FILE / NODE_EXTRA_CA_CERTS unset)"]
+      .join("\n"),
+  );
 }
 
 async function uninstall() {
