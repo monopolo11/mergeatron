@@ -59,15 +59,24 @@ export type T3Environment = {
   serverVersion: string;
 };
 
-/** The slice of a thread snapshot needed to tell when a turn settles and what it said. */
+/**
+ * The slice of a thread snapshot needed to tell when the agent is done and
+ * what it said. `activities` carry background tasks (subagents, background
+ * shells) that outlive the turn that started them: T3 begins a new turn when
+ * they report back, so a completed turn alone does not mean the thread is done.
+ */
 export type T3ThreadTurn = {
   latestTurn: {
     turnId: string;
     state: "running" | "interrupted" | "completed" | "error";
+    completedAt: string | null;
     assistantMessageId: string | null;
   } | null;
   messages: Array<{ id: string; role: "user" | "assistant" | "system"; text: string; turnId: string | null }>;
-  session: { lastError: string | null } | null;
+  /** T3 keeps the last 500 entries plus a few pinned kinds. */
+  activities: Array<{ kind: string; turnId: string | null; createdAt: string; payload: unknown }>;
+  /** `stopped` means the provider process exited: nothing more will happen. */
+  session: { status: string; activeTurnId: string | null; lastError: string | null } | null;
 };
 
 export type StartThreadInput = {
