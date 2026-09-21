@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import { Header } from "@/components/Header";
+import { Analytics } from "@/components/Analytics";
+import { Header, type View } from "@/components/Header";
 import { RuleEditor } from "@/components/RuleEditor";
 import { RunLog } from "@/components/RunLog";
 import { Button } from "@/components/ui/button";
@@ -36,8 +37,14 @@ function App() {
   const [rules, setRules] = useState<Rule[] | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [view, setView] = useState<View>("rules");
+  // Bumped on every run refresh so the analytics view refetches on the same cadence.
+  const [runsVersion, setRunsVersion] = useState(0);
 
-  const refreshRuns = () => api<Run[]>("/api/runs").then(setRuns).catch(() => {});
+  const refreshRuns = () =>
+    api<Run[]>("/api/runs")
+      .then((all) => { setRuns(all); setRunsVersion((v) => v + 1); })
+      .catch(() => {});
 
   useEffect(() => {
     api<Status>("/api/status").then(setStatus).catch(() => {});
@@ -82,7 +89,7 @@ function App() {
 
   return (
     <div className="grid h-screen grid-rows-[44px_1fr] overflow-hidden">
-      <Header status={status} projects={projects} providers={providers} settings={settings} onSettingsSaved={setSettings} onThreadStarted={refreshRuns} />
+      <Header status={status} projects={projects} providers={providers} settings={settings} view={view} onViewChange={setView} onSettingsSaved={setSettings} onThreadStarted={refreshRuns} />
 
       <div className="grid grid-cols-[280px_1fr] overflow-hidden xl:grid-cols-[300px_1fr_380px]">
         <aside className="overflow-auto border-r">
@@ -118,7 +125,9 @@ function App() {
         </aside>
 
         <main className="overflow-auto">
-          {selected ? (
+          {view === "analytics" ? (
+            <Analytics refreshKey={runsVersion} />
+          ) : selected ? (
             <RuleEditor key={selected.id} rule={selected} projects={projects} providers={providers} runs={runs} onSave={saveRule} onDelete={deleteRule} />
           ) : rules && rules.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">

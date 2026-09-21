@@ -1,6 +1,7 @@
 import { watchCompletion } from "./completion.ts";
 import type { WebhookContext } from "./github.ts";
 import type { Rule } from "./rules.ts";
+import { SLACK_EVENT_PREFIX, type RunSource } from "./shared.ts";
 import { slackOrigin, type SlackClient } from "./slack.ts";
 import type { Store } from "./store.ts";
 import { renderTemplate } from "./template.ts";
@@ -89,6 +90,8 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
         deliveryId: delivery.deliveryId,
         event: delivery.event,
         repo,
+        source: runSource(delivery.event),
+        author: runAuthor(delivery.ctx),
         status: "skipped",
         detail,
         threadId: active.threadId,
@@ -111,6 +114,8 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
       deliveryId: delivery.deliveryId,
       event: delivery.event,
       repo: delivery.ctx.repo,
+      source: runSource(delivery.event),
+      author: runAuthor(delivery.ctx),
       status: "started",
       detail: "starting thread",
       threadId: null,
@@ -120,7 +125,8 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
     });
     void context()
       .then((ctx) => {
-        deps.store.updateRun(run.id, { context: ctx });
+        // Slack deliveries only learn the PR author once `complete` has run.
+        deps.store.updateRun(run.id, { context: ctx, author: runAuthor(ctx) });
         return startThreadForRule(deps, rule, ctx);
       })
       .then(
@@ -213,6 +219,16 @@ function notifySlack(
 
 function skipped(detail: string) {
   return { status: "skipped" as const, detail, threadId: null, threadUrl: null };
+}
+
+/** Trigger that produced a delivery, from its rule key. */
+function runSource(event: string): RunSource {
+  return event.startsWith(SLACK_EVENT_PREFIX) ? "slack" : "github";
+}
+
+/** PR or issue author the review is for; falls back to whoever caused the event. */
+function runAuthor(ctx: WebhookContext): string | null {
+  return ctx.pr_author ?? ctx.issue_author ?? ctx.sender ?? null;
 }
 
 function sameName(a: string, b: string) {

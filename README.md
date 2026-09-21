@@ -92,6 +92,21 @@ agent's final message is posted as a threaded reply and the reaction flips to ‚ú
 (or ‚ùå with the error). T3 thread links are never posted to Slack; they show in
 the run log.
 
+## Run as a service (macOS)
+
+To keep the orchestrator running without a terminal, install it as a launchd
+user agent. It starts at login and launchd restarts it if it crashes:
+
+```sh
+bun service.ts install
+```
+
+`bun service.ts status` shows pid and last exit code, `logs` tails
+`~/Library/Logs/t3-review-orchestrator/orchestrator.log`, `restart` picks up
+code or `.env` changes, and `uninstall` stops it and removes the agent. The agent
+runs `bun index.ts` from this directory, so `.env` and `data/` are the same ones
+used when running by hand. Reinstall after moving the checkout.
+
 ## Rules
 
 Each rule has:
@@ -124,6 +139,13 @@ it is still running, further triggers for that PR (any rule, any source) are
 logged as skipped and, on Slack, answered with a short note. Runs show in the right-hand log as `running` until the
 thread's first turn settles, then `done` with the agent's final message (or
 `failed`). Watchers survive restarts: runs still `running` are re-polled on boot.
+
+## Analytics
+
+**Analytics** in the header swaps the editor for run counts: totals, runs per PR
+or issue author, and runs per trigger source, each split into running, done,
+skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode) and
+`manual` (connection test). The same data is at `GET /api/analytics`.
 
 ## Development
 

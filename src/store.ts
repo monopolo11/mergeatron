@@ -1,7 +1,18 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, count, desc, eq, sql } from "drizzle-orm";
 import type { AppDatabase } from "./db/index.ts";
 import { rules, runs, settings } from "./db/schema.ts";
 import { DEFAULT_SETTINGS, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
+import type { RunSource } from "./shared.ts";
+
+/** Run counts split by status, for one grouping key. */
+export type RunCounts = { total: number; started: number; done: number; skipped: number; failed: number };
+
+export type Analytics = {
+  all: RunCounts;
+  /** Connection tests carry no author and are left out of this list. */
+  byAuthor: (RunCounts & { author: string })[];
+  bySource: (RunCounts & { source: RunSource })[];
+};
 
 /** Typed access to rules, global settings, and the run log. */
 export class Store {
@@ -138,4 +149,34 @@ export class Store {
   listUnsettledRuns(): Run[] {
     return this.db.select().from(runs).where(eq(runs.status, "started")).all();
   }
+
+  /** Aggregates over every run: totals, per PR/issue author, and per trigger source. */
+  analytics(): Analytics {
+    const counts = {
+      total: count(),
+      started: statusCount("started"),
+      done: statusCount("done"),
+      skipped: statusCount("skipped"),
+      failed: statusCount("failed"),
+    };
+    const all = this.db.select(counts).from(runs).get() ?? { total: 0, started: 0, done: 0, skipped: 0, failed: 0 };
+    const byAuthor = this.db
+      .select({ author: sql<string>`${runs.author}`, ...counts })
+      .from(runs)
+      .where(sql`${runs.author} is not null`)
+      .groupBy(runs.author)
+      .orderBy(desc(counts.total), runs.author)
+      .all();
+    const bySource = this.db
+      .select({ source: runs.source, ...counts })
+      .from(runs)
+      .groupBy(runs.source)
+      .orderBy(desc(counts.total), runs.source)
+      .all();
+    return { all, byAuthor, bySource };
+  }
+}
+
+function statusCount(status: Run["status"]) {
+  return sql<number>`count(case when ${runs.status} = ${status} then 1 end)`.mapWith(Number);
 }

@@ -9,7 +9,7 @@ const mention = { repo: "", event: "slack.second_pass", slack_channel: "C1", sla
 describe("resolveSecondPassTarget", () => {
   test("takes the PR from the run that started the thread", () => {
     const store = new Store(openDatabase(":memory:"));
-    store.recordRun({ ruleId: "r", ruleName: "review", deliveryId: "d", event: "slack.message", repo: pr.repo, status: "done", detail: "", threadId: "t", threadUrl: "u", context: { ...pr, slack_channel: "C1", slack_ts: "1.0" }, result: "first pass" });
+    store.recordRun({ ruleId: "r", ruleName: "review", deliveryId: "d", event: "slack.message", repo: pr.repo, source: "slack", author: "alice", status: "done", detail: "", threadId: "t", threadUrl: "u", context: { ...pr, slack_channel: "C1", slack_ts: "1.0" }, result: "first pass" });
     const ctx = { ...mention };
     expect(resolveSecondPassTarget(store, ctx)).toBeNull();
     expect(ctx).toMatchObject(pr);

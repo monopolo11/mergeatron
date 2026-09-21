@@ -95,7 +95,7 @@ describe("handleDelivery", () => {
     const ctx = { repo: "acme/widgets", pr_number: "42", pr_url: "https://github.com/acme/widgets/pull/42" };
     store.recordRun({
       ruleId: "other-rule", ruleName: "github review", deliveryId: "d1", event: "pull_request.review_requested", repo: "Acme/Widgets",
-      status: "started", detail: "", threadId: "t1", threadUrl: "http://t3/t1", context: ctx, result: null,
+      source: "github", author: "alice", status: "started", detail: "", threadId: "t1", threadUrl: "http://t3/t1", context: ctx, result: null,
     });
     // T3 must never be reached: the lock is decided before any thread starts.
     const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;

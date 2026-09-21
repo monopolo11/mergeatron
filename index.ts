@@ -103,6 +103,8 @@ const server = Bun.serve({
           deliveryId: crypto.randomUUID(),
           event: "manual.test",
           repo: project.title,
+          source: "manual",
+          author: null,
           status: "started",
           detail: "starting thread",
           threadId: null,
@@ -164,6 +166,8 @@ const server = Bun.serve({
     },
 
     "/api/runs": () => json(store.listRuns()),
+
+    "/api/analytics": () => json(store.analytics()),
 
     "/webhooks/github": {
       POST: async (req) => {

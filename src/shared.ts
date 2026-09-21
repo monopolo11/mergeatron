@@ -16,6 +16,13 @@ export const RUNTIME_MODES = [
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /**
+ * How a run was triggered: `github` is the webhook endpoint, `slack` the Socket
+ * Mode connection, `manual` the connection test in the header.
+ */
+export const RUN_SOURCES = ["github", "slack", "manual"] as const;
+export type RunSource = (typeof RUN_SOURCES)[number];
+
+/**
  * Events offered by the rule editor's picker. GitHub keys are `<event>.<action>`
  * (or just `<event>` when the payload has no action); Slack keys are
  * `slack.<type>`. Matching is a plain string compare, so a rule saved with a

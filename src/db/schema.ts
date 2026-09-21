@@ -1,5 +1,5 @@
 import { integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
-import { RUNTIME_MODES, WORKSPACE_MODES } from "../shared.ts";
+import { RUNTIME_MODES, RUN_SOURCES, WORKSPACE_MODES } from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
 
@@ -45,6 +45,10 @@ export const runs = sqliteTable(
     deliveryId: text("delivery_id").notNull(),
     event: text().notNull(),
     repo: text().notNull(),
+    /** Which trigger produced the run; see RUN_SOURCES. */
+    source: text({ enum: RUN_SOURCES }).notNull().default("github"),
+    /** PR or issue author the review is for. Null for connection tests. */
+    author: text(),
     status: text({ enum: ["started", "done", "skipped", "failed"] }).notNull(),
     detail: text().notNull().default(""),
     threadId: text("thread_id"),
