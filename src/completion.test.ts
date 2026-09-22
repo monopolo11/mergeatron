@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { QUIET_MS, openTasks, threadOutcome } from "./completion.ts";
+import { QUIET_MS, openTasks, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
+import { SlackApiError } from "./slack.ts";
 import type { T3ThreadTurn } from "./t3.ts";
 
 const T0 = Date.parse("2026-09-21T22:56:00.000Z");
@@ -86,5 +87,52 @@ describe("threadOutcome", () => {
     expect(threadOutcome(interrupted, T0)?.detail).toBe("turn interrupted");
     const stopped = thread({ session: { status: "stopped", activeTurnId: null, lastError: null } });
     expect(threadOutcome(stopped, T0)?.status).toBe("done");
+  });
+});
+
+describe("reviewVerdict", () => {
+  test("reads the GitHub review state the agent reports", () => {
+    expect(reviewVerdict("Review published: **APPROVE** on `33d5528`. https://github.com/acme/w/pull/1#pullrequestreview-9")).toBe("approved");
+    expect(reviewVerdict("Review posted.\n\n**Verdict: approve** (posted as COMMENT — GitHub refuses self-approval).")).toBe("approved");
+    expect(reviewVerdict("Review published on `ed8e6f5`: **CHANGES_REQUESTED**, 7 inline comments.")).toBe("changes_requested");
+    expect(reviewVerdict("Requested changes: two blockers. Happy to approve once fixed.")).toBe("changes_requested");
+  });
+
+  test("anything without a verdict, including no reply, is a comment", () => {
+    expect(reviewVerdict("Standing by for their reports.")).toBe("commented");
+    expect(reviewVerdict(null)).toBe("commented");
+  });
+});
+
+describe("reactVerdict", () => {
+  const origin = { channel: "C1", ts: "1.0", thread: "1.0" };
+  const recorder = (reject: string[] = []) => {
+    const names: string[] = [];
+    return {
+      names,
+      react: async (_origin: typeof origin, name: string) => {
+        names.push(name);
+        if (reject.includes(name)) throw new SlackApiError("reactions.add", "invalid_name");
+      },
+    };
+  };
+
+  test("maps failed, change request and approval to their emoji", async () => {
+    const slack = recorder();
+    await reactVerdict(slack, origin, { status: "failed", detail: "boom", result: null });
+    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" });
+    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" });
+    expect(slack.names).toEqual(["x", "repeat", "chayanne-approved"]);
+  });
+
+  test("falls back to a check mark when the workspace lacks the approval emoji", async () => {
+    const slack = recorder(["chayanne-approved"]);
+    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" });
+    expect(slack.names).toEqual(["chayanne-approved", "white_check_mark"]);
+  });
+
+  test("other Slack errors still surface", async () => {
+    const slack = recorder(["repeat"]);
+    await expect(reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" })).rejects.toThrow("invalid_name");
   });
 });

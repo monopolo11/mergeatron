@@ -93,7 +93,9 @@ threads, hence a mention. The result is posted in the same thread.
 A message that reaches the rules but matches none gets a ⏩ reaction so the poster
 knows it was seen and skipped. While the review runs the message gets an 👀 reaction. When the
 thread is done the agent's final message is posted as a threaded reply and the reaction flips
-to ✅ (or ❌ with the error). "Done" means the latest turn settled, no background task
+to the verdict read from that message: `:chayanne-approved:` (✅ if the workspace lacks that
+emoji) for an approval, 🔁 for a change request, 💬 when it states neither, ❌ when the review
+failed. "Done" means the latest turn settled, no background task
 (subagent or background shell) is still running, and the thread has been quiet for a minute:
 the review prompt fans out to subagents, so the first turn ends with "standing by" and T3 starts
 another turn when they report. T3 thread links are never posted to Slack; they show in the run log.

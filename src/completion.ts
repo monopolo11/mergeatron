@@ -1,5 +1,5 @@
 import type { Run } from "./rules.ts";
-import { slackOrigin, type SlackClient } from "./slack.ts";
+import { SlackApiError, slackOrigin, type SlackClient, type SlackOrigin } from "./slack.ts";
 import type { Store } from "./store.ts";
 import { T3HttpError, type T3Client, type T3ThreadTurn } from "./t3.ts";
 
@@ -127,7 +127,7 @@ export function resumeWatchers(deps: CompletionDeps): void {
   if (unsettled.length > 0) console.log(`[completion] watching ${unsettled.length} unsettled run(s)`);
 }
 
-/** Records the outcome and, for Slack runs, posts the verdict then flips 👀 to ✅ / ❌. */
+/** Records the outcome and, for Slack runs, posts the verdict then flips 👀 to the verdict's reaction. */
 function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void {
   deps.store.updateRun(runId, outcome);
   const run = deps.store.getRun(runId);
@@ -138,6 +138,49 @@ function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void
   void slack
     .reply(origin, body)
     .then(() => slack.unreact(origin, "eyes"))
-    .then(() => slack.react(origin, outcome.status === "done" ? "white_check_mark" : "x"))
+    .then(() => reactVerdict(slack, origin, outcome))
     .catch((error: unknown) => console.warn(`[slack] reply failed for run ${runId}:`, error instanceof Error ? error.message : error));
+}
+
+export type Verdict = "approved" | "changes_requested" | "commented";
+
+const CHANGES_REQUESTED = /\bchanges[_ ]requested\b|\brequest(?:ed|ing)?[_ ]changes\b/i;
+const APPROVED = /\bapproved?\b/i;
+
+/**
+ * Reads the review's verdict out of the agent's final message, which names the
+ * GitHub review state it published ("**APPROVE** on `33d5528`",
+ * "**CHANGES_REQUESTED**, 7 inline comments", "Verdict: approve"). A change
+ * request that says "approve once fixed" is still a change request, so that
+ * check wins. Anything else, including a reply that never reviewed, is
+ * `commented`.
+ */
+export function reviewVerdict(result: string | null): Verdict {
+  if (!result) return "commented";
+  if (CHANGES_REQUESTED.test(result)) return "changes_requested";
+  if (APPROVED.test(result)) return "approved";
+  return "commented";
+}
+
+/**
+ * Reaction per outcome on the triggering message: ❌ failed, 🔁 changes
+ * requested, 💬 no verdict, and the workspace's `chayanne-approved` for an
+ * approval, or ✅ where that emoji does not exist.
+ */
+const VERDICT_REACTION: Record<Verdict, string> = {
+  approved: "chayanne-approved",
+  changes_requested: "repeat",
+  commented: "speech_balloon",
+};
+const APPROVED_FALLBACK = "white_check_mark";
+
+export async function reactVerdict(slack: Pick<SlackClient, "react">, origin: SlackOrigin, outcome: TurnOutcome): Promise<void> {
+  if (outcome.status === "failed") return slack.react(origin, "x");
+  const verdict = reviewVerdict(outcome.result);
+  try {
+    await slack.react(origin, VERDICT_REACTION[verdict]);
+  } catch (error) {
+    if (verdict !== "approved" || !(error instanceof SlackApiError) || error.code !== "invalid_name") throw error;
+    await slack.react(origin, APPROVED_FALLBACK);
+  }
 }

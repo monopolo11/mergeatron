@@ -255,7 +255,10 @@ const REPLY_MAX_CHARS = 12_000;
 export class SlackClient {
   constructor(private readonly token: string) {}
 
-  /** Adds an emoji reaction to the triggering message. Already-reacted is not an error. */
+  /**
+   * Adds an emoji reaction to the triggering message. Already-reacted is not
+   * an error; an emoji the workspace lacks throws `SlackApiError` `invalid_name`.
+   */
   async react(origin: SlackOrigin, name: string): Promise<void> {
     await this.call("reactions.add", { channel: origin.channel, timestamp: origin.ts, name }, ["already_reacted"]);
   }
@@ -283,9 +286,20 @@ export class SlackClient {
     });
     const result = (await response.json()) as { ok: boolean; error?: string } & T;
     if (!result.ok && !ignoreErrors.includes(result.error ?? "")) {
-      throw new Error(`Slack ${method} failed: ${result.error ?? response.status}`);
+      throw new SlackApiError(method, result.error ?? String(response.status));
     }
     return result;
+  }
+}
+
+/** A Web API call Slack rejected; `code` is Slack's error string (`invalid_name`, `channel_not_found`, ...). */
+export class SlackApiError extends Error {
+  constructor(
+    method: string,
+    readonly code: string,
+  ) {
+    super(`Slack ${method} failed: ${code}`);
+    this.name = "SlackApiError";
   }
 }
 

@@ -18,7 +18,7 @@ oauth_config:
       - channels:history # slack.message rules in public channels
       - groups:history # slack.message rules in private channels
       - chat:write # threaded reply with the review
-      - reactions:write # eyes / check / x on the triggering message
+      - reactions:write # eyes while running, then the verdict emoji on the triggering message
 settings:
   event_subscriptions:
     bot_events:
