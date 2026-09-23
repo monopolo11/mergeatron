@@ -128,13 +128,20 @@ describe("handleDelivery", () => {
     store.saveSettings({ ...store.getSettings(), githubLogin: "Bernardo" });
     const rule = store.createRule({ ...base, skipSelfReview: true });
     const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
-    const ctx = { repo: "acme/widgets", pr_number: "7", pr_author: "bernardo" };
+    const ctx = { repo: "acme/widgets", pr_number: "7", pr_author: "bernardo", slack_channel: "C1", slack_ts: "1.0" };
+    const reactions: string[] = [];
+    const slack = {
+      react: (_: unknown, name: string) => (reactions.push(name), Promise.resolve()),
+      reply: () => Promise.resolve(),
+    } as unknown as SlackClient;
 
-    handleDelivery({ store, t3, slack: null }, { deliveryId: "d4", event: base.events[0]!, ctx });
+    handleDelivery({ store, t3, slack }, { deliveryId: "d4", event: base.events[0]!, ctx });
     await Bun.sleep(0);
     const run = store.listRuns().find((r) => r.deliveryId === "d4");
     expect(run).toMatchObject({ ruleId: rule.id, status: "skipped", threadId: null });
     expect(run?.detail).toContain("self review");
+    // A skip is not a failure: ⏩, never ❌.
+    expect(reactions).toEqual(["fast_forward"]);
 
     // Rule opted out, or no login configured: not our concern, so T3 is reached and the mock rejects.
     store.updateRule(rule.id, { ...base, skipSelfReview: false });

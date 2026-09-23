@@ -21,8 +21,12 @@ export type Delivery = {
   complete?: (ctx: WebhookContext) => Promise<WebhookContext>;
 };
 
-/** Reaction on a Slack message that reached the rules but matched none. */
-const UNMATCHED_REACTION = "fast_forward";
+/**
+ * Reaction on a Slack message that was seen but deliberately not reviewed: no
+ * rule matched, or a rule skipped it (own PR, no T3 project). Distinct from
+ * the ❌ that marks a failure.
+ */
+const SKIPPED_REACTION = "fast_forward";
 
 const log = logger("rules");
 
@@ -91,7 +95,7 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
     // Slack only: tell the poster the message was seen but no rule wanted it.
     const origin = slackOrigin(delivery.ctx);
     if (origin && deps.slack) {
-      deps.slack.react(origin, UNMATCHED_REACTION).catch((error: unknown) => log.warn("slack react failed", { ...at, error }));
+      deps.slack.react(origin, SKIPPED_REACTION).catch((error: unknown) => log.warn("slack react failed", { ...at, error }));
     }
     return { event: delivery.event, repo: delivery.ctx.repo, matched: [] };
   }
@@ -227,8 +231,9 @@ async function startThreadForRule(deps: HandlerDeps, rule: Rule, ctx: WebhookCon
 
 /**
  * Acknowledges a Slack-triggered run on the triggering message: eyes while it
- * runs, a threaded note if it never did. "Already running" gets no x: nothing
- * went wrong. T3 thread links stay out of Slack.
+ * runs, a threaded note if it never did, ⏩ when a rule skipped it and ❌ when
+ * starting failed. "Already running" gets no reaction: nothing went wrong.
+ * T3 thread links stay out of Slack.
  */
 function notifySlack(
   deps: HandlerDeps,
@@ -243,7 +248,9 @@ function notifySlack(
       ? slack.react(origin, "eyes")
       : result.alreadyRunning
         ? slack.reply(origin, `Review not started: ${result.detail}.`)
-        : slack.reply(origin, `Review not started: ${result.detail}`).then(() => slack.react(origin, "x"));
+        : slack
+            .reply(origin, `Review not started: ${result.detail}`)
+            .then(() => slack.react(origin, result.status === "skipped" ? SKIPPED_REACTION : "x"));
   action.catch((error: unknown) => log.warn("slack notify failed", { channel: origin.channel, ts: origin.ts, error }));
 }
 
