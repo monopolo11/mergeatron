@@ -1,4 +1,7 @@
 import type { WebhookContext } from "./github.ts";
+import { logger } from "./log.ts";
+
+const log = logger("github");
 
 /**
  * Fills in the PR template variables GitHub's webhook would have carried
@@ -12,7 +15,7 @@ export async function withPullRequestDetails(ctx: WebhookContext): Promise<Webho
   if (!ctx.repo || !ctx.pr_number || ctx.pr_head) return ctx;
   const result = await Bun.$`gh api repos/${ctx.repo}/pulls/${ctx.pr_number}`.quiet().nothrow();
   if (result.exitCode !== 0) {
-    console.warn(`[github] gh api failed for ${ctx.repo}#${ctx.pr_number}: ${result.stderr.toString().trim()}`);
+    log.warn("gh api failed; running without PR details", { repo: ctx.repo, pr: ctx.pr_number, error: result.stderr.toString().trim() });
     return ctx;
   }
   const pr = result.json() as {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { turnOutcome } from "./completion.ts";
-import { cleanSlackText, extractSlackContext, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn } from "./slack.ts";
+import { cleanSlackText, extractSlackContext, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
 
 const mention = {
   type: "event_callback",
@@ -26,25 +26,25 @@ describe("socketMessage", () => {
 
 describe("slackEvent", () => {
   test("unwraps event_callback envelopes", () => {
-    expect(slackEvent(mention)?.type).toBe("app_mention");
+    expect(slackEvent(mention)).toMatchObject({ type: "app_mention" });
   });
 
   test("ignores verification, bot posts and subtyped messages", () => {
-    expect(slackEvent({ type: "url_verification", challenge: "x" })).toBeNull();
-    expect(slackEvent({ ...mention, event: { ...mention.event, bot_id: "B1" } })).toBeNull();
-    expect(slackEvent({ ...mention, event: { ...mention.event, subtype: "message_changed" } })).toBeNull();
+    expect(slackEvent({ type: "url_verification", challenge: "x" })).toEqual({ ignored: "not an event_callback (url_verification)" });
+    expect(slackEvent({ ...mention, event: { ...mention.event, bot_id: "B1" } })).toEqual({ ignored: "posted by a bot" });
+    expect(slackEvent({ ...mention, event: { ...mention.event, subtype: "message_changed" } })).toEqual({ ignored: "message subtype message_changed" });
   });
 
   test("ignores replies inside threads unless the bot is mentioned", () => {
     const reply = { ...mention.event, type: "message", thread_ts: "1726660000.000001" };
-    expect(slackEvent({ ...mention, event: reply })).toBeNull();
-    expect(slackEvent({ ...mention, event: { ...reply, type: "app_mention" } })?.type).toBe("app_mention");
+    expect(slackEvent({ ...mention, event: reply })).toHaveProperty("ignored");
+    expect(slackEvent({ ...mention, event: { ...reply, type: "app_mention" } })).toMatchObject({ type: "app_mention" });
   });
 });
 
 describe("extractSlackContext", () => {
   test("finds the PR in the message and keeps the Slack origin", () => {
-    const ctx = extractSlackContext(slackEvent(mention)!);
+    const ctx = extractSlackContext(slackEvent(mention) as SlackEvent);
     expect(ctx).toMatchObject({
       repo: "acme/widgets",
       event: "slack.app_mention",
@@ -79,9 +79,9 @@ describe("extractSlackContext", () => {
 describe("slackDelivery", () => {
   test("channel messages need a PR link; mentions always go through", () => {
     const message = (text: string) => ({ ...mention, event: { ...mention.event, type: "message", text } });
-    expect(slackDelivery(message("morning all"))).toBeNull();
-    expect(slackDelivery(message("ptal https://github.com/acme/widgets/pull/7"))?.event).toBe("slack.message");
-    expect(slackDelivery({ ...mention, event: { ...mention.event, text: "<@U0BOT> hi" } })?.event).toBe("slack.app_mention");
+    expect(slackDelivery(message("morning all"))).toEqual({ ignored: "channel message has no GitHub PR link" });
+    expect(slackDelivery(message("ptal https://github.com/acme/widgets/pull/7"))).toMatchObject({ event: "slack.message" });
+    expect(slackDelivery({ ...mention, event: { ...mention.event, text: "<@U0BOT> hi" } })).toMatchObject({ event: "slack.app_mention" });
   });
 });
 

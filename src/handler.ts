@@ -1,6 +1,7 @@
 import { watchCompletion } from "./completion.ts";
 import type { WebhookContext } from "./github.ts";
 import type { Rule } from "./rules.ts";
+import { logger } from "./log.ts";
 import { SLACK_EVENT_PREFIX, type RunSource } from "./shared.ts";
 import { slackOrigin, type SlackClient } from "./slack.ts";
 import type { Store } from "./store.ts";
@@ -23,6 +24,8 @@ export type Delivery = {
 /** Reaction on a Slack message that reached the rules but matched none. */
 const UNMATCHED_REACTION = "fast_forward";
 
+const log = logger("rules");
+
 export type HandlerDeps = {
   store: Store;
   t3: T3Client;
@@ -31,13 +34,23 @@ export type HandlerDeps = {
 
 /** Rules that apply to this delivery: event, repository, reviewer and channel filters all pass. */
 export function matchRules(rules: Rule[], key: string, ctx: WebhookContext): Rule[] {
-  return rules.filter((rule) => {
-    if (!rule.enabled || !rule.events.includes(key)) return false;
-    if (rule.repos.length > 0 && !rule.repos.some((repo) => sameName(repo, ctx.repo))) return false;
-    if (rule.reviewer && !sameName(rule.reviewer, ctx.requested_reviewer ?? "")) return false;
-    if (rule.channel && !sameName(rule.channel, ctx.slack_channel ?? "")) return false;
-    return true;
-  });
+  return rules.filter((rule) => ruleMismatch(rule, key, ctx) === null);
+}
+
+/** Why a rule does not apply to this delivery, or null when it does. Logged for deliveries no rule wanted. */
+export function ruleMismatch(rule: Rule, key: string, ctx: WebhookContext): string | null {
+  if (!rule.enabled) return "disabled";
+  if (!rule.events.includes(key)) return `listens to ${rule.events.join(", ")}`;
+  if (rule.repos.length > 0 && !rule.repos.some((repo) => sameName(repo, ctx.repo))) {
+    return `repo ${ctx.repo || "(none)"} not in ${rule.repos.join(", ")}`;
+  }
+  if (rule.reviewer && !sameName(rule.reviewer, ctx.requested_reviewer ?? "")) {
+    return `requested reviewer ${ctx.requested_reviewer ?? "(none)"} is not ${rule.reviewer}`;
+  }
+  if (rule.channel && !sameName(rule.channel, ctx.slack_channel ?? "")) {
+    return `channel ${ctx.slack_channel ?? "(none)"} is not ${rule.channel}`;
+  }
+  return null;
 }
 
 /** Explicit project first, otherwise the project whose git remote points at this repository. */
@@ -68,21 +81,30 @@ export function hostsRepository(project: T3Project, repo: string): boolean {
  * running thread instead of opening another.
  */
 export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
-  const candidates = matchRules(deps.store.listRules(), delivery.event, delivery.ctx);
+  const rules = deps.store.listRules();
+  const candidates = matchRules(rules, delivery.event, delivery.ctx);
+  const { repo, pr_number: prNumber } = delivery.ctx;
+  const at = { delivery: delivery.deliveryId, event: delivery.event, repo: repo || undefined, pr: prNumber };
   if (candidates.length === 0) {
+    const why = rules.map((rule) => `${rule.name}: ${ruleMismatch(rule, delivery.event, delivery.ctx)}`).join("; ");
+    log.info("no rule matched", { ...at, why: why || "no rules configured" });
     // Slack only: tell the poster the message was seen but no rule wanted it.
     const origin = slackOrigin(delivery.ctx);
     if (origin && deps.slack) {
-      deps.slack.react(origin, UNMATCHED_REACTION).catch((error: unknown) => console.warn("[slack] react failed:", error instanceof Error ? error.message : error));
+      deps.slack.react(origin, UNMATCHED_REACTION).catch((error: unknown) => log.warn("slack react failed", { ...at, error }));
     }
     return { event: delivery.event, repo: delivery.ctx.repo, matched: [] };
   }
   const matched = candidates.filter((rule) => !deps.store.hasRun(delivery.deliveryId, rule.id));
-  const { repo, pr_number: prNumber } = delivery.ctx;
+  if (matched.length < candidates.length) {
+    const handled = candidates.filter((rule) => !matched.includes(rule)).map((rule) => rule.name);
+    log.info("redelivery ignored: rule already ran for this delivery", { ...at, rules: handled.join(", ") });
+  }
   if (matched.length > 0 && repo && prNumber) withPreviousReview(deps.store, delivery.ctx, repo, prNumber);
   const active = matched.length > 0 && repo && prNumber ? deps.store.activeRunForPullRequest(repo, prNumber) : null;
   if (active) {
     const detail = `review already running for ${repo}#${prNumber} (${active.ruleName})`;
+    log.info("skipped: review already running", { ...at, rules: matched.map((rule) => rule.name).join(", "), thread: active.threadId });
     for (const rule of matched) {
       deps.store.recordRun({
         ruleId: rule.id,
@@ -123,6 +145,8 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
       context: delivery.ctx,
       result: null,
     });
+    const runAt = { ...at, rule: rule.name, run: run.id };
+    log.info("rule matched, starting thread", runAt);
     void context()
       .then((ctx) => {
         // Slack deliveries only learn the PR author once `complete` has run.
@@ -131,12 +155,14 @@ export function handleDelivery(deps: HandlerDeps, delivery: Delivery) {
       })
       .then(
         (result) => {
+          log.info(`run ${result.status}`, { ...runAt, detail: result.detail, thread: result.threadId ?? undefined });
           deps.store.updateRun(run.id, result);
           if (result.status === "started") watchCompletion(deps, { ...run, threadId: result.threadId });
           notifySlack(deps, delivery.ctx, result);
         },
         (error: unknown) => {
           const detail = error instanceof Error ? error.message : String(error);
+          log.error("run failed", { ...runAt, error: detail });
           deps.store.updateRun(run.id, { status: "failed", detail, threadId: null, threadUrl: null });
           notifySlack(deps, delivery.ctx, { status: "failed", detail });
         },
@@ -218,7 +244,7 @@ function notifySlack(
       : result.alreadyRunning
         ? slack.reply(origin, `Review not started: ${result.detail}.`)
         : slack.reply(origin, `Review not started: ${result.detail}`).then(() => slack.react(origin, "x"));
-  action.catch((error: unknown) => console.warn("[slack] notify failed:", error instanceof Error ? error.message : error));
+  action.catch((error: unknown) => log.warn("slack notify failed", { channel: origin.channel, ts: origin.ts, error }));
 }
 
 function skipped(detail: string) {

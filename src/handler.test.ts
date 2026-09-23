@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "./db/index.ts";
-import { handleDelivery, hostsRepository, matchRules, resolveProject } from "./handler.ts";
+import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
 import type { Rule } from "./rules.ts";
 import { Store } from "./store.ts";
 import type { SlackClient } from "./slack.ts";
@@ -50,6 +50,13 @@ describe("matchRules", () => {
     expect(matchRules([{ ...base, reviewer: "Bernardo" }], base.events[0]!, ctx)).toHaveLength(1);
     expect(matchRules([{ ...base, reviewer: "someone" }], base.events[0]!, ctx)).toHaveLength(0);
     expect(matchRules([{ ...base, reviewer: "bernardo" }], base.events[0]!, { repo: "acme/widgets" })).toHaveLength(0);
+  });
+
+  test("ruleMismatch names the first filter that failed", () => {
+    expect(ruleMismatch(base, "pull_request.opened", ctx)).toBe("listens to pull_request.review_requested");
+    expect(ruleMismatch({ ...base, repos: ["acme/other"] }, base.events[0]!, ctx)).toBe("repo Acme/Widgets not in acme/other");
+    expect(ruleMismatch({ ...base, reviewer: "someone" }, base.events[0]!, ctx)).toBe("requested reviewer bernardo is not someone");
+    expect(ruleMismatch(base, base.events[0]!, ctx)).toBeNull();
   });
 });
 

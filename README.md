@@ -111,7 +111,9 @@ bun service.ts install
 ```
 
 `bun service.ts status` shows pid and last exit code, `logs` tails
-`~/Library/Logs/t3-review-orchestrator/orchestrator.log`, `restart` picks up
+`~/Library/Logs/t3-review-orchestrator/orchestrator.log` (one timestamped line per
+decision: every delivery received, each rule it did not match and why, skips,
+thread starts and verdicts; grep by `delivery=` or `run=`), `restart` picks up
 code or `.env` changes, and `uninstall` stops it and removes the agent. The agent
 runs `bun index.ts` from this directory, so `.env` and `data/` are the same ones
 used when running by hand. Reinstall after moving the checkout or changing the CA
@@ -150,7 +152,8 @@ thread for the same rule. A PR also gets one review at a time: while a run for
 it is still running, further triggers for that PR (any rule, any source) are
 logged as skipped and, on Slack, answered with a short note. Runs show in the right-hand log as `running` until the
 thread's first turn settles, then `done` with the agent's final message (or
-`failed`). Watchers survive restarts: runs still `running` are re-polled on boot.
+`failed`). A thread with no result after 3 hours is marked `failed`, which frees
+the PR for a new review. Watchers survive restarts: runs still `running` are re-polled on boot.
 
 ## Analytics
 

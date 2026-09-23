@@ -1,7 +1,10 @@
+import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { SlackApiError, slackOrigin, type SlackClient, type SlackOrigin } from "./slack.ts";
 import type { Store } from "./store.ts";
 import { T3HttpError, type T3Client, type T3ThreadTurn } from "./t3.ts";
+
+const log = logger("completion");
 
 export type CompletionDeps = {
   store: Store;
@@ -10,7 +13,7 @@ export type CompletionDeps = {
 };
 
 const POLL_MS = 5_000;
-/** A review that has run this long is not going to report back; stop polling. */
+/** A review that has run this long is not going to report back; fail it and stop polling. */
 const GIVE_UP_MS = 3 * 60 * 60_000;
 /** Time allowed for the turn to appear after the thread was created. */
 const TURN_APPEARS_MS = 2 * 60_000;
@@ -86,7 +89,8 @@ export function threadOutcome(thread: T3ThreadTurn, now = Date.now()): TurnOutco
 /**
  * Polls T3 until the thread is done, records the outcome on the run and, for
  * Slack-triggered runs, replies in the Slack thread. Fire and forget.
- * A 404 means the thread was deleted in T3: the run fails and polling stops,
+ * A 404 means the thread was deleted in T3, and a thread still busy after
+ * `GIVE_UP_MS` is abandoned: either way the run fails and polling stops,
  * which also releases the PR for a new review.
  */
 export function watchCompletion(deps: CompletionDeps, run: Pick<Run, "id" | "threadId" | "createdAt">): void {
@@ -94,6 +98,12 @@ export function watchCompletion(deps: CompletionDeps, run: Pick<Run, "id" | "thr
   const threadId = run.threadId;
   const startedAt = new Date(run.createdAt).getTime();
 
+  const pollAgain = (elapsed: number) => {
+    if (elapsed < GIVE_UP_MS) return void setTimeout(() => void poll(), POLL_MS);
+    const hours = GIVE_UP_MS / 3_600_000;
+    log.warn("gave up watching", { run: run.id, thread: threadId, hours });
+    settle(deps, run.id, { status: "failed", detail: `no result after ${hours}h`, result: null });
+  };
   const poll = async (): Promise<void> => {
     const elapsed = Date.now() - startedAt;
     let thread: T3ThreadTurn;
@@ -103,20 +113,19 @@ export function watchCompletion(deps: CompletionDeps, run: Pick<Run, "id" | "thr
       if (error instanceof T3HttpError && error.status === 404) {
         return settle(deps, run.id, { status: "failed", detail: "thread no longer exists in T3", result: null });
       }
-      console.warn(`[completion] snapshot failed for ${threadId}:`, error instanceof Error ? error.message : error);
-      if (elapsed < GIVE_UP_MS) setTimeout(() => void poll(), POLL_MS);
-      return;
+      log.warn("snapshot failed", { run: run.id, thread: threadId, error });
+      return pollAgain(elapsed);
     }
     const outcome = threadOutcome(thread);
     if (!outcome) {
       if (!thread.latestTurn && elapsed > TURN_APPEARS_MS) {
         return settle(deps, run.id, { status: "failed", detail: "thread never started a turn", result: null });
       }
-      if (elapsed < GIVE_UP_MS) setTimeout(() => void poll(), POLL_MS);
-      return;
+      return pollAgain(elapsed);
     }
     settle(deps, run.id, outcome);
   };
+  log.info("watching thread", { run: run.id, thread: threadId });
   setTimeout(() => void poll(), POLL_MS);
 }
 
@@ -124,11 +133,13 @@ export function watchCompletion(deps: CompletionDeps, run: Pick<Run, "id" | "thr
 export function resumeWatchers(deps: CompletionDeps): void {
   const unsettled = deps.store.listUnsettledRuns().filter((run) => run.threadId);
   for (const run of unsettled) watchCompletion(deps, run);
-  if (unsettled.length > 0) console.log(`[completion] watching ${unsettled.length} unsettled run(s)`);
+  if (unsettled.length > 0) log.info("resumed watchers for unsettled runs", { count: unsettled.length });
 }
 
 /** Records the outcome and, for Slack runs, posts the verdict then flips 👀 to the verdict's reaction. */
 function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void {
+  const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
+  log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
   deps.store.updateRun(runId, outcome);
   const run = deps.store.getRun(runId);
   const origin = slackOrigin(run?.context ?? null);
@@ -139,7 +150,7 @@ function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void
     .reply(origin, body)
     .then(() => slack.unreact(origin, "eyes"))
     .then(() => reactVerdict(slack, origin, outcome))
-    .catch((error: unknown) => console.warn(`[slack] reply failed for run ${runId}:`, error instanceof Error ? error.message : error));
+    .catch((error: unknown) => log.warn("slack reply failed", { run: runId, error }));
 }
 
 export type Verdict = "approved" | "changes_requested" | "commented";

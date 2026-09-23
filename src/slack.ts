@@ -1,4 +1,5 @@
 import type { WebhookContext } from "./github.ts";
+import { logger } from "./log.ts";
 
 /**
  * Slack side of the orchestrator: Socket Mode connection and event parsing on
@@ -11,6 +12,11 @@ import type { WebhookContext } from "./github.ts";
  */
 
 const SLACK_API = "https://slack.com/api";
+
+const log = logger("slack");
+
+/** An event that should not start anything, and why. Logged so a silent bot can be explained. */
+export type Ignored = { ignored: string };
 
 /** The parts of an Events API `event_callback` we read. */
 export type SlackEvent = {
@@ -25,17 +31,24 @@ export type SlackEvent = {
 };
 
 /**
- * Pulls the inner event out of an Events API envelope. Returns null for
- * anything that should not start a thread: URL verification, bot posts
- * (including our own replies), edits, joins and other subtyped messages, and
- * plain replies inside a Slack thread (mentions there still count).
+ * Pulls the inner event out of an Events API envelope. Ignores anything that
+ * should not start a thread: URL verification, bot posts (including our own
+ * replies), edits, joins and other subtyped messages, and plain replies
+ * inside a Slack thread (mentions there still count).
  */
-export function slackEvent(payload: unknown): SlackEvent | null {
-  if (!isRecord(payload) || payload.type !== "event_callback" || !isRecord(payload.event)) return null;
+export function slackEvent(payload: unknown): SlackEvent | Ignored {
+  if (!isRecord(payload) || payload.type !== "event_callback" || !isRecord(payload.event)) {
+    return { ignored: `not an event_callback (${isRecord(payload) ? String(payload.type) : typeof payload})` };
+  }
   const event = payload.event;
-  if (typeof event.type !== "string" || typeof event.channel !== "string" || typeof event.ts !== "string") return null;
-  if (event.bot_id || event.subtype) return null;
-  if (event.type === "message" && typeof event.thread_ts === "string" && event.thread_ts !== event.ts) return null;
+  if (typeof event.type !== "string" || typeof event.channel !== "string" || typeof event.ts !== "string") {
+    return { ignored: "event has no type, channel or ts" };
+  }
+  if (event.bot_id) return { ignored: "posted by a bot" };
+  if (event.subtype) return { ignored: `message subtype ${String(event.subtype)}` };
+  if (event.type === "message" && typeof event.thread_ts === "string" && event.thread_ts !== event.ts) {
+    return { ignored: "plain reply inside a Slack thread; mention the bot there instead" };
+  }
   return {
     type: event.type,
     channel: event.channel,
@@ -100,16 +113,16 @@ export function cleanSlackText(text: string): string {
 }
 
 /**
- * Reduces an Events API payload to a rule key and template variables, or null
- * when nothing should start. A channel message only counts as a review
+ * Reduces an Events API payload to a rule key and template variables, or the
+ * reason nothing should start. A channel message only counts as a review
  * request when it links a GitHub PR; a mention always reaches the rules so
  * the bot can say why it did nothing.
  */
-export function slackDelivery(payload: unknown): { event: string; ctx: WebhookContext } | null {
+export function slackDelivery(payload: unknown): { event: string; ctx: WebhookContext } | Ignored {
   const event = slackEvent(payload);
-  if (!event) return null;
+  if ("ignored" in event) return event;
   const ctx = extractSlackContext(event);
-  if (event.type === "message" && !ctx.pr_url) return null;
+  if (event.type === "message" && !ctx.pr_url) return { ignored: "channel message has no GitHub PR link" };
   return { event: ctx.event!, ctx };
 }
 
@@ -184,10 +197,10 @@ export class SlackSocket {
       url = await this.openUrl();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[slack] connections.open failed: ${message}`);
+      log.warn("connections.open failed", { error: message, retryInSeconds: this.backoffMs / 1000 });
       if (/certificate/i.test(message)) {
-        console.warn(
-          "[slack] TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup: export the CA bundle in the shell that launches bun, or set it in .env and re-run `bun service.ts install` so launchd gets it.",
+        log.warn(
+          "TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup: export the CA bundle in the shell that launches bun, or set it in .env and re-run `bun service.ts install` so launchd gets it.",
         );
       }
       return this.retry();
@@ -198,7 +211,7 @@ export class SlackSocket {
     ws.onopen = () => {
       this.connected = true;
       this.backoffMs = RECONNECT_MIN_MS;
-      console.log("[slack] socket connected");
+      log.info("socket connected");
     };
     ws.onmessage = (event) => {
       const message = socketMessage(String(event.data));
@@ -206,7 +219,7 @@ export class SlackSocket {
         case "hello":
           return;
         case "disconnect":
-          console.log(`[slack] disconnect requested (${message.reason}); reconnecting`);
+          log.info("disconnect requested, reconnecting", { reason: message.reason });
           ws.close();
           return;
         case "event":
@@ -218,13 +231,13 @@ export class SlackSocket {
           return;
       }
     };
-    ws.onerror = () => console.warn("[slack] socket error");
+    ws.onerror = () => log.warn("socket error");
     ws.onclose = (event) => {
       if (this.ws !== ws) return;
       this.connected = false;
       this.ws = null;
       if (!this.stopped) {
-        console.log(`[slack] socket closed (${event.code}); reconnecting in ${this.backoffMs / 1000}s`);
+        log.info("socket closed, reconnecting", { code: event.code, retryInSeconds: this.backoffMs / 1000 });
         this.retry();
       }
     };

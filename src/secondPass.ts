@@ -1,8 +1,11 @@
 import type { WebhookContext } from "./github.ts";
 import { handleDelivery, type HandlerDeps } from "./handler.ts";
+import { logger } from "./log.ts";
 import { withPullRequestDetails } from "./pulls.ts";
 import { SECOND_PASS_EVENT, slackDelivery, slackOrigin } from "./slack.ts";
 import type { Store } from "./store.ts";
+
+const log = logger("slack");
 
 /**
  * A "second pass" mention posted inside a review thread re-reviews that PR in
@@ -27,21 +30,26 @@ export function resolveSecondPassTarget(store: Store, ctx: WebhookContext): stri
 
 /** Turns one Socket Mode Events API payload into a delivery and starts matching rules. */
 export function handleSlackEvent(deps: HandlerDeps, payload: unknown): void {
+  const deliveryId = (payload as { event_id?: string }).event_id ?? crypto.randomUUID();
   const delivery = slackDelivery(payload);
-  if (!delivery) return;
-  const eventId = (payload as { event_id?: string }).event_id;
+  if ("ignored" in delivery) {
+    log.info("event ignored", { delivery: deliveryId, reason: delivery.ignored });
+    return;
+  }
+  const { ctx } = delivery;
+  log.info("event received", { delivery: deliveryId, event: delivery.event, channel: ctx.slack_channel, user: ctx.slack_user, pr: ctx.pr_url });
 
   if (delivery.event === SECOND_PASS_EVENT) {
-    const problem = resolveSecondPassTarget(deps.store, delivery.ctx);
+    const problem = resolveSecondPassTarget(deps.store, ctx);
     if (problem) {
-      const origin = slackOrigin(delivery.ctx);
+      log.info("second pass has no PR to review", { delivery: deliveryId, reason: problem });
+      const origin = slackOrigin(ctx);
       if (origin && deps.slack) {
-        deps.slack.reply(origin, problem).catch((error: unknown) => console.warn("[slack] reply failed:", error instanceof Error ? error.message : error));
+        deps.slack.reply(origin, problem).catch((error: unknown) => log.warn("reply failed", { delivery: deliveryId, error }));
       }
       return;
     }
   }
 
-  const result = handleDelivery(deps, { deliveryId: eventId ?? crypto.randomUUID(), ...delivery, complete: withPullRequestDetails });
-  console.log(`[slack] ${result.event} ${delivery.ctx.slack_channel} -> ${result.matched.length} rule(s)`);
+  handleDelivery(deps, { deliveryId, ...delivery, complete: withPullRequestDetails });
 }

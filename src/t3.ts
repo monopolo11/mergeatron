@@ -1,5 +1,8 @@
+import { logger } from "./log.ts";
 import type { ModelSelection } from "./rules.ts";
 import type { RuntimeMode } from "./shared.ts";
+
+const log = logger("t3");
 
 /**
  * Minimal client for a T3 Code environment.
@@ -234,7 +237,7 @@ export class T3Client {
         url: input.pullRequest.url,
         source: "manual",
       }).catch((error: unknown) => {
-        console.warn(`[t3] pull request link failed for thread ${threadId}:`, error);
+        log.warn("pull request link failed", { thread: threadId, error });
       });
     }
 

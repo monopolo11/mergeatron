@@ -4,6 +4,7 @@ import index from "./frontend/index.html";
 import { resumeWatchers, watchCompletion } from "./src/completion.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
 import { handleDelivery } from "./src/handler.ts";
+import { logger } from "./src/log.ts";
 import { openDatabase } from "./src/db/index.ts";
 import { RuleInput, SettingsInput, TestThreadInput } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
@@ -13,6 +14,8 @@ import { T3Client } from "./src/t3.ts";
 import { applyUpdate, checkForUpdate, restart } from "./src/update.ts";
 
 const t3Home = process.env.T3CODE_HOME ?? join(homedir(), ".t3");
+const log = logger("server");
+const webhookLog = logger("webhook");
 
 /** Falls back to the origin the running desktop/server wrote to server-runtime.json. */
 async function resolveT3Origin(): Promise<string> {
@@ -27,18 +30,18 @@ async function resolveT3Origin(): Promise<string> {
 
 const token = process.env.T3_TOKEN;
 if (!token) {
-  console.error("T3_TOKEN is required. Issue one with: npx t3 auth session issue --token-only --ttl 365d");
+  log.error("T3_TOKEN is required. Issue one with: npx t3 auth session issue --token-only --ttl 365d");
   process.exit(1);
 }
 const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
 if (!webhookSecret) {
-  console.warn("GITHUB_WEBHOOK_SECRET is not set: webhook signatures will not be verified.");
+  log.warn("GITHUB_WEBHOOK_SECRET is not set: webhook signatures will not be verified.");
 }
 
 const slackAppToken = process.env.SLACK_APP_TOKEN;
 const slackBotToken = process.env.SLACK_BOT_TOKEN;
 if ((slackAppToken || slackBotToken) && !(slackAppToken && slackBotToken)) {
-  console.warn("Slack needs both SLACK_APP_TOKEN and SLACK_BOT_TOKEN; the Slack trigger is disabled.");
+  log.warn("Slack needs both SLACK_APP_TOKEN and SLACK_BOT_TOKEN; the Slack trigger is disabled.");
 }
 
 const t3 = new T3Client(await resolveT3Origin(), token);
@@ -148,7 +151,7 @@ const server = Bun.serve({
       POST: async () => {
         try {
           const result = await applyUpdate();
-          console.log(`[update] ${result.from} -> ${result.to}, restart: ${result.restart}`);
+          log.info("update applied, restarting", { from: result.from, to: result.to, restart: result.restart });
           // Let the response leave before the process goes away.
           setTimeout(() => restart(result.restart), 500);
           return json(result);
@@ -195,30 +198,47 @@ const server = Bun.serve({
     "/webhooks/github": {
       POST: async (req) => {
         const rawBody = await req.text();
+        const deliveryId = req.headers.get("x-github-delivery") ?? crypto.randomUUID();
+        const eventName = req.headers.get("x-github-event");
         if (webhookSecret && !verifySignature(webhookSecret, rawBody, req.headers.get("x-hub-signature-256"))) {
+          webhookLog.warn("rejected: invalid signature", { delivery: deliveryId, github: eventName ?? undefined });
           return json({ error: "invalid signature" }, 401);
         }
-        const eventName = req.headers.get("x-github-event");
-        if (!eventName) return badRequest("missing X-GitHub-Event header");
-        if (eventName === "ping") return json({ ok: true });
+        if (!eventName) {
+          webhookLog.warn("rejected: missing X-GitHub-Event header", { delivery: deliveryId });
+          return badRequest("missing X-GitHub-Event header");
+        }
+        if (eventName === "ping") {
+          webhookLog.info("ping", { delivery: deliveryId });
+          return json({ ok: true });
+        }
 
         let payload: unknown;
         try {
           payload = JSON.parse(rawBody);
         } catch {
+          webhookLog.warn("rejected: body is not JSON", { delivery: deliveryId, github: eventName });
           return badRequest("body is not JSON");
         }
-        const result = handleDelivery(deps, {
-          deliveryId: req.headers.get("x-github-delivery") ?? crypto.randomUUID(),
-          event: eventKey(eventName, payload),
-          ctx: extractContext(eventName, payload),
+        const event = eventKey(eventName, payload);
+        const ctx = extractContext(eventName, payload);
+        webhookLog.info("event received", {
+          delivery: deliveryId,
+          event,
+          repo: ctx.repo || undefined,
+          pr: ctx.pr_number,
+          sender: ctx.sender,
+          reviewer: ctx.requested_reviewer,
         });
-        console.log(`[webhook] ${result.event} ${result.repo} -> ${result.matched.length} rule(s)`);
-        return json(result, 202);
+        return json(handleDelivery(deps, { deliveryId, event, ctx }), 202);
       },
     },
   },
 });
 
-console.log(`GitHub -> T3 Code orchestrator on ${server.url}`);
-console.log(`T3 Code at ${t3.origin}; webhook endpoint POST ${server.url}webhooks/github; Slack socket ${slackSocket ? "starting" : "off"}`);
+log.info("GitHub -> T3 Code orchestrator started", {
+  url: server.url.href,
+  t3: t3.origin,
+  webhook: `${server.url.href}webhooks/github`,
+  slack: slackSocket ? "starting" : "off",
+});
