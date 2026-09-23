@@ -139,7 +139,7 @@ const server = Bun.serve({
       },
     },
 
-    /** Compares the checkout with its upstream; POST fast-forwards, installs and restarts. */
+    /** Compares the running code with upstream; POST fast-forwards, installs and restarts. */
     "/api/update": {
       GET: async () => {
         try {
@@ -148,7 +148,9 @@ const server = Bun.serve({
           return json({ error: error instanceof Error ? error.message : String(error) }, 502);
         }
       },
-      POST: async () => {
+      POST: async (req, server) => {
+        // Fetching over SSH plus bun install outlasts the 10s default idle timeout.
+        server.timeout(req, 120);
         try {
           const result = await applyUpdate();
           log.info("update applied, restarting", { from: result.from, to: result.to, restart: result.restart });

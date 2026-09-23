@@ -165,7 +165,8 @@ skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode) and
 ## Updating
 
 The header shows **Update** when the tracked upstream (`origin/main` for a
-plain clone) has commits the checkout does not. The popover lists them and flags
+plain clone) has commits the running server does not, including ones already
+pulled by hand without a restart. The popover lists them and flags
 whether they bring migrations or dependency changes. **Update and restart**
 fast-forwards the checkout, runs `bun install` if `bun.lock` moved, then gets
 the new code running: the launchd agent is restarted by launchd, `bun --hot`

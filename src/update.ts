@@ -7,6 +7,12 @@ import { SERVICE_LABEL } from "./shared.ts";
 const root = join(import.meta.dir, "..");
 
 /**
+ * Commit this process loaded its code from. Updates compare against it rather
+ * than the checkout's HEAD, so a pull made outside the UI still offers a restart.
+ */
+const running = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root }).stdout.toString().trim();
+
+/**
  * How this process gets the new code running once it is pulled:
  * - `launchd`: exit non-zero; the agent's KeepAlive restarts it.
  * - `hot`: `bun --hot` reloads `index.ts` by itself when the pulled files land.
@@ -17,9 +23,10 @@ export type RestartMode = "launchd" | "hot" | "respawn";
 export type UpdateStatus = {
   /** Upstream the checkout tracks, e.g. `origin/main`. */
   upstream: string;
+  /** Commit the running process was started from. */
   current: string;
   latest: string;
-  /** Commits on upstream that are not here yet, newest first. */
+  /** Commits on upstream the running process lacks, newest first; some may already be pulled. */
   commits: { sha: string; subject: string }[];
   /** The update touches `drizzle/`; migrations run on the next start. */
   migrations: boolean;
@@ -62,23 +69,23 @@ export function summarize(
 
 const run = (...args: string[]) => $`git ${args}`.cwd(root).text();
 
-/** Fetches the tracked upstream and reports what a fast-forward would bring. */
+/** Fetches the tracked upstream and reports what updating the running process would bring. */
 export async function checkForUpdate(): Promise<UpdateStatus> {
   const upstream = (await run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")).trim();
   const [remote, ...branch] = upstream.split("/");
   await $`git fetch --quiet ${remote} ${branch.join("/")}`.cwd(root).quiet();
-  const [current, latest, log, changedFiles, dirty] = await Promise.all([
-    run("rev-parse", "HEAD"),
+  const [latest, log, changedFiles, dirty] = await Promise.all([
     run("rev-parse", upstream),
-    run("log", "--format=%h %s", "HEAD..@{u}"),
-    run("diff", "--name-only", "HEAD...@{u}"),
+    run("log", "--format=%h %s", `${running}..@{u}`),
+    run("diff", "--name-only", `${running}...@{u}`),
     run("status", "--porcelain", "--untracked-files=no"),
   ]);
-  return summarize({ upstream, current: current.trim(), latest: latest.trim(), log, changedFiles, dirty }, await restartMode());
+  return summarize({ upstream, current: running, latest: latest.trim(), log, changedFiles, dirty }, await restartMode());
 }
 
 /**
- * Fast-forwards to upstream and installs dependencies when the lockfile moved.
+ * Fast-forwards to the upstream just fetched (a no-op when the checkout was
+ * pulled already) and installs dependencies when the lockfile moved.
  * Migrations are not run here: `openDatabase` applies them when the new code
  * starts. Call `restart` once the HTTP response is on its way.
  */
@@ -86,7 +93,7 @@ export async function applyUpdate(): Promise<UpdateResult> {
   const status = await checkForUpdate();
   if (status.dirty) throw new Error("checkout has uncommitted changes; commit or discard them first");
   if (status.commits.length === 0) throw new Error("already up to date");
-  await $`git pull --ff-only --quiet`.cwd(root).quiet();
+  await $`git merge --ff-only --quiet @{u}`.cwd(root).quiet();
   if (status.dependencies) await $`bun install --frozen-lockfile`.cwd(root).quiet();
   return { from: status.current, to: status.latest, restart: status.restart };
 }
