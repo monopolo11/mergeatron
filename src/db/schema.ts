@@ -15,6 +15,8 @@ export const rules = sqliteTable("rules", {
   reviewer: text(),
   /** Slack rules only: fire for messages in this channel id. Null means any channel the bot is in. */
   channel: text(),
+  /** Skip PRs authored by the GitHub login in settings: reviewing your own PR is bad practice. */
+  skipSelfReview: integer("skip_self_review", { mode: "boolean" }).notNull().default(true),
   /** T3 project to open the thread in. Null means match by the repository's git remote. */
   projectId: text("project_id"),
   workspace: text({ enum: WORKSPACE_MODES }).notNull().default("worktree"),
@@ -30,6 +32,8 @@ export const settings = sqliteTable("settings", {
   id: integer().primaryKey(),
   model: text({ mode: "json" }).$type<ModelSelection>().notNull(),
   runtimeMode: text("runtime_mode", { enum: RUNTIME_MODES }).notNull(),
+  /** Your GitHub login, so rules can skip PRs you authored. Null disables the check. */
+  githubLogin: text("github_login"),
 });
 
 /**

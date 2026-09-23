@@ -155,6 +155,11 @@ function withPreviousReview(store: Store, ctx: WebhookContext, repo: string, prN
 }
 
 async function startThreadForRule(deps: HandlerDeps, rule: Rule, ctx: WebhookContext) {
+  const settings = deps.store.getSettings();
+  if (rule.skipSelfReview && ctx.pr_author && settings.githubLogin && sameName(ctx.pr_author, settings.githubLogin)) {
+    return skipped(`PR by ${ctx.pr_author} is your own; rule skips self review`);
+  }
+
   const project = resolveProject(rule, await deps.t3.projects(), ctx.repo);
   if (!project) {
     return skipped(
@@ -166,7 +171,6 @@ async function startThreadForRule(deps: HandlerDeps, rule: Rule, ctx: WebhookCon
     );
   }
 
-  const settings = deps.store.getSettings();
   const prNumber = ctx.pr_number ? Number(ctx.pr_number) : null;
   const baseBranch = ctx.pr_head ?? ctx.default_branch ?? null;
   const worktree = rule.workspace === "worktree";

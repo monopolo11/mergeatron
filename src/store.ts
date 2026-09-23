@@ -48,7 +48,9 @@ export class Store {
 
   getSettings(): Settings {
     const row = this.db.select().from(settings).where(eq(settings.id, 1)).get();
-    return row ? { model: row.model, runtimeMode: row.runtimeMode } : DEFAULT_SETTINGS;
+    if (!row) return DEFAULT_SETTINGS;
+    const { id, ...stored } = row;
+    return stored;
   }
 
   saveSettings(next: Settings): void {

@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Field } from "@/components/Header";
 import { timeAgo } from "@/lib/api";
@@ -35,6 +36,7 @@ export function RuleEditor({
   projects,
   providers,
   runs,
+  githubLogin,
   onSave,
   onDelete,
 }: {
@@ -42,6 +44,8 @@ export function RuleEditor({
   projects: T3Project[];
   providers: T3Provider[] | null;
   runs: Run[];
+  /** GitHub login from settings; null means "Skip my own PRs" has nothing to compare against. */
+  githubLogin: string | null;
   onSave: (id: string, input: RuleInput) => Promise<void>;
   onDelete: (rule: Rule) => Promise<void>;
 }) {
@@ -124,6 +128,17 @@ export function RuleEditor({
           {isGitHubEvent && (
             <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
               <Input className="h-8" value={draft.reviewer ?? ""} onChange={(e) => patch({ reviewer: e.target.value || null })} placeholder="login or team slug" />
+            </Field>
+          )}
+          {showsPullRequestVars && (
+            <Field
+              label="Skip my own PRs"
+              hint={githubLogin ? `PRs authored by ${githubLogin} are recorded as skipped.` : "Set your GitHub login in Settings to make this take effect."}
+            >
+              <label className="flex h-8 items-center gap-2 text-[13px]">
+                <Switch size="sm" checked={draft.skipSelfReview} onCheckedChange={(skipSelfReview) => patch({ skipSelfReview })} />
+                <span className={cn(!draft.skipSelfReview && "text-muted-foreground")}>{draft.skipSelfReview ? "Skipped" : "Reviewed like any other PR"}</span>
+              </label>
             </Field>
           )}
           <Field label="T3 project" hint={draft.projectId ? undefined : isSlackEvent ? "Matched by comparing the PR linked in the message to each project's git remote." : "Matched by comparing the webhook repository to each project's git remote."}>

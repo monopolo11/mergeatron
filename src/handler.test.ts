@@ -14,6 +14,7 @@ const base: Rule = {
   repos: [],
   reviewer: null,
   channel: null,
+  skipSelfReview: true,
   projectId: null,
   workspace: "worktree",
   model: null,
@@ -113,5 +114,25 @@ describe("handleDelivery", () => {
     expect(again.matched).toEqual([rule.name]);
     const run = store.listRuns().find((r) => r.deliveryId === "d3");
     expect(run?.context).toMatchObject({ previous_result: "first pass findings", previous_thread_url: "http://t3/t1" });
+  });
+
+  test("a PR authored by the configured GitHub login is skipped before T3 is reached", async () => {
+    const store = new Store(openDatabase(":memory:"));
+    store.saveSettings({ ...store.getSettings(), githubLogin: "Bernardo" });
+    const rule = store.createRule({ ...base, skipSelfReview: true });
+    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
+    const ctx = { repo: "acme/widgets", pr_number: "7", pr_author: "bernardo" };
+
+    handleDelivery({ store, t3, slack: null }, { deliveryId: "d4", event: base.events[0]!, ctx });
+    await Bun.sleep(0);
+    const run = store.listRuns().find((r) => r.deliveryId === "d4");
+    expect(run).toMatchObject({ ruleId: rule.id, status: "skipped", threadId: null });
+    expect(run?.detail).toContain("self review");
+
+    // Rule opted out, or no login configured: not our concern, so T3 is reached and the mock rejects.
+    store.updateRule(rule.id, { ...base, skipSelfReview: false });
+    handleDelivery({ store, t3, slack: null }, { deliveryId: "d5", event: base.events[0]!, ctx });
+    await Bun.sleep(0);
+    expect(store.listRuns().find((r) => r.deliveryId === "d5")).toMatchObject({ status: "failed", detail: "unexpected" });
   });
 });

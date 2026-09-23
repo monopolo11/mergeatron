@@ -16,8 +16,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { $ } from "bun";
+import { SERVICE_LABEL as LABEL } from "./src/shared.ts";
 
-const LABEL = "com.t3.review-orchestrator";
 const projectDir = import.meta.dir;
 const plistPath = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 const logDir = join(homedir(), "Library", "Logs", "t3-review-orchestrator");

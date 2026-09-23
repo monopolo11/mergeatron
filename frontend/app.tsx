@@ -23,6 +23,7 @@ const NEW_RULE: RuleInput = {
   repos: [],
   reviewer: null,
   channel: null,
+  skipSelfReview: true,
   projectId: null,
   workspace: "worktree",
   model: null,
@@ -128,7 +129,7 @@ function App() {
           {view === "analytics" ? (
             <Analytics refreshKey={runsVersion} />
           ) : selected ? (
-            <RuleEditor key={selected.id} rule={selected} projects={projects} providers={providers} runs={runs} onSave={saveRule} onDelete={deleteRule} />
+            <RuleEditor key={selected.id} rule={selected} projects={projects} providers={providers} runs={runs} githubLogin={settings?.githubLogin ?? null} onSave={saveRule} onDelete={deleteRule} />
           ) : rules && rules.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
               <p className="max-w-sm text-muted-foreground">

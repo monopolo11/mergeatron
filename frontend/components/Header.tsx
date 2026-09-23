@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -9,6 +10,7 @@ import { cn } from "@/lib/utils";
 import type { Settings } from "../../src/rules.ts";
 import { RUNTIME_MODES } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
+import type { UpdateResult, UpdateStatus } from "../../src/update.ts";
 import { ModelPicker } from "@/components/ModelPicker";
 
 export function Dot({ tone }: { tone: "ok" | "warn" | "err" | "idle" }) {
@@ -74,6 +76,7 @@ export function Header({
       >
         Analytics
       </Button>
+      <UpdateButton />
       <TestThread projects={projects} onStarted={onThreadStarted} />
       {settings && <SettingsPopover settings={settings} providers={providers} onSaved={onSettingsSaved} />}
     </header>
@@ -125,6 +128,88 @@ function TestThread({ projects, onStarted }: { projects: T3Project[]; onStarted:
   );
 }
 
+const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
+
+/**
+ * Shows up only when upstream has commits the checkout lacks. Updating pulls,
+ * installs and restarts the server, then this page polls until it is back and
+ * reloads itself.
+ */
+function UpdateButton() {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [state, setState] = useState<{ kind: "idle" } | { kind: "busy" } | { kind: "restarting" } | { kind: "error"; message: string }>({ kind: "idle" });
+
+  const check = () => api<UpdateStatus>("/api/update").then(setStatus).catch(() => setStatus(null));
+  useEffect(() => {
+    void check();
+    const timer = setInterval(() => void check(), UPDATE_CHECK_INTERVAL);
+    return () => clearInterval(timer);
+  }, []);
+
+  const update = () => {
+    setState({ kind: "busy" });
+    api<UpdateResult>("/api/update", { method: "POST" })
+      .then(() => {
+        setState({ kind: "restarting" });
+        waitForServer().then(() => location.reload());
+      })
+      .catch((e: Error) => setState({ kind: "error", message: e.message }));
+  };
+
+  if (!status || status.commits.length === 0) return null;
+  const busy = state.kind === "busy" || state.kind === "restarting";
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button size="sm" variant="outline">
+          <Dot tone="warn" />
+          Update · {status.commits.length}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-96 space-y-3 p-3 text-[13px]">
+        <div className="flex items-baseline justify-between">
+          <span className="font-medium">
+            {status.upstream} <span className="font-mono text-xs text-muted-foreground">{status.current} → {status.latest}</span>
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => void check()} disabled={busy}>Recheck</Button>
+        </div>
+        <ul className="max-h-48 space-y-0.5 overflow-auto font-mono text-xs">
+          {status.commits.map((commit) => (
+            <li key={commit.sha} className="truncate">
+              <span className="text-muted-foreground">{commit.sha}</span> {commit.subject}
+            </li>
+          ))}
+        </ul>
+        <p className="text-muted-foreground">
+          {[
+            status.migrations && "runs migrations on start",
+            status.dependencies && "installs dependencies",
+            status.restart === "launchd" ? "launchd restarts the service" : status.restart === "hot" ? "bun --hot reloads in place" : "the process respawns itself",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+          .
+        </p>
+        {status.dirty && <p className="text-warn">The checkout has uncommitted changes. Commit or discard them, then recheck.</p>}
+        <Button size="sm" className="w-full" onClick={update} disabled={busy || status.dirty}>
+          {state.kind === "busy" ? "Pulling…" : state.kind === "restarting" ? "Restarting, page reloads when back…" : "Update and restart"}
+        </Button>
+        {state.kind === "error" && <p className="text-destructive">{state.message}</p>}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Resolves once `/api/status` answers again after the restart; starts after the old process has had time to exit. */
+async function waitForServer(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  for (;;) {
+    const ok = await fetch("/api/status").then((r) => r.ok).catch(() => false);
+    if (ok) return;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+}
+
 function SettingsPopover({ settings, providers, onSaved }: { settings: Settings; providers: T3Provider[] | null; onSaved: (s: Settings) => void }) {
   const [draft, setDraft] = useState(settings);
   const { state, error } = useAutosave(draft, (value) =>
@@ -152,6 +237,14 @@ function SettingsPopover({ settings, providers, onSaved }: { settings: Settings;
               {RUNTIME_MODES.map((mode) => <SelectItem key={mode} value={mode}>{mode}</SelectItem>)}
             </SelectContent>
           </Select>
+        </Field>
+        <Field label="Your GitHub login" hint="Rules with 'Skip my own PRs' on will not review PRs you authored.">
+          <Input
+            className="h-8 font-mono text-xs"
+            value={draft.githubLogin ?? ""}
+            onChange={(e) => setDraft({ ...draft, githubLogin: e.target.value || null })}
+            placeholder="octocat"
+          />
         </Field>
         {error && <p className="text-destructive">{error}</p>}
       </PopoverContent>

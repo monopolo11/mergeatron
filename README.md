@@ -44,7 +44,8 @@ cp .env.example .env
    in the middle (changes autosave), live run log on the right. The webhook endpoint
    is `POST /webhooks/github`. Use **Test thread** in the header to start a
    one-message thread in a project and confirm the token, RPC and provider work
-   before wiring up GitHub. **Settings** holds the default model and runtime mode.
+   before wiring up GitHub. **Settings** holds the default model, runtime mode and
+   your GitHub login, which lets rules skip PRs you authored.
 
 4. Expose the port to GitHub (for a laptop, `cloudflared tunnel --url http://localhost:8787`
    or [smee.io](https://smee.io)). In the repo or org settings add a webhook:
@@ -129,6 +130,8 @@ Each rule has:
   reviews requested from you fire, not every review request on the repo.
 - **Slack channel** (Slack): optional channel id. Empty matches any channel the
   bot is in.
+- **Skip my own PRs**: on by default. When the PR author is the GitHub login in
+  Settings the run is recorded as skipped instead of reviewing your own work.
 - **T3 project**: explicit, or auto-matched by comparing the webhook repository
   to each project's git remote.
 - **Workspace**: `worktree` asks T3 to start the thread in a new worktree from
@@ -155,6 +158,17 @@ thread's first turn settles, then `done` with the agent's final message (or
 or issue author, and runs per trigger source, each split into running, done,
 skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode) and
 `manual` (connection test). The same data is at `GET /api/analytics`.
+
+## Updating
+
+The header shows **Update** when the tracked upstream (`origin/main` for a
+plain clone) has commits the checkout does not. The popover lists them and flags
+whether they bring migrations or dependency changes. **Update and restart**
+fast-forwards the checkout, runs `bun install` if `bun.lock` moved, then gets
+the new code running: the launchd agent is restarted by launchd, `bun --hot`
+reloads on its own, and a plain `bun index.ts` spawns a replacement before
+exiting. Migrations apply on that start, as always. A checkout with uncommitted
+changes cannot be updated from the UI. `GET /api/update` returns the same check.
 
 ## Development
 

@@ -20,6 +20,7 @@ export const RuleInput = z.object({
   repos: z.array(z.string().trim().min(1)).default([]),
   reviewer: z.string().trim().min(1).nullable().default(null),
   channel: z.string().trim().min(1).nullable().default(null),
+  skipSelfReview: z.boolean().default(true),
   projectId: z.string().trim().min(1).nullable().default(null),
   workspace: z.enum(WORKSPACE_MODES).default("worktree"),
   model: ModelSelectionSchema.nullable().default(null),
@@ -30,6 +31,12 @@ export type RuleInput = z.infer<typeof RuleInput>;
 export const SettingsInput = z.object({
   model: ModelSelectionSchema,
   runtimeMode: z.enum(RUNTIME_MODES),
+  githubLogin: z
+    .string()
+    .trim()
+    .transform((login) => login.replace(/^@/, "") || null)
+    .nullable()
+    .default(null),
 }) satisfies z.ZodType<Settings, unknown>;
 
 export const TestThreadInput = z.object({ projectId: z.string().trim().min(1) });
@@ -37,4 +44,5 @@ export const TestThreadInput = z.object({ projectId: z.string().trim().min(1) })
 export const DEFAULT_SETTINGS: Settings = {
   model: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
   runtimeMode: "full-access",
+  githubLogin: null,
 };

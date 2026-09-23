@@ -10,6 +10,7 @@ import { handleSlackEvent } from "./src/secondPass.ts";
 import { SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
 import { T3Client } from "./src/t3.ts";
+import { applyUpdate, checkForUpdate, restart } from "./src/update.ts";
 
 const t3Home = process.env.T3CODE_HOME ?? join(homedir(), ".t3");
 
@@ -131,6 +132,28 @@ const server = Bun.serve({
           const detail = error instanceof Error ? error.message : String(error);
           store.updateRun(run.id, { status: "failed", detail, threadId: null, threadUrl: null });
           return json({ error: detail }, 502);
+        }
+      },
+    },
+
+    /** Compares the checkout with its upstream; POST fast-forwards, installs and restarts. */
+    "/api/update": {
+      GET: async () => {
+        try {
+          return json(await checkForUpdate());
+        } catch (error) {
+          return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+        }
+      },
+      POST: async () => {
+        try {
+          const result = await applyUpdate();
+          console.log(`[update] ${result.from} -> ${result.to}, restart: ${result.restart}`);
+          // Let the response leave before the process goes away.
+          setTimeout(() => restart(result.restart), 500);
+          return json(result);
+        } catch (error) {
+          return json({ error: error instanceof Error ? error.message : String(error) }, 409);
         }
       },
     },
