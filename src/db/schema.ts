@@ -1,5 +1,5 @@
 import { integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
-import { RUNTIME_MODES, RUN_SOURCES, WORKSPACE_MODES } from "../shared.ts";
+import { DEFAULT_HANDOFF_PROMPT, RUNTIME_MODES, RUN_SOURCES, WORKSPACE_MODES } from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
 
@@ -34,6 +34,13 @@ export const settings = sqliteTable("settings", {
   runtimeMode: text("runtime_mode", { enum: RUNTIME_MODES }).notNull(),
   /** Your GitHub login, so rules can skip PRs you authored. Null disables the check. */
   githubLogin: text("github_login"),
+  /**
+   * Reviews of one PR that request changes in a row before automated review
+   * pauses and a handoff thread is written. 0 never pauses.
+   */
+  maxChangesRequestedRounds: integer("max_changes_requested_rounds").notNull().default(3),
+  /** First message of the handoff thread; see DEFAULT_HANDOFF_PROMPT for its variables. */
+  handoffPrompt: text("handoff_prompt").notNull().default(DEFAULT_HANDOFF_PROMPT),
 });
 
 /**

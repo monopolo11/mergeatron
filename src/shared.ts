@@ -49,6 +49,27 @@ export const SUGGESTED_EVENTS = [
   { key: "slack.second_pass", label: "Slack: 'second pass' mention in a review thread" },
 ] as const;
 
+/**
+ * Event of the run that writes the handoff document once a PR's reviews keep
+ * requesting changes. Not a review: its reply never feeds `{{previous_result}}`
+ * or the change-request streak.
+ */
+export const HANDOFF_EVENT = "review.handoff";
+
+/**
+ * Default first message of the handoff thread (Settings). Besides the PR
+ * variables it gets `{{rounds}}` (change requests in a row) and
+ * `{{review_history}}` (the streak's review reports, oldest first).
+ */
+export const DEFAULT_HANDOFF_PROMPT = `Pull request {{pr_url}} ("{{pr_title}}" by {{pr_author}}) has had {{rounds}} automated reviews in a row end in "changes requested", so automated review is paused and a human needs to take over.
+
+You are checked out on the PR head. Below are the {{rounds}} review reports, oldest first. Read them, look at the current diff against {{pr_base}} and the PR's commit history, and write a handoff document that explains why this PR is not converging: which findings recur across rounds, which were fixed and came back, where the scope moved between rounds, and what is still open. End with a short recommendation (split the PR, rescope it, pair with the author, or merge with a named follow-up). Do not review the code again and post nothing to GitHub; reply with the document only.
+
+{{review_history}}`;
+
+/** Extra template variables the handoff prompt gets on top of TEMPLATE_VARS. */
+export const HANDOFF_TEMPLATE_VARS = ["rounds", "review_history"] as const;
+
 /** Rules whose event starts with this prefix are fed by the Slack webhook, not GitHub. */
 export const SLACK_EVENT_PREFIX = "slack.";
 

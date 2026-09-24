@@ -44,8 +44,10 @@ cp .env.example .env
    in the middle (changes autosave), live run log on the right. The webhook endpoint
    is `POST /webhooks/github`. Use **Test thread** in the header to start a
    one-message thread in a project and confirm the token, RPC and provider work
-   before wiring up GitHub. **Settings** holds the default model, runtime mode and
-   your GitHub login, which lets rules skip PRs you authored.
+   before wiring up GitHub. **Settings** holds the default model, runtime mode,
+   your GitHub login, which lets rules skip PRs you authored, and how many
+   change requests in a row pause a PR's reviews plus the handoff prompt (see
+   [Stuck PRs](#stuck-prs)).
 
 4. Expose the port to GitHub (for a laptop, `cloudflared tunnel --url http://localhost:8787`
    or [smee.io](https://smee.io)). In the repo or org settings add a webhook:
@@ -154,6 +156,26 @@ logged as skipped and, on Slack, answered with a short note. Runs show in the ri
 thread's first turn settles, then `done` with the agent's final message (or
 `failed`). A thread with no result after 3 hours is marked `failed`, which frees
 the PR for a new review. Watchers survive restarts: runs still `running` are re-polled on boot.
+
+### Stuck PRs
+
+Reviews of a PR that keep ending in "changes requested" mean the scope is moving
+or a finding keeps coming back, and another round will not fix that. The verdict
+of each finished review is read from the agent's final message (same as the Slack
+reaction). Once **Pause after change requests** in Settings (default 3) reviews in
+a row of one PR request changes, that PR's automated review pauses and the
+orchestrator opens one more thread, `Handoff: <PR title>`, in the same project
+and workspace as the last review. Its first message is the **Handoff prompt** in
+Settings: the PR variables plus `{{rounds}}` and `{{review_history}}` (every review
+report of the streak, oldest first). The default asks for a handoff document: which
+findings recur, what was fixed and came back, where the scope moved, and a
+recommendation. The document is the run's result (rule `handoff` in the log) and, for Slack-triggered
+PRs, is posted in the review thread after a "review paused" note.
+
+While paused, further triggers for the PR are logged as skipped and point at the
+handoff thread. An approval ends the streak. A "second pass" mention on Slack
+always reviews, so a human can resume once the PR is reshaped; a change request
+past the limit does not write a second handoff. Set the limit to 0 to never pause.
 
 ## Analytics
 

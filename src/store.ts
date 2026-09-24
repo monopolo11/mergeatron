@@ -42,6 +42,10 @@ export class Store {
     );
   }
 
+  getRule(id: string): Rule | null {
+    return this.db.select().from(rules).where(eq(rules.id, id)).get() ?? null;
+  }
+
   deleteRule(id: string): boolean {
     return this.db.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined;
   }
@@ -110,23 +114,21 @@ export class Store {
     );
   }
 
-  /** Most recent finished review of this PR with a reply, for `{{previous_result}}`. */
-  latestReviewForPullRequest(repo: string, prNumber: string): Run | null {
-    return (
-      this.db
-        .select()
-        .from(runs)
-        .where(
-          and(
-            eq(runs.status, "done"),
-            sql`${runs.result} is not null`,
-            sql`lower(${runs.repo}) = lower(${repo})`,
-            sql`json_extract(${runs.context}, '$.pr_number') = ${prNumber}`,
-          ),
-        )
-        .orderBy(desc(runs.createdAt))
-        .get() ?? null
-    );
+  /** Finished runs of this PR that have a reply (reviews and handoffs alike), newest first (rowid breaks same-millisecond ties). */
+  finishedRunsForPullRequest(repo: string, prNumber: string): Run[] {
+    return this.db
+      .select()
+      .from(runs)
+      .where(
+        and(
+          eq(runs.status, "done"),
+          sql`${runs.result} is not null`,
+          sql`lower(${runs.repo}) = lower(${repo})`,
+          sql`json_extract(${runs.context}, '$.pr_number') = ${prNumber}`,
+        ),
+      )
+      .orderBy(desc(runs.createdAt), desc(sql`rowid`))
+      .all();
   }
 
   /** The run started by this Slack message (the review a thread hangs under), for "second pass" mentions in that thread. */

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { rules, runs, settings } from "./db/schema.ts";
-import { RUNTIME_MODES, WORKSPACE_MODES } from "./shared.ts";
+import { DEFAULT_HANDOFF_PROMPT, RUNTIME_MODES, WORKSPACE_MODES } from "./shared.ts";
 
 export type Rule = typeof rules.$inferSelect;
 export type Run = typeof runs.$inferSelect;
@@ -37,6 +37,8 @@ export const SettingsInput = z.object({
     .transform((login) => login.replace(/^@/, "") || null)
     .nullable()
     .default(null),
+  maxChangesRequestedRounds: z.number().int().min(0).default(3),
+  handoffPrompt: z.string().min(1).default(DEFAULT_HANDOFF_PROMPT),
 }) satisfies z.ZodType<Settings, unknown>;
 
 export const TestThreadInput = z.object({ projectId: z.string().trim().min(1) });
@@ -45,4 +47,6 @@ export const DEFAULT_SETTINGS: Settings = {
   model: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
   runtimeMode: "full-access",
   githubLogin: null,
+  maxChangesRequestedRounds: 3,
+  handoffPrompt: DEFAULT_HANDOFF_PROMPT,
 };

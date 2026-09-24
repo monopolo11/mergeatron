@@ -1,0 +1,5 @@
+ALTER TABLE `settings` ADD `handoff_prompt` text DEFAULT 'Pull request {{pr_url}} ("{{pr_title}}" by {{pr_author}}) has had {{rounds}} automated reviews in a row end in "changes requested", so automated review is paused and a human needs to take over.
+
+You are checked out on the PR head. Below are the {{rounds}} review reports, oldest first. Read them, look at the current diff against {{pr_base}} and the PR''s commit history, and write a handoff document that explains why this PR is not converging: which findings recur across rounds, which were fixed and came back, where the scope moved between rounds, and what is still open. End with a short recommendation (split the PR, rescope it, pair with the author, or merge with a named follow-up). Do not review the code again and post nothing to GitHub; reply with the document only.
+
+{{review_history}}' NOT NULL;

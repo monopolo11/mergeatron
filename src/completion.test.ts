@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { QUIET_MS, openTasks, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
+import { QUIET_MS, changesRequestedStreak, openTasks, pausedReview, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
+import { openDatabase } from "./db/index.ts";
+import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackApiError } from "./slack.ts";
+import { Store } from "./store.ts";
 import type { T3ThreadTurn } from "./t3.ts";
 
 const T0 = Date.parse("2026-09-21T22:56:00.000Z");
@@ -134,5 +137,39 @@ describe("reactVerdict", () => {
   test("other Slack errors still surface", async () => {
     const slack = recorder(["repeat"]);
     await expect(reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" })).rejects.toThrow("invalid_name");
+  });
+});
+
+describe("changesRequestedStreak", () => {
+  const review = (result: string, event = "slack.message") => ({ event, result });
+  const CR = review("**CHANGES_REQUESTED**, 3 comments");
+
+  test("counts change requests newest first until an approval, ignoring no-verdict replies and handoffs", () => {
+    expect(changesRequestedStreak([CR, review("standing by"), CR, review("APPROVED"), CR])).toHaveLength(2);
+    expect(changesRequestedStreak([review("handoff doc", HANDOFF_EVENT), CR, CR])).toHaveLength(2);
+    expect(changesRequestedStreak([review("APPROVED"), CR, CR])).toHaveLength(0);
+    expect(changesRequestedStreak([])).toHaveLength(0);
+  });
+});
+
+describe("pausedReview", () => {
+  const finished = (store: Store, result: string, event = "pull_request.synchronize", threadUrl: string | null = null) =>
+    store.recordRun({
+      ruleId: "r1", ruleName: "review", deliveryId: crypto.randomUUID(), event, repo: "Acme/Widgets", source: "github", author: "alice",
+      status: "done", detail: "", threadId: threadUrl, threadUrl, context: { repo: "acme/widgets", pr_number: "42" }, result,
+    });
+
+  test("pauses at the configured number of change requests in a row and names the handoff", () => {
+    const store = new Store(openDatabase(":memory:"));
+    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 2 });
+    finished(store, "CHANGES_REQUESTED");
+    expect(pausedReview(store, "acme/widgets", "42")).toBeNull();
+    finished(store, "request changes: still broken");
+    finished(store, "# Handoff", HANDOFF_EVENT, "http://t3/handoff");
+    expect(pausedReview(store, "acme/widgets", "42")).toMatchObject({ rounds: 2, handoff: { threadUrl: "http://t3/handoff" } });
+    // Another PR is unaffected; a limit of 0 turns the pause off.
+    expect(pausedReview(store, "acme/widgets", "43")).toBeNull();
+    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 0 });
+    expect(pausedReview(store, "acme/widgets", "42")).toBeNull();
   });
 });

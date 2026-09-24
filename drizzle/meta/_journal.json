@@ -50,6 +50,20 @@
       "when": 1790182510262,
       "tag": "0006_github_login_skip_self_review",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790270688366,
+      "tag": "0007_stuck_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790271043752,
+      "tag": "0008_handoff_prompt",
+      "breakpoints": true
     }
   ]
 }

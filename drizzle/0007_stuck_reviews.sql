@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `max_changes_requested_rounds` integer DEFAULT 3 NOT NULL;

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { openDatabase } from "./db/index.ts";
 import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
 import type { Rule } from "./rules.ts";
+import { HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
 import type { SlackClient } from "./slack.ts";
 import type { T3Client, T3Project } from "./t3.ts";
@@ -148,5 +149,39 @@ describe("handleDelivery", () => {
     handleDelivery({ store, t3, slack: null }, { deliveryId: "d5", event: base.events[0]!, ctx });
     await Bun.sleep(0);
     expect(store.listRuns().find((r) => r.deliveryId === "d5")).toMatchObject({ status: "failed", detail: "unexpected" });
+  });
+
+  test("a paused PR is skipped and points at the handoff; a Slack second pass reviews anyway", async () => {
+    const store = new Store(openDatabase(":memory:"));
+    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 2 });
+    const rule = store.createRule({ ...base, events: ["slack.message", "slack.second_pass"] });
+    const ctx = { repo: "acme/widgets", pr_number: "9", pr_url: "https://github.com/acme/widgets/pull/9", slack_channel: "C1", slack_ts: "1.0" };
+    const done = (result: string, event = "slack.message", threadUrl: string | null = null) =>
+      store.recordRun({
+        ruleId: rule.id, ruleName: rule.name, deliveryId: crypto.randomUUID(), event, repo: ctx.repo, source: "slack", author: "alice",
+        status: "done", detail: "", threadId: threadUrl, threadUrl, context: ctx, result,
+      });
+    done("CHANGES_REQUESTED: 4 comments");
+    done("CHANGES_REQUESTED: 2 comments");
+    done("# Handoff\nScope moved twice.", HANDOFF_EVENT, "http://t3/handoff");
+    const replies: string[] = [];
+    const slack = {
+      react: () => Promise.resolve(),
+      reply: (_: unknown, text: string) => (replies.push(text), Promise.resolve()),
+    } as unknown as SlackClient;
+    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
+
+    expect(handleDelivery({ store, t3, slack }, { deliveryId: "d6", event: "slack.message", ctx }).matched).toEqual([]);
+    await Bun.sleep(0);
+    const skipped = store.listRuns().find((run) => run.deliveryId === "d6");
+    expect(skipped).toMatchObject({ status: "skipped", threadUrl: "http://t3/handoff" });
+    expect(skipped?.detail).toContain("paused");
+    expect(replies[0]).toContain("2 reviews in a row requested changes");
+
+    // A human asking for a second pass overrides the pause, and the handoff never feeds the review prompt.
+    const again = handleDelivery({ store, t3, slack }, { deliveryId: "d7", event: "slack.second_pass", ctx: { ...ctx } });
+    expect(again.matched).toEqual([rule.name]);
+    await Bun.sleep(0);
+    expect(store.listRuns().find((run) => run.deliveryId === "d7")?.context?.previous_result).toBe("CHANGES_REQUESTED: 2 comments");
   });
 });

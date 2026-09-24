@@ -3,7 +3,8 @@ import { join } from "node:path";
 import index from "./frontend/index.html";
 import { resumeWatchers, watchCompletion } from "./src/completion.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
-import { handleDelivery } from "./src/handler.ts";
+import { handleDelivery, type HandlerDeps } from "./src/handler.ts";
+import { handoffIfStuck } from "./src/handoff.ts";
 import { logger } from "./src/log.ts";
 import { openDatabase } from "./src/db/index.ts";
 import { RuleInput, SettingsInput, TestThreadInput } from "./src/rules.ts";
@@ -46,7 +47,12 @@ if ((slackAppToken || slackBotToken) && !(slackAppToken && slackBotToken)) {
 
 const t3 = new T3Client(await resolveT3Origin(), token);
 const store = new Store(openDatabase(process.env.DATA_PATH ?? "data/orchestrator.sqlite"));
-const deps = { store, t3, slack: slackAppToken && slackBotToken ? new SlackClient(slackBotToken) : null };
+const deps: HandlerDeps = {
+  store,
+  t3,
+  slack: slackAppToken && slackBotToken ? new SlackClient(slackBotToken) : null,
+  afterReview: (run) => handoffIfStuck(deps, run),
+};
 resumeWatchers(deps);
 
 /**

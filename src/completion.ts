@@ -1,5 +1,6 @@
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
+import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackApiError, slackOrigin, type SlackClient, type SlackOrigin } from "./slack.ts";
 import type { Store } from "./store.ts";
 import { T3HttpError, type T3Client, type T3ThreadTurn } from "./t3.ts";
@@ -10,6 +11,8 @@ export type CompletionDeps = {
   store: Store;
   t3: T3Client;
   slack: SlackClient | null;
+  /** Called once a review (not a handoff) settles as `done`, after its Slack reply; see handoffIfStuck. */
+  afterReview?: (run: Run) => void;
 };
 
 const POLL_MS = 5_000;
@@ -136,21 +139,28 @@ export function resumeWatchers(deps: CompletionDeps): void {
   if (unsettled.length > 0) log.info("resumed watchers for unsettled runs", { count: unsettled.length });
 }
 
-/** Records the outcome and, for Slack runs, posts the verdict then flips 👀 to the verdict's reaction. */
+/**
+ * Records the outcome and, for Slack runs, posts the reply. A review then
+ * flips 👀 to the verdict's reaction and reports to `afterReview`; a handoff
+ * only posts its document.
+ */
 function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void {
   const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
   log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
   deps.store.updateRun(runId, outcome);
   const run = deps.store.getRun(runId);
-  const origin = slackOrigin(run?.context ?? null);
-  if (!run || !origin || !deps.slack) return;
+  if (!run) return;
+  const review = run.event !== HANDOFF_EVENT;
+  const origin = slackOrigin(run.context);
   const slack = deps.slack;
-  const body = outcome.status === "done" ? (outcome.result ?? "_(no reply)_") : `Review failed: ${outcome.detail}`;
-  void slack
-    .reply(origin, body)
-    .then(() => slack.unreact(origin, "eyes"))
-    .then(() => reactVerdict(slack, origin, outcome))
-    .catch((error: unknown) => log.warn("slack reply failed", { run: runId, error }));
+  const posted =
+    origin && slack
+      ? slack
+          .reply(origin, outcome.status === "done" ? (outcome.result ?? "_(no reply)_") : `Review failed: ${outcome.detail}`)
+          .then(() => (review ? slack.unreact(origin, "eyes").then(() => reactVerdict(slack, origin, outcome)) : undefined))
+          .catch((error: unknown) => log.warn("slack reply failed", { run: runId, error }))
+      : Promise.resolve();
+  if (review && outcome.status === "done") void posted.then(() => deps.afterReview?.(run));
 }
 
 export type Verdict = "approved" | "changes_requested" | "commented";
@@ -171,6 +181,36 @@ export function reviewVerdict(result: string | null): Verdict {
   if (CHANGES_REQUESTED.test(result)) return "changes_requested";
   if (APPROVED.test(result)) return "approved";
   return "commented";
+}
+
+/**
+ * The latest reviews of a PR that asked for changes in a row, newest first, from
+ * its finished runs. An approval ends the streak, a reply with no verdict is
+ * ignored, and handoffs are not reviews.
+ */
+export function changesRequestedStreak<T extends Pick<Run, "event" | "result">>(finished: T[]): T[] {
+  const streak: T[] = [];
+  for (const run of finished) {
+    if (run.event === HANDOFF_EVENT) continue;
+    const verdict = reviewVerdict(run.result);
+    if (verdict === "approved") break;
+    if (verdict === "changes_requested") streak.push(run);
+  }
+  return streak;
+}
+
+/**
+ * Why automated review of this PR is paused: at least `maxChangesRequestedRounds`
+ * reviews in a row requested changes. Null while under the limit or when the
+ * limit is 0. `handoff` is the run that wrote the handoff document, if it exists.
+ */
+export function pausedReview(store: Store, repo: string, prNumber: string): { rounds: number; handoff: Run | null } | null {
+  const limit = store.getSettings().maxChangesRequestedRounds;
+  if (limit <= 0) return null;
+  const finished = store.finishedRunsForPullRequest(repo, prNumber);
+  const rounds = changesRequestedStreak(finished).length;
+  if (rounds < limit) return null;
+  return { rounds, handoff: finished.find((run) => run.event === HANDOFF_EVENT) ?? null };
 }
 
 /**

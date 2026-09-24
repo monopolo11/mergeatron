@@ -4,11 +4,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { api, type Status } from "@/lib/api";
 import { saveLabel, useAutosave } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import type { Settings } from "../../src/rules.ts";
-import { RUNTIME_MODES } from "../../src/shared.ts";
+import { DEFAULT_HANDOFF_PROMPT, HANDOFF_TEMPLATE_VARS, RUNTIME_MODES } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
 import type { UpdateResult, UpdateStatus } from "../../src/update.ts";
 import { ModelPicker } from "@/components/ModelPicker";
@@ -104,7 +105,7 @@ function TestThread({ projects, onStarted }: { projects: T3Project[]; onStarted:
       <PopoverTrigger asChild>
         <Button size="sm" variant="outline">Test thread</Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 space-y-3 p-3 text-[13px]">
+      <PopoverContent align="end" className="w-[26rem] space-y-3 p-3 text-[13px]">
         <p className="text-muted-foreground">Starts a one-message thread in a project. Proves the token, RPC and provider work.</p>
         <div className="flex gap-2">
           <Select value={selected} onValueChange={setProjectId} disabled={projects.length === 0}>
@@ -221,7 +222,7 @@ function SettingsPopover({ settings, providers, onSaved }: { settings: Settings;
       <PopoverTrigger asChild>
         <Button size="sm" variant="ghost">Settings</Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-80 space-y-3 p-3 text-[13px]">
+      <PopoverContent align="end" className="w-[26rem] space-y-3 p-3 text-[13px]">
         <div className="flex items-baseline justify-between">
           <span className="font-medium">Defaults</span>
           <span className={cn("text-xs text-muted-foreground", state === "error" && "text-destructive")}>{saveLabel(state)}</span>
@@ -245,6 +246,30 @@ function SettingsPopover({ settings, providers, onSaved }: { settings: Settings;
             onChange={(e) => setDraft({ ...draft, githubLogin: e.target.value || null })}
             placeholder="octocat"
           />
+        </Field>
+        <Field label="Pause after change requests" hint="Reviews of one PR that request changes in a row before its reviews pause and a handoff thread is written. 0 never pauses.">
+          <Input
+            type="number"
+            min={0}
+            className="h-8 w-20 font-mono text-xs"
+            value={draft.maxChangesRequestedRounds}
+            onChange={(e) => setDraft({ ...draft, maxChangesRequestedRounds: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+          />
+        </Field>
+        <Field
+          label="Handoff prompt"
+          hint={`First message of the handoff thread. PR variables plus ${HANDOFF_TEMPLATE_VARS.map((name) => `{{${name}}}`).join(", ")}.`}
+        >
+          <Textarea
+            className="min-h-40 font-mono text-xs"
+            value={draft.handoffPrompt}
+            onChange={(e) => setDraft({ ...draft, handoffPrompt: e.target.value })}
+          />
+          {draft.handoffPrompt !== DEFAULT_HANDOFF_PROMPT && (
+            <Button size="xs" variant="ghost" className="justify-self-start text-primary" onClick={() => setDraft({ ...draft, handoffPrompt: DEFAULT_HANDOFF_PROMPT })}>
+              Reset to default
+            </Button>
+          )}
         </Field>
         {error && <p className="text-destructive">{error}</p>}
       </PopoverContent>
