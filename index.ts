@@ -72,7 +72,10 @@ const server = Bun.serve({
   port: Number(process.env.PORT ?? 8787),
   development: process.env.NODE_ENV !== "production",
   routes: {
+    // Client-side routes; the router in frontend/app.tsx picks the view.
     "/": index,
+    "/reviews": index,
+    "/analytics": index,
 
     "/api/status": async () => {
       const environment = await t3.environment().catch(() => null);
@@ -202,6 +205,8 @@ const server = Bun.serve({
     "/api/runs": () => json(store.listRuns()),
 
     "/api/analytics": () => json(store.analytics()),
+
+    "/api/pulls": () => json(store.pullRequests()),
 
     "/webhooks/github": {
       POST: async (req) => {

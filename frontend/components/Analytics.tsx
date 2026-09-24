@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -13,12 +13,13 @@ const SOURCE_LABELS: Record<RunSource, string> = {
 
 const EMPTY: RunCounts = { total: 0, started: 0, done: 0, skipped: 0, failed: 0 };
 
-/** Review counts per PR author and per trigger source. Refreshes with the run log. */
-export function Analytics({ refreshKey }: { refreshKey: number }) {
-  const [data, setData] = useState<AnalyticsData | null>(null);
-  useEffect(() => {
-    api<AnalyticsData>("/api/analytics").then(setData).catch(() => {});
-  }, [refreshKey]);
+/** Review counts per PR author and per trigger source. Polls on the run log's cadence. */
+export function Analytics() {
+  const { data } = useQuery({
+    queryKey: ["analytics"],
+    queryFn: () => api<AnalyticsData>("/api/analytics"),
+    refetchInterval: 5000,
+  });
 
   if (!data) return <p className="p-4 text-muted-foreground">Loading…</p>;
 

@@ -1,8 +1,9 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
+import { changesRequestedStreak, reviewVerdict } from "./completion.ts";
 import type { AppDatabase } from "./db/index.ts";
 import { rules, runs, settings } from "./db/schema.ts";
 import { DEFAULT_SETTINGS, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
-import type { RunSource } from "./shared.ts";
+import { HANDOFF_EVENT, type RunSource } from "./shared.ts";
 
 /** Run counts split by status, for one grouping key. */
 export type RunCounts = { total: number; started: number; done: number; skipped: number; failed: number };
@@ -12,6 +13,31 @@ export type Analytics = {
   /** Connection tests carry no author and are left out of this list. */
   byAuthor: (RunCounts & { author: string })[];
   bySource: (RunCounts & { source: RunSource })[];
+};
+
+/**
+ * Where a PR stands, in priority order: a review is running, reviews are
+ * paused (see `pausedReview`), else the verdict of the latest review. PRs with
+ * no finished review take the status of their latest run.
+ */
+export type PullRequestStatus = "reviewing" | "paused" | "approved" | "changes_requested" | "commented" | "skipped" | "failed";
+
+/** One PR the orchestrator has run on. Counts leave out handoffs. */
+export type PullRequestSummary = {
+  repo: string;
+  number: string;
+  title: string | null;
+  url: string | null;
+  author: string | null;
+  status: PullRequestStatus;
+  reviews: number;
+  approved: number;
+  changesRequested: number;
+  skipped: number;
+  failed: number;
+  lastAt: string;
+  /** Thread of the latest run that opened one: the running review, the handoff, or the last review. */
+  threadUrl: string | null;
 };
 
 /** Typed access to rules, global settings, and the run log. */
@@ -152,6 +178,48 @@ export class Store {
   /** Runs whose thread is still running as far as we know; re-watched after a restart. */
   listUnsettledRuns(): Run[] {
     return this.db.select().from(runs).where(eq(runs.status, "started")).all();
+  }
+
+  /** Every PR with runs, most recently active first. Verdicts come from `reviewVerdict`, so counts match the pause logic. */
+  pullRequests(): PullRequestSummary[] {
+    const all = this.db
+      .select()
+      .from(runs)
+      .where(sql`json_extract(${runs.context}, '$.pr_number') is not null`)
+      .orderBy(desc(runs.createdAt), desc(sql`rowid`))
+      .all();
+    const byPr = Map.groupBy(all, (run) => `${run.repo.toLowerCase()}#${run.context?.pr_number}`);
+    const limit = this.getSettings().maxChangesRequestedRounds;
+
+    return [...byPr.values()].map((prRuns) => {
+      // Newest first, and groupBy never yields an empty group.
+      const latest = prRuns[0]!;
+      const reviews = prRuns.filter((run) => run.event !== HANDOFF_EVENT);
+      const done = reviews.filter((run) => run.status === "done");
+      const verdicts = done.map((run) => reviewVerdict(run.result));
+      const finished = prRuns.filter((run) => run.status === "done" && run.result !== null);
+      const status: PullRequestStatus = reviews.some((run) => run.status === "started")
+        ? "reviewing"
+        : limit > 0 && changesRequestedStreak(finished).length >= limit
+          ? "paused"
+          : verdicts[0] ?? (latest.status === "failed" ? "failed" : "skipped");
+      const ctx = prRuns.find((run) => run.context?.pr_title)?.context ?? latest.context;
+      return {
+        repo: latest.repo,
+        number: latest.context?.pr_number ?? "",
+        title: ctx?.pr_title ?? null,
+        url: ctx?.pr_url ?? null,
+        author: prRuns.find((run) => run.author)?.author ?? null,
+        status,
+        reviews: verdicts.length,
+        approved: verdicts.filter((verdict) => verdict === "approved").length,
+        changesRequested: verdicts.filter((verdict) => verdict === "changes_requested").length,
+        skipped: reviews.filter((run) => run.status === "skipped").length,
+        failed: reviews.filter((run) => run.status === "failed").length,
+        lastAt: latest.createdAt,
+        threadUrl: prRuns.find((run) => run.threadUrl)?.threadUrl ?? null,
+      };
+    });
   }
 
   /** Aggregates over every run: totals, per PR/issue author, and per trigger source. */
