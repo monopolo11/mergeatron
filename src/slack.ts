@@ -162,22 +162,33 @@ export function socketMessage(raw: string): SocketMessage {
 
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
+/** How often we ping Slack; a ping still unanswered at the next tick means the socket is dead. */
+const HEARTBEAT_MS = 30_000;
+
+/** Bun's client WebSocket. The DOM lib (loaded for the frontend) hides `ping` and `terminate` on the global type. */
+type SlackWebSocket = WebSocket & Pick<Bun.WebSocket, "ping" | "terminate">;
 
 /**
  * Keeps one Socket Mode connection alive and hands every Events API payload
  * to `onEvent`. Envelopes are acked before the handler runs, so the handler
  * has no deadline; Slack redelivers anything not acked within 3s. Reconnects
  * on Slack's periodic `disconnect`, on errors, and after the laptop wakes up.
+ *
+ * A heartbeat catches sockets that die without a close (a VPN or WARP tunnel
+ * re-routing, say): the OS keeps reporting the TCP connection as open and
+ * events silently stop arriving. Every `heartbeatMs` we ping; if the previous
+ * ping got no pong, the socket is terminated and the usual reconnect runs.
  */
 export class SlackSocket {
   connected = false;
-  private ws: WebSocket | null = null;
+  private ws: SlackWebSocket | null = null;
   private stopped = false;
   private backoffMs = RECONNECT_MIN_MS;
 
   constructor(
     private readonly appToken: string,
     private readonly onEvent: (payload: unknown) => void,
+    private readonly heartbeatMs = HEARTBEAT_MS,
   ) {}
 
   start(): void {
@@ -206,12 +217,24 @@ export class SlackSocket {
       return this.retry();
     }
 
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url) as SlackWebSocket;
     this.ws = ws;
+    let awaitingPong = false;
+    let heartbeat: Timer | undefined;
+    ws.addEventListener("pong", () => (awaitingPong = false));
     ws.onopen = () => {
       this.connected = true;
       this.backoffMs = RECONNECT_MIN_MS;
       log.info("socket connected");
+      heartbeat = setInterval(() => {
+        if (awaitingPong) {
+          log.warn("no pong from Slack, reconnecting", { waitedSeconds: this.heartbeatMs / 1000 });
+          ws.terminate();
+          return;
+        }
+        awaitingPong = true;
+        ws.ping();
+      }, this.heartbeatMs);
     };
     ws.onmessage = (event) => {
       const message = socketMessage(String(event.data));
@@ -233,6 +256,7 @@ export class SlackSocket {
     };
     ws.onerror = () => log.warn("socket error");
     ws.onclose = (event) => {
+      clearInterval(heartbeat);
       if (this.ws !== ws) return;
       this.connected = false;
       this.ws = null;

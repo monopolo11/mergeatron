@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { turnOutcome } from "./completion.ts";
-import { cleanSlackText, extractSlackContext, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
+import { cleanSlackText, extractSlackContext, SlackSocket, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
 
 const mention = {
   type: "event_callback",
@@ -119,3 +120,65 @@ describe("turnOutcome", () => {
     expect(turnOutcome(errored)).toMatchObject({ status: "failed", detail: "provider down" });
   });
 });
+
+describe("SlackSocket heartbeat", () => {
+  const HEARTBEAT_MS = 50;
+  let cleanup: (() => void)[] = [];
+  afterEach(() => {
+    for (const fn of cleanup) fn();
+    cleanup = [];
+  });
+
+  /** Points `apps.connections.open` at a local socket URL and starts a SlackSocket on it. */
+  function connectTo(url: string) {
+    const openConnection = Object.assign(async () => Response.json({ ok: true, url }), { preconnect: fetch.preconnect });
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(openConnection);
+    const socket = new SlackSocket("xapp-test", () => {}, HEARTBEAT_MS);
+    socket.start();
+    cleanup.push(() => socket.stop(), () => fetchSpy.mockRestore());
+  }
+
+  test("reconnects when a socket stops answering pings", async () => {
+    // Completes the WebSocket handshake, then goes silent: no pongs, no close.
+    let handshakes = 0;
+    const zombie = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        data(conn, chunk) {
+          const key = /Sec-WebSocket-Key: (.+)\r\n/i.exec(chunk.toString())?.[1];
+          if (!key) return;
+          handshakes++;
+          const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+          conn.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+        },
+      },
+    });
+    cleanup.push(() => zombie.stop(true));
+    connectTo(`ws://127.0.0.1:${zombie.port}`);
+
+    await waitFor(() => handshakes >= 2);
+  });
+
+  test("keeps a socket that answers pings", async () => {
+    let upgrades = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req, srv) => (srv.upgrade(req) ? (upgrades++, undefined) : new Response(null, { status: 400 })),
+      websocket: { message() {} },
+    });
+    cleanup.push(() => server.stop(true));
+    connectTo(`ws://127.0.0.1:${server.port}`);
+
+    await Bun.sleep(HEARTBEAT_MS * 5);
+    expect(upgrades).toBe(1);
+  });
+});
+
+async function waitFor(condition: () => boolean, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await Bun.sleep(10);
+  }
+}
