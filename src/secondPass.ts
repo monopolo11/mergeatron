@@ -51,6 +51,8 @@ export async function handleSlackEvent(deps: HandlerDeps, payload: unknown): Pro
     return;
   }
   const { ctx } = delivery;
+  // Before the bot check: a second pass names no repo until its thread does, and repo-scoped rules need one to match.
+  const problem = delivery.event === SECOND_PASS_EVENT ? resolveSecondPassTarget(deps.store, ctx) : null;
   const botIgnored = ctx.slack_bot_id ? await botPostIgnored(deps, delivery.event, ctx) : null;
   if (botIgnored) {
     log.info("event ignored", { delivery: deliveryId, reason: botIgnored });
@@ -58,16 +60,13 @@ export async function handleSlackEvent(deps: HandlerDeps, payload: unknown): Pro
   }
   log.info("event received", { delivery: deliveryId, event: delivery.event, channel: ctx.slack_channel, user: ctx.slack_user, pr: ctx.pr_url });
 
-  if (delivery.event === SECOND_PASS_EVENT) {
-    const problem = resolveSecondPassTarget(deps.store, ctx);
-    if (problem) {
-      log.info("second pass has no PR to review", { delivery: deliveryId, reason: problem });
-      const origin = slackOrigin(ctx);
-      if (origin && deps.slack) {
-        deps.slack.reply(origin, problem).catch((error: unknown) => log.warn("reply failed", { delivery: deliveryId, error }));
-      }
-      return;
+  if (problem) {
+    log.info("second pass has no PR to review", { delivery: deliveryId, reason: problem });
+    const origin = slackOrigin(ctx);
+    if (origin && deps.slack) {
+      deps.slack.reply(origin, problem).catch((error: unknown) => log.warn("reply failed", { delivery: deliveryId, error }));
     }
+    return;
   }
 
   handleDelivery(deps, { deliveryId, ...delivery, complete: withPullRequestDetails });
