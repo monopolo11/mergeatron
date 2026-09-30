@@ -1,8 +1,8 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { changesRequestedStreak, reviewVerdict } from "./completion.ts";
 import type { AppDatabase } from "./db/index.ts";
-import { rules, runs, settings } from "./db/schema.ts";
-import { DEFAULT_SETTINGS, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
+import { reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import { DEFAULT_SETTINGS, type ReviewRequest, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
 import { HANDOFF_EVENT, type RunSource } from "./shared.ts";
 
 /** Run counts split by status, for one grouping key. */
@@ -173,6 +173,36 @@ export class Store {
         .orderBy(desc(runs.createdAt))
         .get() ?? null
     );
+  }
+
+  /** The Slack thread an agent opened for this PR through the MCP tools, if any. */
+  getReviewRequest(repo: string, prNumber: string): ReviewRequest | null {
+    return (
+      this.db
+        .select()
+        .from(reviewRequests)
+        .where(and(eq(reviewRequests.repo, repo.toLowerCase()), eq(reviewRequests.prNumber, prNumber)))
+        .get() ?? null
+    );
+  }
+
+  createReviewRequest(input: Omit<ReviewRequest, "id" | "round" | "createdAt" | "updatedAt">): ReviewRequest {
+    const now = new Date().toISOString();
+    return this.db
+      .insert(reviewRequests)
+      .values({ ...input, repo: input.repo.toLowerCase(), id: crypto.randomUUID(), round: 1, createdAt: now, updatedAt: now })
+      .returning()
+      .get();
+  }
+
+  /** Starts the next review round and returns the updated request. */
+  nextReviewRound(id: string): ReviewRequest {
+    return this.db
+      .update(reviewRequests)
+      .set({ round: sql`${reviewRequests.round} + 1`, updatedAt: new Date().toISOString() })
+      .where(eq(reviewRequests.id, id))
+      .returning()
+      .get()!;
   }
 
   /** Runs whose thread is still running as far as we know; re-watched after a restart. */

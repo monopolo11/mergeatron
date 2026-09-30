@@ -1,10 +1,17 @@
 import { z } from "zod";
-import type { rules, runs, settings } from "./db/schema.ts";
-import { DEFAULT_HANDOFF_PROMPT, RUNTIME_MODES, WORKSPACE_MODES } from "./shared.ts";
+import type { reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import {
+  DEFAULT_HANDOFF_PROMPT,
+  DEFAULT_REVIEW_REQUEST_MESSAGE,
+  DEFAULT_SECOND_PASS_MESSAGE,
+  RUNTIME_MODES,
+  WORKSPACE_MODES,
+} from "./shared.ts";
 
 export type Rule = typeof rules.$inferSelect;
 export type Run = typeof runs.$inferSelect;
 export type Settings = Omit<typeof settings.$inferSelect, "id">;
+export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type { ModelSelection } from "./db/schema.ts";
 
 const ModelSelectionSchema = z.object({
@@ -20,6 +27,7 @@ export const RuleInput = z.object({
   repos: z.array(z.string().trim().min(1)).default([]),
   reviewer: z.string().trim().min(1).nullable().default(null),
   channel: z.string().trim().min(1).nullable().default(null),
+  allowBots: z.boolean().default(true),
   skipSelfReview: z.boolean().default(true),
   projectId: z.string().trim().min(1).nullable().default(null),
   workspace: z.enum(WORKSPACE_MODES).default("worktree"),
@@ -39,6 +47,14 @@ export const SettingsInput = z.object({
     .default(null),
   maxChangesRequestedRounds: z.number().int().min(0).default(3),
   handoffPrompt: z.string().min(1).default(DEFAULT_HANDOFF_PROMPT),
+  reviewChannel: z
+    .string()
+    .trim()
+    .transform((channel) => channel || null)
+    .nullable()
+    .default(null),
+  reviewRequestMessage: z.string().min(1).default(DEFAULT_REVIEW_REQUEST_MESSAGE),
+  secondPassMessage: z.string().min(1).default(DEFAULT_SECOND_PASS_MESSAGE),
 }) satisfies z.ZodType<Settings, unknown>;
 
 export const TestThreadInput = z.object({ projectId: z.string().trim().min(1) });
@@ -49,4 +65,7 @@ export const DEFAULT_SETTINGS: Settings = {
   githubLogin: null,
   maxChangesRequestedRounds: 3,
   handoffPrompt: DEFAULT_HANDOFF_PROMPT,
+  reviewChannel: null,
+  reviewRequestMessage: DEFAULT_REVIEW_REQUEST_MESSAGE,
+  secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
 };

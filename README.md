@@ -79,7 +79,11 @@ changes.
 
 Then add a rule with event `slack.app_mention` (fires when the bot is mentioned)
 or `slack.message` (human messages in the channel that link a GitHub PR; set the
-channel filter). Channel chatter without a PR link is ignored.
+channel filter). Channel chatter without a PR link is ignored. PR links posted by
+other bots are reviewed too, so PRs another orchestrator's agents send through its MCP
+tools get picked up; turn off a rule's **Bot posts** toggle to ignore bots (e.g. GitHub
+notifications). This bot's own posts never fire rules, since the orchestrator that
+posted already started the review.
 The first GitHub PR link in the message picks the repository and PR; the
 service fetches the head branch with the `gh` CLI so the worktree starts at the PR
 head. Without `gh` or access to the repository the thread runs in the local
@@ -102,6 +106,33 @@ failed. "Done" means the latest turn settled, no background task
 (subagent or background shell) is still running, and the thread has been quiet for a minute:
 the review prompt fans out to subagents, so the first turn ends with "standing by" and T3 starts
 another turn when they report. T3 thread links are never posted to Slack; they show in the run log.
+
+### MCP server for agents
+
+With Slack configured, the orchestrator also serves MCP tools that let other agents
+send PRs for review through the bot. They live on their own loopback-only port
+(`MCP_PORT`, default 8788) so a tunnel to the main port never exposes them:
+
+```sh
+claude mcp add --scope user --transport http t3-review http://127.0.0.1:8788/mcp
+```
+
+| Tool | What it does |
+| --- | --- |
+| `request_review` | Posts the review request in a channel (`channel`, or **Settings → Review channel**) and feeds it to the rules as `slack.message`, like a human's post. Once per PR. |
+| `request_second_pass` | For later rounds (e.g. after pushing fixes): replies in the PR's thread, starts the next round, fires `slack.second_pass`. Runs even when the PR's reviews are paused. |
+| `review_status` | The PR's thread, round, status, and the latest review's full reply. |
+| `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`). |
+
+The orchestrator remembers each PR's channel, thread and round, so agents only pass
+the PR URL. Add `slack.second_pass` to a rule's events for later rounds to be
+reviewed automatically; prompts get `{{review_round}}`. Without a
+matching rule the message is still posted and tags the humans.
+
+Both messages are templates in **Settings** with `{{repo}}`, `{{pr_number}}`,
+`{{pr_url}}`, `{{pr_title}}`, `{{pr_author}}`, `{{round}}`, `{{mentions}}` and `{{note}}`.
+Agents fill `{{note}}` and `{{mentions}}`: Slack user ids (`U…`), user group ids (`S…`),
+or `here`/`channel`. Fixed tags can live in the template as `<@U123>` or `<!subteam^S123>`.
 
 ## Run as a service (macOS)
 

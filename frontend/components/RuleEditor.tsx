@@ -125,6 +125,14 @@ export function RuleEditor({
               <Input className={cn("h-8", mono)} value={draft.channel ?? ""} onChange={(e) => patch({ channel: e.target.value || null })} placeholder="C0123456789" />
             </Field>
           )}
+          {isSlackEvent && (
+            <Field label="Bot posts" hint="Also fire for PR links posted by other bots and apps, such as another orchestrator's agents or GitHub notifications. This bot's own posts never fire.">
+              <label className="flex h-8 items-center gap-2 text-[13px]">
+                <Switch size="sm" checked={draft.allowBots} onCheckedChange={(allowBots) => patch({ allowBots })} />
+                <span className={cn(!draft.allowBots && "text-muted-foreground")}>{draft.allowBots ? "Reviewed" : "Ignored"}</span>
+              </label>
+            </Field>
+          )}
           {isGitHubEvent && (
             <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
               <Input className="h-8" value={draft.reviewer ?? ""} onChange={(e) => patch({ reviewer: e.target.value || null })} placeholder="login or team slug" />

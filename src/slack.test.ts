@@ -30,9 +30,9 @@ describe("slackEvent", () => {
     expect(slackEvent(mention)).toMatchObject({ type: "app_mention" });
   });
 
-  test("ignores verification, bot posts and subtyped messages", () => {
+  test("ignores verification and subtyped messages, keeps bot posts for the rules to decide", () => {
     expect(slackEvent({ type: "url_verification", challenge: "x" })).toEqual({ ignored: "not an event_callback (url_verification)" });
-    expect(slackEvent({ ...mention, event: { ...mention.event, bot_id: "B1" } })).toEqual({ ignored: "posted by a bot" });
+    expect(slackEvent({ ...mention, event: { ...mention.event, bot_id: "B1", subtype: "bot_message" } })).toMatchObject({ bot_id: "B1" });
     expect(slackEvent({ ...mention, event: { ...mention.event, subtype: "message_changed" } })).toEqual({ ignored: "message subtype message_changed" });
   });
 

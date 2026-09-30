@@ -1,5 +1,5 @@
 import type { WebhookContext } from "./github.ts";
-import { handleDelivery, type HandlerDeps } from "./handler.ts";
+import { handleDelivery, matchRules, type HandlerDeps } from "./handler.ts";
 import { logger } from "./log.ts";
 import { withPullRequestDetails } from "./pulls.ts";
 import { SECOND_PASS_EVENT, slackDelivery, slackOrigin } from "./slack.ts";
@@ -28,8 +28,22 @@ export function resolveSecondPassTarget(store: Store, ctx: WebhookContext): stri
   return null;
 }
 
+/**
+ * Why a bot's post should not reach the rules, or null when it should. Our
+ * own posts never do (the MCP tools already started their review), and other
+ * bots' posts only when a rule accepting bots matches, so bot chatter in a
+ * channel gets no ⏩.
+ */
+export async function botPostIgnored(deps: HandlerDeps, event: string, ctx: WebhookContext): Promise<string | null> {
+  const own = await deps.slack?.botId().catch(() => null);
+  if (!own) return "posted by a bot, and this bot's own id is unknown (auth.test failed)";
+  if (own === ctx.slack_bot_id) return "posted by this bot";
+  if (matchRules(deps.store.listRules(), event, ctx).length === 0) return "posted by a bot; no rule accepting bots matches";
+  return null;
+}
+
 /** Turns one Socket Mode Events API payload into a delivery and starts matching rules. */
-export function handleSlackEvent(deps: HandlerDeps, payload: unknown): void {
+export async function handleSlackEvent(deps: HandlerDeps, payload: unknown): Promise<void> {
   const deliveryId = (payload as { event_id?: string }).event_id ?? crypto.randomUUID();
   const delivery = slackDelivery(payload);
   if ("ignored" in delivery) {
@@ -37,6 +51,11 @@ export function handleSlackEvent(deps: HandlerDeps, payload: unknown): void {
     return;
   }
   const { ctx } = delivery;
+  const botIgnored = ctx.slack_bot_id ? await botPostIgnored(deps, delivery.event, ctx) : null;
+  if (botIgnored) {
+    log.info("event ignored", { delivery: deliveryId, reason: botIgnored });
+    return;
+  }
   log.info("event received", { delivery: deliveryId, event: delivery.event, channel: ctx.slack_channel, user: ctx.slack_user, pr: ctx.pr_url });
 
   if (delivery.event === SECOND_PASS_EVENT) {

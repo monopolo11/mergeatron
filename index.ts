@@ -6,6 +6,7 @@ import { eventKey, extractContext, verifySignature } from "./src/github.ts";
 import { handleDelivery, type HandlerDeps } from "./src/handler.ts";
 import { handoffIfStuck } from "./src/handoff.ts";
 import { logger } from "./src/log.ts";
+import { handleMcpRequest } from "./src/mcp.ts";
 import { openDatabase } from "./src/db/index.ts";
 import { RuleInput, SettingsInput, TestThreadInput } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
@@ -61,8 +62,23 @@ resumeWatchers(deps);
  * a review thread re-reviews that PR in a new T3 thread. Slack redelivers
  * unacked envelopes; `event_id` dedupes those.
  */
-const slackSocket = slackAppToken && deps.slack ? new SlackSocket(slackAppToken, (payload) => handleSlackEvent(deps, payload)) : null;
+const slackSocket = slackAppToken && deps.slack ? new SlackSocket(slackAppToken, (payload) => void handleSlackEvent(deps, payload)) : null;
 slackSocket?.start();
+
+/**
+ * MCP tools for other agents (see src/mcp.ts) on their own loopback-only
+ * port: the main port may be tunnelled to GitHub, and these post as the bot.
+ */
+const slack = deps.slack;
+const mcp = slack
+  ? Bun.serve({
+      hostname: "127.0.0.1",
+      port: Number(process.env.MCP_PORT ?? 8788),
+      // request_review waits on `gh` and a few Slack calls.
+      idleTimeout: 60,
+      routes: { "/mcp": (req) => handleMcpRequest({ ...deps, slack }, req) },
+    })
+  : null;
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 const badRequest = (error: unknown) =>
@@ -254,4 +270,5 @@ log.info("GitHub -> T3 Code orchestrator started", {
   t3: t3.origin,
   webhook: `${server.url.href}webhooks/github`,
   slack: slackSocket ? "starting" : "off",
+  mcp: mcp ? `${mcp.url.href}mcp` : "off (needs Slack)",
 });

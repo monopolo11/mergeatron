@@ -15,6 +15,7 @@ const base: Rule = {
   repos: [],
   reviewer: null,
   channel: null,
+  allowBots: false,
   skipSelfReview: true,
   projectId: null,
   workspace: "worktree",
@@ -45,6 +46,13 @@ describe("matchRules", () => {
     expect(matchRules([slack], "slack.app_mention", { repo: "", slack_channel: "C123" })).toHaveLength(1);
     expect(matchRules([slack], "slack.app_mention", { repo: "", slack_channel: "C999" })).toHaveLength(0);
     expect(matchRules([{ ...slack, channel: null }], "slack.app_mention", { repo: "", slack_channel: "C999" })).toHaveLength(1);
+  });
+
+  test("bot posts only match rules that accept bots", () => {
+    const slack = { ...base, events: ["slack.message"] };
+    const bot = { repo: "acme/widgets", slack_bot_id: "B2" };
+    expect(ruleMismatch(slack, "slack.message", bot)).toBe("posted by a bot; rule does not accept bots");
+    expect(ruleMismatch({ ...slack, allowBots: true }, "slack.message", bot)).toBeNull();
   });
 
   test("reviewer filter compares against the requested reviewer", () => {

@@ -1,5 +1,12 @@
 import { integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
-import { DEFAULT_HANDOFF_PROMPT, RUNTIME_MODES, RUN_SOURCES, WORKSPACE_MODES } from "../shared.ts";
+import {
+  DEFAULT_HANDOFF_PROMPT,
+  DEFAULT_REVIEW_REQUEST_MESSAGE,
+  DEFAULT_SECOND_PASS_MESSAGE,
+  RUNTIME_MODES,
+  RUN_SOURCES,
+  WORKSPACE_MODES,
+} from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
 
@@ -15,6 +22,12 @@ export const rules = sqliteTable("rules", {
   reviewer: text(),
   /** Slack rules only: fire for messages in this channel id. Null means any channel the bot is in. */
   channel: text(),
+  /**
+   * Slack rules only: also fire for posts by other bots and apps (another
+   * orchestrator's MCP requests, GitHub notifications). Our own bot's posts
+   * never fire rules.
+   */
+  allowBots: integer("allow_bots", { mode: "boolean" }).notNull().default(true),
   /** Skip PRs authored by the GitHub login in settings: reviewing your own PR is bad practice. */
   skipSelfReview: integer("skip_self_review", { mode: "boolean" }).notNull().default(true),
   /** T3 project to open the thread in. Null means match by the repository's git remote. */
@@ -41,6 +54,11 @@ export const settings = sqliteTable("settings", {
   maxChangesRequestedRounds: integer("max_changes_requested_rounds").notNull().default(3),
   /** First message of the handoff thread; see DEFAULT_HANDOFF_PROMPT for its variables. */
   handoffPrompt: text("handoff_prompt").notNull().default(DEFAULT_HANDOFF_PROMPT),
+  /** Channel id (or `#name`) the MCP `request_review` tool posts to when the agent names none. */
+  reviewChannel: text("review_channel"),
+  /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
+  reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
+  secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),
 });
 
 /**
@@ -72,4 +90,30 @@ export const runs = sqliteTable(
   },
   // GitHub retries deliveries; one thread per delivery per rule.
   (table) => [unique().on(table.deliveryId, table.ruleId)],
+);
+
+/**
+ * A PR an agent sent for review through the MCP tools: the Slack thread its
+ * request lives in and how many review rounds it has asked for. One per PR;
+ * second passes reply in the same thread.
+ */
+export const reviewRequests = sqliteTable(
+  "review_requests",
+  {
+    id: text().primaryKey(),
+    /** `owner/name`, lowercased so lookups by PR URL match regardless of case. */
+    repo: text().notNull(),
+    prNumber: text("pr_number").notNull(),
+    prUrl: text("pr_url").notNull(),
+    /** Channel id Slack resolved the post to, even when the agent passed `#name`. */
+    channel: text().notNull(),
+    /** `ts` of the request message; everything after it is a reply in its thread. */
+    threadTs: text("thread_ts").notNull(),
+    permalink: text(),
+    /** 1 for the first request, +1 per second pass. */
+    round: integer().notNull().default(1),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [unique().on(table.repo, table.prNumber)],
 );

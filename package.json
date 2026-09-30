@@ -18,6 +18,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@tanstack/react-query": "^5.103.2",
     "@tanstack/react-router": "1.170.18",
     "bun-plugin-tailwind": "^0.1.2",

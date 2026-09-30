@@ -32,9 +32,10 @@ export type SlackEvent = {
 
 /**
  * Pulls the inner event out of an Events API envelope. Ignores anything that
- * should not start a thread: URL verification, bot posts (including our own
- * replies), edits, joins and other subtyped messages, and plain replies
- * inside a Slack thread (mentions there still count).
+ * should not start a thread: URL verification, edits, joins and other
+ * subtyped messages, and plain replies inside a Slack thread (mentions there
+ * still count), which covers our own review replies. Top-level bot posts
+ * come through with `bot_id`; secondPass.ts decides whether a rule wants them.
  */
 export function slackEvent(payload: unknown): SlackEvent | Ignored {
   if (!isRecord(payload) || payload.type !== "event_callback" || !isRecord(payload.event)) {
@@ -44,8 +45,7 @@ export function slackEvent(payload: unknown): SlackEvent | Ignored {
   if (typeof event.type !== "string" || typeof event.channel !== "string" || typeof event.ts !== "string") {
     return { ignored: "event has no type, channel or ts" };
   }
-  if (event.bot_id) return { ignored: "posted by a bot" };
-  if (event.subtype) return { ignored: `message subtype ${String(event.subtype)}` };
+  if (event.subtype && event.subtype !== "bot_message") return { ignored: `message subtype ${String(event.subtype)}` };
   if (event.type === "message" && typeof event.thread_ts === "string" && event.thread_ts !== event.ts) {
     return { ignored: "plain reply inside a Slack thread; mention the bot there instead" };
   }
@@ -56,6 +56,7 @@ export function slackEvent(payload: unknown): SlackEvent | Ignored {
     text: typeof event.text === "string" ? event.text : undefined,
     ts: event.ts,
     thread_ts: typeof event.thread_ts === "string" ? event.thread_ts : undefined,
+    bot_id: typeof event.bot_id === "string" ? event.bot_id : undefined,
   };
 }
 
@@ -89,6 +90,7 @@ export function extractSlackContext(event: SlackEvent): WebhookContext {
     slack_text: text,
   };
   if (event.thread_ts && event.thread_ts !== event.ts) ctx.slack_thread_ts = event.thread_ts;
+  if (event.bot_id) ctx.slack_bot_id = event.bot_id;
   if (event.user) {
     ctx.slack_user = event.user;
     ctx.sender = event.user;
@@ -306,20 +308,55 @@ export class SlackClient {
 
   /** Posts a reply in the triggering message's thread. Markdown is converted to Slack mrkdwn. */
   async reply(origin: SlackOrigin, markdown: string): Promise<void> {
-    await this.call("chat.postMessage", {
-      channel: origin.channel,
-      thread_ts: origin.thread,
+    await this.post(origin.channel, markdown, origin.thread);
+  }
+
+  /**
+   * Posts to a channel (ID, or `#name` for public channels the bot is in), in
+   * `thread` when given. Markdown is converted to Slack mrkdwn. Returns the
+   * channel id and the message's `ts`, which doubles as its thread id.
+   */
+  async post(channel: string, markdown: string, thread?: string): Promise<{ channel: string; ts: string }> {
+    const { channel: id, ts } = await this.call<{ channel: string; ts: string }>("chat.postMessage", {
+      channel,
+      thread_ts: thread,
       text: toMrkdwn(markdown),
       unfurl_links: false,
       unfurl_media: false,
     });
+    return { channel: id, ts };
   }
 
-  private async call<T = unknown>(method: string, body: Record<string, unknown>, ignoreErrors: string[] = []): Promise<T> {
+  private ownBotId: Promise<string> | null = null;
+
+  /** This app's bot id (`auth.test`), to tell our own posts from other bots'. Cached; retried after a failure. */
+  botId(): Promise<string> {
+    this.ownBotId ??= this.call<{ bot_id: string }>("auth.test", {}).then(
+      ({ bot_id }) => bot_id,
+      (error: unknown) => {
+        this.ownBotId = null;
+        throw error;
+      },
+    );
+    return this.ownBotId;
+  }
+
+  /** Link to a message, for agents to hand to their user. */
+  async permalink(channel: string, ts: string): Promise<string> {
+    const { permalink } = await this.call<{ permalink: string }>("chat.getPermalink", { channel, message_ts: ts });
+    return permalink;
+  }
+
+  /**
+   * Form-encoded rather than JSON: read methods such as `chat.getPermalink`
+   * ignore JSON bodies, and every method accepts form params.
+   */
+  private async call<T = unknown>(method: string, body: Record<string, string | boolean | undefined>, ignoreErrors: string[] = []): Promise<T> {
+    const params = Object.entries(body).flatMap(([key, value]) => (value === undefined ? [] : [[key, String(value)]]));
     const response = await fetch(`${SLACK_API}/${method}`, {
       method: "POST",
-      headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify(body),
+      headers: { authorization: `Bearer ${this.token}` },
+      body: new URLSearchParams(params),
     });
     const result = (await response.json()) as { ok: boolean; error?: string } & T;
     if (!result.ok && !ignoreErrors.includes(result.error ?? "")) {

@@ -10,7 +10,14 @@ import { api, type Status } from "@/lib/api";
 import { saveLabel, useAutosave } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import type { Settings } from "../../src/rules.ts";
-import { DEFAULT_HANDOFF_PROMPT, HANDOFF_TEMPLATE_VARS, RUNTIME_MODES } from "../../src/shared.ts";
+import {
+  DEFAULT_HANDOFF_PROMPT,
+  DEFAULT_REVIEW_REQUEST_MESSAGE,
+  DEFAULT_SECOND_PASS_MESSAGE,
+  HANDOFF_TEMPLATE_VARS,
+  RUNTIME_MODES,
+  REVIEW_MESSAGE_VARS,
+} from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
 import type { UpdateResult, UpdateStatus } from "../../src/update.ts";
 import { ModelPicker } from "@/components/ModelPicker";
@@ -222,7 +229,7 @@ function SettingsPopover({ settings, providers, onSaved }: { settings: Settings;
       <PopoverTrigger asChild>
         <Button size="sm" variant="ghost">Settings</Button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[26rem] space-y-3 p-3 text-[13px]">
+      <PopoverContent align="end" className="max-h-[85vh] w-[26rem] space-y-3 overflow-y-auto p-3 text-[13px]">
         <div className="flex items-baseline justify-between">
           <span className="font-medium">Defaults</span>
           <span className={cn("text-xs text-muted-foreground", state === "error" && "text-destructive")}>{saveLabel(state)}</span>
@@ -271,9 +278,40 @@ function SettingsPopover({ settings, providers, onSaved }: { settings: Settings;
             </Button>
           )}
         </Field>
+        <div className="font-medium">Agent review requests (MCP)</div>
+        <Field label="Review channel" hint="Where request_review posts when the agent names no channel. Channel id or #name.">
+          <Input
+            className="h-8 font-mono text-xs"
+            value={draft.reviewChannel ?? ""}
+            onChange={(e) => setDraft({ ...draft, reviewChannel: e.target.value || null })}
+            placeholder="C0123456789"
+          />
+        </Field>
+        <MessageField label="Review request" value={draft.reviewRequestMessage} fallback={DEFAULT_REVIEW_REQUEST_MESSAGE} onChange={(reviewRequestMessage) => setDraft({ ...draft, reviewRequestMessage })} />
+        <MessageField
+          label="Second pass"
+          value={draft.secondPassMessage}
+          fallback={DEFAULT_SECOND_PASS_MESSAGE}
+          onChange={(secondPassMessage) => setDraft({ ...draft, secondPassMessage })}
+          hint={`Markdown with ${REVIEW_MESSAGE_VARS.map((name) => `{{${name}}}`).join(", ")}. Fixed tags go in as <@U123> or <!subteam^S123>.`}
+        />
         {error && <p className="text-destructive">{error}</p>}
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** A Slack message template with a reset to its default. */
+function MessageField({ label, value, fallback, onChange, hint }: { label: string; value: string; fallback: string; onChange: (value: string) => void; hint?: string }) {
+  return (
+    <Field label={label} hint={hint}>
+      <Textarea className="min-h-16 font-mono text-xs" value={value} onChange={(e) => onChange(e.target.value)} />
+      {value !== fallback && (
+        <Button size="xs" variant="ghost" className="justify-self-start text-primary" onClick={() => onChange(fallback)}>
+          Reset to default
+        </Button>
+      )}
+    </Field>
   );
 }
 

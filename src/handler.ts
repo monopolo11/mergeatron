@@ -50,6 +50,7 @@ export function ruleMismatch(rule: Rule, key: string, ctx: WebhookContext): stri
   if (rule.channel && !sameName(rule.channel, ctx.slack_channel ?? "")) {
     return `channel ${ctx.slack_channel ?? "(none)"} is not ${rule.channel}`;
   }
+  if (ctx.slack_bot_id && !rule.allowBots) return "posted by a bot; rule does not accept bots";
   return null;
 }
 

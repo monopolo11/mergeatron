@@ -8,7 +8,7 @@ import { Store } from "./store.ts";
 import type { StartThreadInput, T3Client } from "./t3.ts";
 
 const rule: RuleInput = {
-  name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: null, skipSelfReview: true,
+  name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: null, allowBots: false, skipSelfReview: true,
   projectId: "p1", workspace: "worktree", model: null, prompt: "review {{pr_url}}",
 };
 const ctx = { repo: "acme/widgets", pr_number: "5", pr_url: "https://github.com/acme/widgets/pull/5", pr_title: "Add billing", pr_author: "alice", pr_base: "main", slack_channel: "C1", slack_ts: "1.0" };

@@ -26,6 +26,7 @@ const NEW_RULE: RuleInput = {
   repos: [],
   reviewer: null,
   channel: null,
+  allowBots: true,
   skipSelfReview: true,
   projectId: null,
   workspace: "worktree",

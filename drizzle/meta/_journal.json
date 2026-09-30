@@ -64,6 +64,27 @@
       "when": 1790271043752,
       "tag": "0008_handoff_prompt",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790726170081,
+      "tag": "0009_review_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1790729774988,
+      "tag": "0010_rule_allow_bots",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1790730161915,
+      "tag": "0011_rule_allow_bots_default",
+      "breakpoints": true
     }
   ]
 }

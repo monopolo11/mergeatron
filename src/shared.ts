@@ -107,7 +107,24 @@ export const TEMPLATE_VARS = [
   "slack_ts",
   "slack_text",
   "slack_thread_ts",
+  "slack_bot_id",
   "previous_result",
   "previous_thread_url",
+  "review_round",
 ] as const;
 export type TemplateVar = (typeof TEMPLATE_VARS)[number];
+
+/**
+ * Slack messages the MCP tools post for agents (Settings). Rendered with
+ * REVIEW_MESSAGE_VARS; Markdown is converted to mrkdwn and raw Slack syntax
+ * such as `<@U123>` or `<!subteam^S123>` passes through, so fixed tags can
+ * live in the template. Blank lines left by empty variables are dropped.
+ */
+export const DEFAULT_REVIEW_REQUEST_MESSAGE = `Review requested {{mentions}}
+[{{repo}}#{{pr_number}}]({{pr_url}}) {{pr_title}}
+{{note}}`;
+export const DEFAULT_SECOND_PASS_MESSAGE = `Round {{round}}: second pass requested {{mentions}}
+{{note}}`;
+
+/** Variables of the review request messages. `mentions` and `note` come from the agent's tool call. */
+export const REVIEW_MESSAGE_VARS = ["repo", "pr_number", "pr_url", "pr_title", "pr_author", "round", "mentions", "note"] as const;

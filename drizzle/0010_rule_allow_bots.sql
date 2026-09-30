@@ -1,0 +1,1 @@
+ALTER TABLE `rules` ADD `allow_bots` integer DEFAULT false NOT NULL;
