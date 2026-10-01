@@ -122,6 +122,7 @@ claude mcp add --scope user --transport http t3-review http://127.0.0.1:8788/mcp
 | `request_review` | Posts the review request in a channel (`channel`, or **Settings → Review channel**) and feeds it to the rules as `slack.message`, like a human's post. Once per PR. |
 | `request_second_pass` | For later rounds (e.g. after pushing fixes): replies in the PR's thread, starts the next round, fires `slack.second_pass`. Runs even when the PR's reviews are paused. |
 | `review_status` | The PR's thread, round, status, and the latest review's full reply. |
+| `mark_merged` | Once the PR is merged (checked with `gh`), reacts `:merge:` on the message that opened its thread. The workspace needs a custom `:merge:` emoji. |
 | `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`). |
 
 The orchestrator remembers each PR's channel, thread and round, so agents only pass

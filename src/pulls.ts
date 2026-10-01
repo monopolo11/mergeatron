@@ -43,3 +43,13 @@ export async function withPullRequestDetails(ctx: WebhookContext): Promise<Webho
 function defined<T extends Record<string, string | undefined>>(values: T): Partial<Record<keyof T, string>> {
   return Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined)) as Partial<Record<keyof T, string>>;
 }
+
+/** Whether GitHub says the PR is merged, via the `gh` CLI; null when `gh` cannot tell (not installed, no access). */
+export async function pullRequestMerged(repo: string, prNumber: string): Promise<boolean | null> {
+  const result = await Bun.$`gh api repos/${repo}/pulls/${prNumber} --jq .merged`.quiet().nothrow();
+  if (result.exitCode !== 0) {
+    log.warn("gh api failed; cannot tell whether the PR is merged", { repo, pr: prNumber, error: result.stderr.toString().trim() });
+    return null;
+  }
+  return result.text().trim() === "true";
+}

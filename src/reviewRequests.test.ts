@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "./db/index.ts";
-import { renderReviewMessage, requestReview, requestSecondPass, ReviewRequestError, slackMentions, type ReviewDeps } from "./reviewRequests.ts";
+import { markMerged, renderReviewMessage, requestReview, requestSecondPass, ReviewRequestError, slackMentions, type ReviewDeps } from "./reviewRequests.ts";
 import { DEFAULT_REVIEW_REQUEST_MESSAGE } from "./shared.ts";
 import type { SlackClient } from "./slack.ts";
 import { Store } from "./store.ts";
@@ -25,16 +25,24 @@ function setup() {
     prompt: "review {{pr_url}} round {{review_round}}",
   });
   const posts: { channel: string; text: string; thread?: string }[] = [];
+  const reactions: { channel: string; ts: string; name: string }[] = [];
   const slack = {
     post: async (channel: string, text: string, thread?: string) => (posts.push({ channel, text, thread }), { channel: "C1", ts: `${posts.length}.0` }),
     permalink: async () => "https://acme.slack.com/archives/C1/p10",
-    react: async () => {},
+    react: async ({ channel, ts }: { channel: string; ts: string }, name: string) => void reactions.push({ channel, ts, name }),
     reply: async () => {},
   } as unknown as SlackClient;
   // No T3 projects: runs are recorded as started, then skipped in the background.
   const t3 = { projects: async () => [] } as unknown as T3Client;
-  const deps: ReviewDeps = { store, t3, slack, pullRequestDetails: async (ctx) => ({ ...ctx, pr_title: "Add widgets" }) };
-  return { deps, store, posts };
+  const merged = { value: false };
+  const deps: ReviewDeps = {
+    store,
+    t3,
+    slack,
+    pullRequestDetails: async (ctx) => ({ ...ctx, pr_title: "Add widgets" }),
+    pullRequestMerged: async () => merged.value,
+  };
+  return { deps, store, posts, reactions, merged };
 }
 
 describe("review requests", () => {
@@ -63,6 +71,24 @@ describe("review requests", () => {
   test("later rounds need a first request", async () => {
     const { deps } = setup();
     await expect(requestSecondPass(deps, { prUrl: PR })).rejects.toThrow("has not been sent for review yet");
+  });
+});
+
+describe("markMerged", () => {
+  test("reacts :merge: on the thread's opening message once the PR merged", async () => {
+    const { deps, reactions, merged } = setup();
+    // The rules react too (⏩ and friends); only the merge mark matters here.
+    const marks = () => reactions.filter((reaction) => reaction.name === "merge");
+    await expect(markMerged(deps, PR)).rejects.toThrow("was not sent for review");
+
+    await requestReview(deps, { prUrl: PR, channel: "#reviews" });
+    await requestSecondPass(deps, { prUrl: PR });
+    await expect(markMerged(deps, PR)).rejects.toThrow("is not merged yet");
+    expect(marks()).toEqual([]);
+
+    merged.value = true;
+    expect(await markMerged(deps, PR)).toMatchObject({ channel: "C1", thread_ts: "1.0", reaction: "merge" });
+    expect(marks()).toEqual([{ channel: "C1", ts: "1.0", name: "merge" }]);
   });
 });
 

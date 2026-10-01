@@ -3,13 +3,14 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { logger } from "./log.ts";
-import { requestReview, requestSecondPass, ReviewRequestError, reviewStatus, type ReviewDeps } from "./reviewRequests.ts";
+import { markMerged, requestReview, requestSecondPass, ReviewRequestError, reviewStatus, type ReviewDeps } from "./reviewRequests.ts";
 import { SlackApiError } from "./slack.ts";
 
 /**
  * MCP tools for other agents: post as the Slack bot, and send PRs for review
- * with tracked threads and rounds (see reviewRequests.ts). Stateless
- * Streamable HTTP, one server per request; index.ts serves it on loopback.
+ * with tracked threads and rounds, and mark those threads merged (see
+ * reviewRequests.ts). Stateless Streamable HTTP, one server per request;
+ * index.ts serves it on loopback.
  */
 
 const log = logger("mcp");
@@ -70,6 +71,17 @@ function mcpServer(deps: ReviewDeps): McpServer {
       annotations: { destructiveHint: false, openWorldHint: true },
     },
     ({ pr_url, mentions, note }) => result("request_second_pass", () => requestSecondPass(deps, { prUrl: pr_url, mentions, note })),
+  );
+
+  server.registerTool(
+    "mark_merged",
+    {
+      description:
+        "Mark a PR sent with request_review as merged: adds the :merge: reaction to the message that opened its Slack review thread. Call after the PR merges; fails when GitHub says it is not merged yet. Safe to repeat.",
+      inputSchema: { pr_url: prUrl },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    ({ pr_url }) => result("mark_merged", () => markMerged(deps, pr_url)),
   );
 
   server.registerTool(

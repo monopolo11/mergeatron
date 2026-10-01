@@ -2,7 +2,7 @@ import { reviewVerdict } from "./completion.ts";
 import type { WebhookContext } from "./github.ts";
 import { handleDelivery, type HandlerDeps } from "./handler.ts";
 import { logger } from "./log.ts";
-import { withPullRequestDetails } from "./pulls.ts";
+import { pullRequestMerged, withPullRequestDetails } from "./pulls.ts";
 import type { ReviewRequest } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { pullRequestInText, SECOND_PASS_EVENT, type SlackClient } from "./slack.ts";
@@ -14,7 +14,7 @@ import { renderTemplate } from "./template.ts";
  * a PR for review: the bot posts the request in a channel and the post feeds
  * the rules like a human's `slack.message`. Second passes reply in that thread
  * as `slack.second_pass`, so reactions and the review reply land where the
- * humans look.
+ * humans look. Once merged, the request message gets a :merge: reaction.
  */
 
 const log = logger("mcp");
@@ -23,6 +23,8 @@ export type ReviewDeps = HandlerDeps & {
   slack: SlackClient;
   /** Fills PR title, head and author from GitHub; defaults to the `gh` CLI (pulls.ts). */
   pullRequestDetails?: typeof withPullRequestDetails;
+  /** Whether the PR is merged; defaults to the `gh` CLI (pulls.ts). */
+  pullRequestMerged?: typeof pullRequestMerged;
 };
 
 /** A problem the calling agent can fix; its message is returned to the agent as the tool error. */
@@ -90,6 +92,26 @@ export async function requestSecondPass(deps: ReviewDeps, ask: ReviewAsk): Promi
     review_round: String(updated.round),
   });
   return round(updated, automated);
+}
+
+/** Slack emoji marking a review thread whose PR merged. A custom emoji: Slack rejects it with `invalid_name` where the workspace lacks it. */
+export const MERGED_REACTION = "merge";
+
+/**
+ * Reacts :merge: on the message that opened the PR's review thread, once
+ * GitHub says the PR is merged. Safe to repeat.
+ */
+export async function markMerged(deps: ReviewDeps, prUrl: string) {
+  const pr = parsePullRequest(prUrl);
+  const request = deps.store.getReviewRequest(pr.repo, pr.number);
+  if (!request) throw new ReviewRequestError(`${pr.repo}#${pr.number} was not sent for review with request_review, so there is no thread to mark.`);
+  const merged = await (deps.pullRequestMerged ?? pullRequestMerged)(pr.repo, pr.number);
+  if (merged === null) throw new ReviewRequestError(`Could not check whether ${pr.repo}#${pr.number} is merged: the gh CLI failed (see the orchestrator log).`);
+  if (!merged) throw new ReviewRequestError(`${pr.repo}#${pr.number} is not merged yet. Call mark_merged after it merges.`);
+
+  await deps.slack.react({ channel: request.channel, ts: request.threadTs, thread: request.threadTs }, MERGED_REACTION);
+  log.info("marked merged", { pr: request.prUrl, channel: request.channel, ts: request.threadTs });
+  return { channel: request.channel, thread_ts: request.threadTs, permalink: request.permalink, reaction: MERGED_REACTION };
 }
 
 /**
