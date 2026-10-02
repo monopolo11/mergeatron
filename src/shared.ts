@@ -20,10 +20,67 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /**
  * How a run was triggered: `github` is the webhook endpoint, `slack` the Socket
- * Mode connection, `manual` the connection test in the header.
+ * Mode connection, `poll` an inbox automation (see poller.ts), `manual` a
+ * dispatch from the inbox view or the connection test in the header.
  */
-export const RUN_SOURCES = ["github", "slack", "manual"] as const;
+export const RUN_SOURCES = ["github", "slack", "poll", "manual"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
+
+/** APIs the inbox polls for PRs and issues that involve you. */
+export const INBOX_SOURCES = ["github", "linear"] as const;
+export type InboxSource = (typeof INBOX_SOURCES)[number];
+
+export const INBOX_KINDS = ["pull_request", "issue"] as const;
+export type InboxKind = (typeof INBOX_KINDS)[number];
+
+/** Why an item is in your inbox. One item can have several. */
+export const INBOX_REASONS = ["review_requested", "assigned", "mentioned", "authored"] as const;
+export type InboxReason = (typeof INBOX_REASONS)[number];
+export const INBOX_REASON_LABELS: Record<InboxReason, string> = {
+  review_requested: "review requested",
+  assigned: "assigned to me",
+  mentioned: "mentioned",
+  authored: "authored by me",
+};
+
+/** Rule keys for polled inbox items are `inbox.<source>.<kind>`. */
+export const INBOX_EVENT_PREFIX = "inbox.";
+export function inboxEvent(source: InboxSource, kind: InboxKind): string {
+  return `${INBOX_EVENT_PREFIX}${source}.${kind}`;
+}
+
+/**
+ * Filters a rule applies on top of its event, matched against the delivery's
+ * template variables (`reasons`, `labels`, `state`/`state_type`, `team`), so
+ * they work for webhook deliveries that carry those variables too. An empty
+ * list matches anything.
+ */
+export type RuleFilters = {
+  reasons: InboxReason[];
+  labels: string[];
+  /** Require every label in `labels` instead of any one of them. */
+  allLabels: boolean;
+  /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). */
+  states: string[];
+  /** Linear team keys. */
+  teams: string[];
+  /** Inbox PR rules: run again when the PR head moves, like `pull_request.synchronize`. */
+  rerunOnPush: boolean;
+};
+export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: [], allLabels: false, states: [], teams: [], rerunOnPush: true };
+
+/**
+ * Threads one rule may have running at once. Matches past the limit are
+ * recorded as `queued` and start as earlier ones settle; 0 means no limit.
+ */
+export const DEFAULT_MAX_CONCURRENT = 3;
+
+/** How often each inbox source is polled (Settings). */
+export type PollingSettings = Record<InboxSource, { enabled: boolean; minutes: number }>;
+export const DEFAULT_POLLING: PollingSettings = {
+  github: { enabled: true, minutes: 3 },
+  linear: { enabled: true, minutes: 3 },
+};
 
 /**
  * Events offered by the rule editor's picker. GitHub keys are `<event>.<action>`
@@ -47,6 +104,9 @@ export const SUGGESTED_EVENTS = [
   { key: "slack.app_mention", label: "Slack: bot mentioned" },
   { key: "slack.message", label: "Slack: PR link posted in channel" },
   { key: "slack.second_pass", label: "Slack: 'second pass' mention in a review thread" },
+  { key: "inbox.github.pull_request", label: "Inbox: GitHub PR" },
+  { key: "inbox.github.issue", label: "Inbox: GitHub issue" },
+  { key: "inbox.linear.issue", label: "Inbox: Linear issue" },
 ] as const;
 
 /**
@@ -73,7 +133,7 @@ export const HANDOFF_TEMPLATE_VARS = ["rounds", "review_history"] as const;
 /** Rules whose event starts with this prefix are fed by the Slack webhook, not GitHub. */
 export const SLACK_EVENT_PREFIX = "slack.";
 
-/** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts and slack.ts. */
+/** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts, slack.ts and itemContext in inbox.ts. */
 export const TEMPLATE_VARS = [
   "repo",
   "repo_url",
@@ -102,6 +162,15 @@ export const TEMPLATE_VARS = [
   "review_body",
   "review_author",
   "label",
+  "labels",
+  "state",
+  "state_type",
+  "reasons",
+  "team",
+  "priority",
+  "issue_identifier",
+  "branch",
+  "review_decision",
   "slack_channel",
   "slack_user",
   "slack_ts",
@@ -128,3 +197,30 @@ export const DEFAULT_SECOND_PASS_MESSAGE = `Round {{round}}: second pass request
 
 /** Variables of the review request messages. `mentions` and `note` come from the agent's tool call. */
 export const REVIEW_MESSAGE_VARS = ["repo", "pr_number", "pr_url", "pr_title", "pr_author", "round", "mentions", "note"] as const;
+
+/**
+ * Prompt presets the inbox composer offers, seeded when the table is empty.
+ * Presets are composable: several can be stacked into one dispatch.
+ */
+export const DEFAULT_PROMPTS: { name: string; body: string }[] = [
+  {
+    name: "Review PR",
+    body: `Review pull request {{pr_url}} ("{{pr_title}}" by {{pr_author}}, {{pr_head}} -> {{pr_base}}).
+
+You are checked out on the PR head. Read the diff against {{pr_base}}, then look for correctness bugs, missing tests and unclear code. Keep findings concrete, one line each with file:line. Post nothing to GitHub; report here.`,
+  },
+  {
+    name: "Implement issue",
+    body: `Implement {{issue_url}} ("{{issue_title}}").
+
+{{issue_body}}
+
+Work on a branch from {{default_branch}}. Read the relevant code first, keep the change small and focused, add or update tests, and finish with a short summary of what changed and anything left open. Do not open a pull request unless asked.`,
+  },
+  {
+    name: "Address review feedback",
+    body: `Pull request {{pr_url}} ("{{pr_title}}") has review feedback ({{review_decision}}).
+
+You are checked out on the PR head. Read every unresolved review comment with the gh CLI, fix what is right, push back in one line where a comment is wrong, and push the fixes to {{pr_head}}. Summarise what you changed per comment.`,
+  },
+];

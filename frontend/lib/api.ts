@@ -4,6 +4,8 @@ export type Status = {
   t3: { origin: string; environment: T3Environment | null };
   webhookSecretConfigured: boolean;
   slack: "off" | "connecting" | "connected";
+  /** MCP endpoint for agents, when Slack is configured. */
+  mcp: string | null;
 };
 
 /** JSON fetch wrapper; throws with the server's `error` message on non-2xx. */

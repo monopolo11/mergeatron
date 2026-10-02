@@ -1,7 +1,12 @@
-"use client"
-
 import * as React from "react"
+import { TONE_TEXT, type Tone } from "@/lib/status"
 import { cn } from "@/lib/utils"
+
+/*
+ * Dense defaults for every table in the app: 12px text, 28px muted column
+ * labels, 8px horizontal cell padding, rows that keep their bottom border.
+ * Callers add alignment and width, nothing else.
+ */
 
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
@@ -11,7 +16,7 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
     >
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-sm", className)}
+        className={cn("w-full caption-bottom text-xs", className)}
         {...props}
       />
     </div>
@@ -22,7 +27,7 @@ function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
   return (
     <thead
       data-slot="table-header"
-      className={cn("[&_tr]:border-b", className)}
+      className={cn("[&_tr]:border-b [&_tr]:hover:bg-transparent", className)}
       {...props}
     />
   )
@@ -32,7 +37,7 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
   return (
     <tbody
       data-slot="table-body"
-      className={cn("[&_tr:last-child]:border-0", className)}
+      className={className}
       {...props}
     />
   )
@@ -56,7 +61,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b transition-colors hover:bg-muted/50 has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
+        "border-b hover:bg-muted/40 data-[state=selected]:bg-muted/60",
         className
       )}
       {...props}
@@ -69,7 +74,7 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+        "h-7 px-2 text-left align-middle font-medium whitespace-nowrap text-muted-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
       )}
       {...props}
@@ -82,7 +87,7 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
     <td
       data-slot="table-cell"
       className={cn(
-        "p-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+        "px-2 py-1.5 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
       )}
       {...props}
@@ -103,6 +108,15 @@ function TableCaption({
   )
 }
 
+/** Right-aligned mono count in a tone; zeros are dimmed so the non-zero figures stand out. */
+function TableFigure({ value, tone, className }: { value: number; tone?: Tone; className?: string }) {
+  return (
+    <TableCell className={cn("text-right font-mono", value > 0 ? tone && TONE_TEXT[tone] : "text-muted-foreground/60", className)}>
+      {value}
+    </TableCell>
+  )
+}
+
 export {
   Table,
   TableHeader,
@@ -112,4 +126,5 @@ export {
   TableRow,
   TableCell,
   TableCaption,
+  TableFigure,
 }

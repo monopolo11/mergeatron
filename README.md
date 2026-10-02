@@ -40,14 +40,17 @@ cp .env.example .env
    bun --hot index.ts
    ```
 
-   The UI is at http://localhost:8787: rules on the left, the selected rule's editor
-   in the middle (changes autosave), live run log on the right. The webhook endpoint
-   is `POST /webhooks/github`. Use **Test thread** in the header to start a
-   one-message thread in a project and confirm the token, RPC and provider work
-   before wiring up GitHub. **Settings** holds the default model, runtime mode,
-   your GitHub login, which lets rules skip PRs you authored, and how many
-   change requests in a row pause a PR's reviews plus the handoff prompt (see
-   [Stuck PRs](#stuck-prs)).
+   The UI is at http://localhost:8787. **Rules** lists your rules on the left with the
+   selected rule's editor beside it (changes autosave). The live run log sits on the
+   right of every page; **Runs** in the top bar hides it. The webhook endpoint
+   is `POST /webhooks/github`. **Settings** is its own page with six sections, one shown at a time:
+   **Connection** (what the service talks to, a **Test thread** button that starts a
+   one-message thread in a project to confirm the token, RPC and provider work
+   before wiring up GitHub, and the update check), **Defaults** (model, runtime
+   mode, your GitHub login, which lets rules skip PRs you authored), **Polling**,
+   **Dispatch presets**, **Reviews** (how many change requests in a row pause a
+   PR's reviews plus the handoff prompt, see [Stuck PRs](#stuck-prs)) and
+   **Slack and MCP**. Everything on it autosaves.
 
 4. Expose the port to GitHub (for a laptop, `cloudflared tunnel --url http://localhost:8787`
    or [smee.io](https://smee.io)). In the repo or org settings add a webhook:
@@ -130,7 +133,7 @@ the PR URL. Add `slack.second_pass` to a rule's events for later rounds to be
 reviewed automatically; prompts get `{{review_round}}`. Without a
 matching rule the message is still posted and tags the humans.
 
-Both messages are templates in **Settings** with `{{repo}}`, `{{pr_number}}`,
+Both messages are templates in **Settings → Slack and MCP** with `{{repo}}`, `{{pr_number}}`,
 `{{pr_url}}`, `{{pr_title}}`, `{{pr_author}}`, `{{round}}`, `{{mentions}}` and `{{note}}`.
 Agents fill `{{note}}` and `{{mentions}}`: Slack user ids (`U…`), user group ids (`S…`),
 or `here`/`channel`. Fixed tags can live in the template as `<@U123>` or `<!subteam^S123>`.
@@ -184,7 +187,8 @@ Each rule has:
 GitHub and Slack retry deliveries; the same delivery id never starts a second
 thread for the same rule. A PR also gets one review at a time: while a run for
 it is still running, further triggers for that PR (any rule, any source) are
-logged as skipped and, on Slack, answered with a short note. Runs show in the right-hand log as `running` until the
+logged as skipped and, on Slack, answered with a short note. Runs show in the right-hand log as `queued` while they wait
+for their rule's concurrency limit, `running` until the
 thread's first turn settles, then `done` with the agent's final message (or
 `failed`). A thread with no result after 3 hours is marked `failed`, which frees
 the PR for a new review. Watchers survive restarts: runs still `running` are re-polled on boot.
@@ -209,18 +213,100 @@ handoff thread. An approval ends the streak. A "second pass" mention on Slack
 always reviews, so a human can resume once the PR is reshaped; a change request
 past the limit does not write a second handoff. Set the limit to 0 to never pause.
 
+## Inbox: polled PRs and issues, dispatch, automations
+
+Besides webhooks and Slack, the orchestrator polls for the open PRs and issues
+that involve you. **Inbox** in the header lists them grouped by why they are
+yours, and each row (or a selection) can be dispatched to T3 with a composed
+prompt; rules on the inbox events do the same automatically.
+
+- **GitHub** through the `gh` CLI (your existing login, private repos included):
+  PRs where your review is requested, PRs and issues assigned to you, PRs and
+  issues that mention you, and PRs you authored. One GraphQL search per reason.
+- **Linear** with a personal API key in `.env` as `LINEAR_API_KEY`: issues
+  assigned to or created by you that are not done, plus issues whose description
+  or comments mention you (from your notifications). Without the key Linear is off.
+
+Each item carries its `reasons` (`review_requested`, `assigned`, `mentioned`,
+`authored`), labels, state (`open`/`draft`, or the Linear state name and type),
+Linear team and priority, and for PRs the head branch and commit. The inbox shows
+the latest run on each item from any trigger. **Settings → Polling** turns each
+source on or off and sets its interval in minutes; the counts in the inbox bar
+poll on click.
+
+Items are stored in SQLite (`inbox_items`), so the inbox is full the moment
+the service starts and every poll is a diff: new items get a first-seen time
+("In inbox" column), items the source stops returning (closed, merged,
+unassigned, done) are marked gone and kept for 30 days under the **left**
+toggle, and an item that comes back starts a new stay. The same data is at
+`GET /api/inbox` (`?gone=1` appends departed items); `POST /api/inbox/poll`
+with `{"source"}` polls now.
+
+### Dispatch
+
+**Dispatch** on a row, or **Dispatch selected** for several, opens the composer:
+click presets to stack them (the stacked bodies become the message; edit it
+freely), pick the T3 project (auto by git remote, or explicit; Linear issues
+have no repository, so pick one), workspace, model and how many threads to
+run at a time. One thread starts per item; the message is a template the server
+renders per item with the same variables webhook deliveries get (`pr_url`,
+`issue_url`, …) plus `labels`, `reasons`, `state`, `state_type`, `team`,
+`priority`, `issue_identifier`, `branch`, `review_decision`. Presets are edited
+in **Settings → Dispatch presets** (`/api/prompts`, seeded with "Review PR",
+"Implement issue" and "Address review feedback"): one row per preset, click to
+open it, name and body autosave. A dispatch by hand reviews a PR even when its
+automated reviews are paused; one thread per PR or issue at a time still holds.
+The run log shows dispatches under the preset names with source `manual`.
+
+### Automations
+
+An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub
+issue** or **Inbox: Linear issue**. On top of the repository list the editor
+gets **Reasons**, **States**, **Labels** (any of the listed, or switch to all)
+and, for Linear, **Teams** instead of repositories. Each is a token field that
+suggests values seen in the inbox with counts; type to add one not seen yet.
+"Review every PR where my review is requested in acme/widgets" is a rule on
+Inbox: GitHub PR, repo `acme/widgets`, reason `review requested`. "Implement
+Linear issues in Todo assigned to me with label ready-for-dev" is Inbox: Linear
+issue, team `ENG`, reason `assigned to me`, state `Todo`, label `ready for dev`,
+with the project set. Label and state filters work on webhook rules too, since
+PR and issue payloads now carry `labels` and `state`.
+
+**Matches now** in the editor lists the inbox items for the rule's events,
+matching ones first with what the rule did for them, the rest with the
+matcher's reason ("labels needs design include none of ready for dev", "state In
+Progress is not Todo"). After every poll each armed rule fires on the items it
+matches. A rule is armed for an item when the item saw activity after the rule
+was last saved, so a new or re-enabled rule does not fan out over everything
+already in the inbox; **Run on N now** backfills (`POST /api/rules/:id/run-now`).
+An item fires a rule once (delivery id = item key); PR rules with **Re-run on
+push** (default on) fire again for each new head commit, like
+`pull_request.synchronize`. Runs show in the log with source `poll`.
+
+### Concurrency
+
+Every rule has a **Concurrency** limit (default 3, 0 for unlimited): threads of
+that rule running at once. A match past the limit is recorded as `queued`,
+with the rule's prompt, project, workspace and model frozen on the run, and
+starts when a thread of the rule settles or fails to start, oldest first; raising
+the limit starts queued runs right away, and queued runs survive a restart. A
+queued review holds its PR's one-at-a-time lock like a running one, and is
+skipped if the PR got a thread from elsewhere before its turn. Dispatches from
+the inbox share one limit set in the dialog. Slack-triggered reviews react ⏳
+while queued, then 👀 when they start.
+
 ## Analytics
 
 **Analytics** in the header swaps the editor for run counts: totals, runs per PR
 or issue author, and runs per trigger source, each split into running, done,
-skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode) and
-`manual` (connection test). The same data is at `GET /api/analytics`.
+skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode), `poll`
+(inbox automations) and `manual` (inbox dispatches and connection tests). The same data is at `GET /api/analytics`.
 
 ## Updating
 
-The header shows **Update** when the tracked upstream (`origin/main` for a
+The header shows **update · N** when the tracked upstream (`origin/main` for a
 plain clone) has commits the running server does not, including ones already
-pulled by hand without a restart. The popover lists them and flags
+pulled by hand without a restart; **Settings → Connection** lists them and flags
 whether they bring migrations or dependency changes. **Update and restart**
 fast-forwards the checkout, runs `bun install` if `bun.lock` moved, then gets
 the new code running: the launchd agent is restarted by launchd, `bun --hot`

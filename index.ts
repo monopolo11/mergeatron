@@ -3,13 +3,19 @@ import { join } from "node:path";
 import index from "./frontend/index.html";
 import { resumeWatchers, watchCompletion } from "./src/completion.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
-import { handleDelivery, type HandlerDeps } from "./src/handler.ts";
+import { reviewVerdict } from "./src/completion.ts";
+import { GitHubInbox } from "./src/githubInbox.ts";
+import { handleDelivery, runRules, startQueued, type HandlerDeps } from "./src/handler.ts";
 import { handoffIfStuck } from "./src/handoff.ts";
+import { itemContext, itemEvent, type InboxResponse } from "./src/inbox.ts";
+import { LinearInbox } from "./src/linearInbox.ts";
 import { logger } from "./src/log.ts";
 import { handleMcpRequest } from "./src/mcp.ts";
 import { openDatabase } from "./src/db/index.ts";
-import { RuleInput, SettingsInput, TestThreadInput } from "./src/rules.ts";
+import { Poller } from "./src/poller.ts";
+import { DispatchInput, PromptInput, RuleInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
+import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
 import { SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
 import { T3Client } from "./src/t3.ts";
@@ -48,13 +54,25 @@ if ((slackAppToken || slackBotToken) && !(slackAppToken && slackBotToken)) {
 
 const t3 = new T3Client(await resolveT3Origin(), token);
 const store = new Store(openDatabase(process.env.DATA_PATH ?? "data/orchestrator.sqlite"));
+store.ensureDefaultPrompts();
 const deps: HandlerDeps = {
   store,
   t3,
   slack: slackAppToken && slackBotToken ? new SlackClient(slackBotToken) : null,
   afterReview: (run) => handoffIfStuck(deps, run),
+  onCapacity: (ruleId) => startQueued(deps, ruleId),
 };
 resumeWatchers(deps);
+for (const ruleId of store.queuedRuleIds()) startQueued(deps, ruleId);
+
+/**
+ * Inbox: PRs and issues that involve you, polled from GitHub (through `gh`)
+ * and Linear (`LINEAR_API_KEY`). Rules on `inbox.*` events run on new activity.
+ */
+const linearKey = process.env.LINEAR_API_KEY;
+if (!linearKey) log.warn("LINEAR_API_KEY is not set: the inbox polls GitHub only.");
+const poller = new Poller(deps, { github: new GitHubInbox(), linear: linearKey ? new LinearInbox(linearKey) : null });
+poller.start();
 
 /**
  * Slack events arrive over Socket Mode, not a webhook: each `event_callback`
@@ -90,8 +108,10 @@ const server = Bun.serve({
   routes: {
     // Client-side routes; the router in frontend/app.tsx picks the view.
     "/": index,
+    "/inbox": index,
     "/reviews": index,
     "/analytics": index,
+    "/settings": index,
 
     "/api/status": async () => {
       const environment = await t3.environment().catch(() => null);
@@ -99,6 +119,7 @@ const server = Bun.serve({
         t3: { origin: t3.origin, environment },
         webhookSecretConfigured: Boolean(webhookSecret),
         slack: slackSocket ? (slackSocket.connected ? "connected" : "connecting") : "off",
+        mcp: mcp ? `${mcp.url.href}mcp` : null,
       });
     },
 
@@ -140,6 +161,7 @@ const server = Bun.serve({
           threadUrl: null,
           context: null,
           result: null,
+          action: null,
         });
         try {
           const thread = await t3.startThread({
@@ -194,8 +216,90 @@ const server = Bun.serve({
         const parsed = SettingsInput.safeParse(await req.json());
         if (!parsed.success) return badRequest(parsed.error);
         store.saveSettings(parsed.data);
+        poller.reschedule();
         return json(parsed.data);
       },
+    },
+
+    /** Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items. */
+    "/api/inbox": (req) => {
+      const items = poller.list({ gone: new URL(req.url).searchParams.get("gone") === "1" });
+      const latest = store.latestRunsByUrl(items.map((item) => item.url));
+      const response: InboxResponse = {
+        polling: poller.statuses(),
+        gone: store.countGoneInbox(),
+        items: items.map((item) => {
+          const run = latest.get(item.url);
+          return {
+            ...item,
+            lastRun: run
+              ? { id: run.id, status: run.status, ruleName: run.ruleName, detail: run.detail, threadUrl: run.threadUrl, createdAt: run.createdAt, verdict: run.status === "done" ? reviewVerdict(run.result) : null }
+              : null,
+          };
+        }),
+      };
+      return json(response);
+    },
+
+    "/api/inbox/poll": {
+      POST: async (req) => {
+        const { source } = (await req.json().catch(() => ({}))) as { source?: string };
+        const known = INBOX_SOURCES.find((s) => s === source);
+        if (!known) return badRequest(`source must be one of ${INBOX_SOURCES.join(", ")}`);
+        return json(await poller.pollNow(known));
+      },
+    },
+
+    /** One thread per item with the composed prompt. Dispatches by hand review even paused PRs. */
+    "/api/inbox/dispatch": {
+      POST: async (req) => {
+        const parsed = DispatchInput.safeParse(await req.json());
+        if (!parsed.success) return badRequest(parsed.error);
+        const { keys, name, ...action } = parsed.data;
+        const items = keys.map((key) => poller.find(key));
+        const missing = keys.filter((_, index) => !items[index]);
+        if (missing.length > 0) return json({ error: `not in the inbox: ${missing.join(", ")}` }, 404);
+        const now = new Date().toISOString();
+        const rule: Rule = {
+          id: "dispatch",
+          name,
+          enabled: true,
+          events: [],
+          repos: [],
+          reviewer: null,
+          channel: null,
+          allowBots: true,
+          skipSelfReview: false,
+          filters: EMPTY_FILTERS,
+          ...action,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const runs = items.flatMap((item) =>
+          runRules(deps, { deliveryId: crypto.randomUUID(), event: itemEvent(item!), ctx: itemContext(item!), source: "manual", force: true }, [rule]),
+        );
+        return json(runs, 201);
+      },
+    },
+
+    "/api/prompts": {
+      GET: () => json(store.listPrompts()),
+      POST: async (req) => {
+        const parsed = PromptInput.safeParse(await req.json());
+        if (!parsed.success) return badRequest(parsed.error);
+        return json(store.createPrompt(parsed.data), 201);
+      },
+    },
+
+    "/api/prompts/:id": {
+      PUT: async (req) => {
+        const parsed = PromptInput.safeParse(await req.json());
+        if (!parsed.success) return badRequest(parsed.error);
+        const prompt = store.updatePrompt(req.params.id, parsed.data);
+        return prompt ? json(prompt) : json({ error: "not found" }, 404);
+      },
+      DELETE: (req) =>
+        store.deletePrompt(req.params.id) ? new Response(null, { status: 204 }) : json({ error: "not found" }, 404),
     },
 
     "/api/rules": {
@@ -212,10 +316,22 @@ const server = Bun.serve({
         const parsed = RuleInput.safeParse(await req.json());
         if (!parsed.success) return badRequest(parsed.error);
         const rule = store.updateRule(req.params.id, parsed.data);
-        return rule ? json(rule) : json({ error: "not found" }, 404);
+        if (!rule) return json({ error: "not found" }, 404);
+        // A raised limit lets queued runs start now rather than at the next settle.
+        startQueued(deps, rule.id);
+        return json(rule);
       },
       DELETE: (req) =>
         store.deleteRule(req.params.id) ? new Response(null, { status: 204 }) : json({ error: "not found" }, 404),
+    },
+
+    /** Backfill: runs an inbox rule on every item it matches now, not only on new activity. */
+    "/api/rules/:id/run-now": {
+      POST: (req) => {
+        const rule = store.getRule(req.params.id);
+        if (!rule) return json({ error: "not found" }, 404);
+        return json(poller.runAutomations(poller.list(), { armed: false, ruleId: rule.id }), 201);
+      },
     },
 
     "/api/runs": () => json(store.listRuns()),
@@ -271,4 +387,5 @@ log.info("GitHub -> T3 Code orchestrator started", {
   webhook: `${server.url.href}webhooks/github`,
   slack: slackSocket ? "starting" : "off",
   mcp: mcp ? `${mcp.url.href}mcp` : "off (needs Slack)",
+  inbox: linearKey ? "github, linear" : "github",
 });

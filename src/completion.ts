@@ -13,6 +13,8 @@ export type CompletionDeps = {
   slack: SlackClient | null;
   /** Called once a review (not a handoff) settles as `done`, after its Slack reply; see handoffIfStuck. */
   afterReview?: (run: Run) => void;
+  /** Called when a run of this rule stops running, so a queued run can take its place; see startQueued. */
+  onCapacity?: (ruleId: string) => void;
 };
 
 const POLL_MS = 5_000;
@@ -150,6 +152,7 @@ function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void
   deps.store.updateRun(runId, outcome);
   const run = deps.store.getRun(runId);
   if (!run) return;
+  deps.onCapacity?.(run.ruleId);
   const review = run.event !== HANDOFF_EVENT;
   const origin = slackOrigin(run.context);
   const slack = deps.slack;

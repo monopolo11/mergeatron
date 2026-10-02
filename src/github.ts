@@ -54,6 +54,9 @@ export function extractContext(eventName: string, payload: unknown): WebhookCont
     set(ctx, "pr_head", str(rec(pr.head).ref));
     set(ctx, "pr_head_sha", str(rec(pr.head).sha));
     set(ctx, "pr_base", str(rec(pr.base).ref));
+    // Same shape as inbox items, so label and state filters work on webhook rules too.
+    set(ctx, "labels", labelNames(pr.labels));
+    set(ctx, "state", pr.draft === true ? "draft" : str(pr.state));
   }
 
   if (Object.keys(issue).length > 0) {
@@ -62,6 +65,8 @@ export function extractContext(eventName: string, payload: unknown): WebhookCont
     set(ctx, "issue_url", str(issue.html_url));
     set(ctx, "issue_body", str(issue.body));
     set(ctx, "issue_author", str(rec(issue.user).login));
+    set(ctx, "labels", labelNames(issue.labels));
+    set(ctx, "state", str(issue.state));
     // A comment on a PR arrives as issue_comment with issue.pull_request set.
     if (isRecord(issue.pull_request)) {
       set(ctx, "pr_number", num(issue.number));
@@ -92,6 +97,12 @@ function str(value: unknown): string | undefined {
 }
 function num(value: unknown): string | undefined {
   return typeof value === "number" ? String(value) : undefined;
+}
+/** `labels: [{ name }]` as the comma-separated `labels` variable; absent when the payload has none. */
+function labelNames(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const names = value.flatMap((label) => (typeof rec(label).name === "string" ? [rec(label).name as string] : []));
+  return names.length > 0 ? names.join(", ") : undefined;
 }
 function set(ctx: WebhookContext, key: TemplateVar, value: string | undefined) {
   if (value !== undefined) ctx[key] = value;

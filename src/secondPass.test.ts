@@ -3,6 +3,7 @@ import { openDatabase } from "./db/index.ts";
 import { botPostIgnored, handleSlackEvent, resolveSecondPassTarget } from "./secondPass.ts";
 import type { SlackClient } from "./slack.ts";
 import type { T3Client } from "./t3.ts";
+import { EMPTY_FILTERS } from "./shared.ts";
 import { Store } from "./store.ts";
 
 const pr = { repo: "acme/widgets", pr_number: "42", pr_url: "https://github.com/acme/widgets/pull/42" };
@@ -29,7 +30,7 @@ describe("resolveSecondPassTarget", () => {
 describe("botPostIgnored", () => {
   const store = new Store(openDatabase(":memory:"));
   const rule = {
-    name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: "C1", allowBots: true, skipSelfReview: true,
+    name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: "C1", allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
     projectId: null, workspace: "worktree" as const, model: null, prompt: "x",
   };
   store.createRule(rule);
@@ -47,7 +48,7 @@ describe("handleSlackEvent", () => {
   test("another bot's second pass reaches repo-scoped rules through its thread's PR", async () => {
     const store = new Store(openDatabase(":memory:"));
     const rule = store.createRule({
-      name: "review", enabled: true, events: ["slack.second_pass"], repos: [pr.repo], reviewer: null, channel: null, allowBots: true, skipSelfReview: true,
+      name: "review", enabled: true, events: ["slack.second_pass"], repos: [pr.repo], reviewer: null, channel: null, allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
       projectId: null, workspace: "worktree", model: null, prompt: "x",
     });
     // Still running, so the second pass is recorded as skipped without reaching T3 or GitHub.

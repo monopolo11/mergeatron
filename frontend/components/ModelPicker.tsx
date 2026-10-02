@@ -50,7 +50,7 @@ export function ModelPicker({
           </SelectContent>
         </Select>
       ) : (
-        <Input className="h-8 w-44" value={value.instanceId} onChange={(e) => onChange({ ...value, instanceId: e.target.value })} placeholder="provider instance" />
+        <Input className="w-44" value={value.instanceId} onChange={(e) => onChange({ ...value, instanceId: e.target.value })} placeholder="provider instance" />
       )}
 
       {models.length > 0 ? (
@@ -73,7 +73,7 @@ export function ModelPicker({
           </SelectContent>
         </Select>
       ) : (
-        <Input className="h-8 w-60" value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} placeholder="model slug" />
+        <Input className="w-60" value={value.model} onChange={(e) => onChange({ ...value, model: e.target.value })} placeholder="model slug" />
       )}
     </div>
   );

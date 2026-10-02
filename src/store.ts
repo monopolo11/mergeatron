@@ -1,12 +1,16 @@
-import { and, count, desc, eq, sql } from "drizzle-orm";
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { changesRequestedStreak, reviewVerdict } from "./completion.ts";
 import type { AppDatabase } from "./db/index.ts";
-import { reviewRequests, rules, runs, settings } from "./db/schema.ts";
-import { DEFAULT_SETTINGS, type ReviewRequest, type Rule, type RuleInput, type Run, type Settings } from "./rules.ts";
-import { HANDOFF_EVENT, type RunSource } from "./shared.ts";
+import { inboxItems, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import type { InboxItem, PolledItem } from "./inbox.ts";
+import { DEFAULT_SETTINGS, type Prompt, type PromptInput, type ReviewRequest, type Rule, type RuleInput, type Run, type RunAction, type Settings } from "./rules.ts";
+import { DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type RunSource } from "./shared.ts";
+
+/** How long items that left the inbox are kept, so a reopened PR or a closed issue still has its history. */
+const INBOX_RETENTION_DAYS = 30;
 
 /** Run counts split by status, for one grouping key. */
-export type RunCounts = { total: number; started: number; done: number; skipped: number; failed: number };
+export type RunCounts = { total: number; queued: number; started: number; done: number; skipped: number; failed: number };
 
 export type Analytics = {
   all: RunCounts;
@@ -20,7 +24,7 @@ export type Analytics = {
  * paused (see `pausedReview`), else the verdict of the latest review. PRs with
  * no finished review take the status of their latest run.
  */
-export type PullRequestStatus = "reviewing" | "paused" | "approved" | "changes_requested" | "commented" | "skipped" | "failed";
+export type PullRequestStatus = "reviewing" | "queued" | "paused" | "approved" | "changes_requested" | "commented" | "skipped" | "failed";
 
 /** One PR the orchestrator has run on. Counts leave out handoffs. */
 export type PullRequestSummary = {
@@ -40,9 +44,97 @@ export type PullRequestSummary = {
   threadUrl: string | null;
 };
 
-/** Typed access to rules, global settings, and the run log. */
+/** Typed access to rules, prompt presets, global settings, and the run log. */
 export class Store {
   constructor(private db: AppDatabase) {}
+
+  listPrompts(): Prompt[] {
+    return this.db.select().from(prompts).orderBy(prompts.createdAt).all();
+  }
+
+  createPrompt(input: PromptInput): Prompt {
+    const now = new Date().toISOString();
+    return this.db
+      .insert(prompts)
+      .values({ ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
+      .returning()
+      .get();
+  }
+
+  updatePrompt(id: string, input: PromptInput): Prompt | null {
+    return (
+      this.db
+        .update(prompts)
+        .set({ ...input, updatedAt: new Date().toISOString() })
+        .where(eq(prompts.id, id))
+        .returning()
+        .get() ?? null
+    );
+  }
+
+  deletePrompt(id: string): boolean {
+    return this.db.delete(prompts).where(eq(prompts.id, id)).returning().get() !== undefined;
+  }
+
+  /**
+   * Replaces one source's inbox with a fresh poll: upserts every item seen,
+   * keeping `firstSeenAt` across polls (an item that had gone and came back
+   * starts a new stay), and marks the source's other active items gone.
+   */
+  syncInbox(source: InboxSource, items: PolledItem[], now = new Date().toISOString()): { appeared: number; returned: number; gone: number } {
+    return this.db.transaction((tx) => {
+      let appeared = 0;
+      let returned = 0;
+      for (const item of items) {
+        const before = tx.select({ goneAt: inboxItems.goneAt }).from(inboxItems).where(eq(inboxItems.key, item.key)).get();
+        if (!before) appeared += 1;
+        else if (before.goneAt) returned += 1;
+        tx.insert(inboxItems)
+          .values({ ...item, firstSeenAt: now, lastSeenAt: now, goneAt: null })
+          .onConflictDoUpdate({
+            target: inboxItems.key,
+            set: { ...item, lastSeenAt: now, goneAt: null, firstSeenAt: before?.goneAt ? now : undefined },
+          })
+          .run();
+      }
+      const stillHere = items.map((item) => item.key);
+      const gone = tx
+        .update(inboxItems)
+        .set({ goneAt: now })
+        .where(and(eq(inboxItems.source, source), isNull(inboxItems.goneAt), stillHere.length > 0 ? notInArray(inboxItems.key, stillHere) : undefined))
+        .returning({ key: inboxItems.key })
+        .all().length;
+      return { appeared, returned, gone };
+    });
+  }
+
+  /** Active items by latest activity; with `gone`, the departed ones follow, newest departure first. */
+  listInbox(options: { gone?: boolean } = {}): InboxItem[] {
+    const active = this.db.select().from(inboxItems).where(isNull(inboxItems.goneAt)).orderBy(desc(inboxItems.updatedAt)).all();
+    if (!options.gone) return active;
+    const gone = this.db.select().from(inboxItems).where(isNotNull(inboxItems.goneAt)).orderBy(desc(inboxItems.goneAt)).all();
+    return [...active, ...gone];
+  }
+
+  getInboxItem(key: string): InboxItem | null {
+    return this.db.select().from(inboxItems).where(eq(inboxItems.key, key)).get() ?? null;
+  }
+
+  countGoneInbox(): number {
+    return this.db.select({ n: count() }).from(inboxItems).where(isNotNull(inboxItems.goneAt)).get()?.n ?? 0;
+  }
+
+  /** Drops items gone for longer than the retention window. Returns how many. */
+  pruneInbox(now = Date.now()): number {
+    const cutoff = new Date(now - INBOX_RETENTION_DAYS * 86_400_000).toISOString();
+    return this.db.delete(inboxItems).where(lt(inboxItems.goneAt, cutoff)).returning({ key: inboxItems.key }).all().length;
+  }
+
+  /** Seeds the preset library on first start so the composer has something to offer. */
+  ensureDefaultPrompts(): void {
+    if (this.listPrompts().length > 0) return;
+    for (const prompt of DEFAULT_PROMPTS) this.createPrompt(prompt);
+  }
 
   listRules(): Rule[] {
     return this.db.select().from(rules).orderBy(rules.createdAt).all();
@@ -106,10 +198,11 @@ export class Store {
     );
   }
 
-  recordRun(run: Omit<Run, "id" | "createdAt">): Run {
+  /** `action` is only set on queued runs; see RunAction. */
+  recordRun(run: Omit<Run, "id" | "createdAt" | "action"> & { action?: RunAction | null }): Run {
     return this.db
       .insert(runs)
-      .values({ ...run, id: crypto.randomUUID(), createdAt: new Date().toISOString() })
+      .values({ action: null, ...run, id: crypto.randomUUID(), createdAt: new Date().toISOString() })
       .returning()
       .get();
   }
@@ -122,15 +215,41 @@ export class Store {
     return this.db.select().from(runs).where(eq(runs.id, id)).get() ?? null;
   }
 
-  /** The run still reviewing this PR, if any. One review per PR at a time, across all rules and triggers. */
-  activeRunForPullRequest(repo: string, prNumber: string): Run | null {
+  /** Runs of a rule in one status; `started` against the rule's concurrency limit. */
+  countRuns(ruleId: string, status: Run["status"]): number {
+    return this.db.select({ n: count() }).from(runs).where(and(eq(runs.ruleId, ruleId), eq(runs.status, status))).get()?.n ?? 0;
+  }
+
+  /** Next run of a rule waiting for capacity: queued the longest. */
+  oldestQueuedRun(ruleId: string): Run | null {
+    return (
+      this.db
+        .select()
+        .from(runs)
+        .where(and(eq(runs.ruleId, ruleId), eq(runs.status, "queued")))
+        .orderBy(runs.createdAt, sql`rowid`)
+        .get() ?? null
+    );
+  }
+
+  /** Rules with queued runs, to resume after a restart. */
+  queuedRuleIds(): string[] {
+    return this.db.selectDistinct({ ruleId: runs.ruleId }).from(runs).where(eq(runs.status, "queued")).all().map((row) => row.ruleId);
+  }
+
+  /**
+   * The run still reviewing (or waiting to review) this PR, if any. One review
+   * per PR at a time, across all rules and triggers; a queued review counts, so
+   * a PR does not pile up. Pass `["started"]` to see only running threads.
+   */
+  activeRunForPullRequest(repo: string, prNumber: string, statuses: Run["status"][] = ["started", "queued"]): Run | null {
     return (
       this.db
         .select()
         .from(runs)
         .where(
           and(
-            eq(runs.status, "started"),
+            inArray(runs.status, statuses),
             sql`lower(${runs.repo}) = lower(${repo})`,
             sql`json_extract(${runs.context}, '$.pr_number') = ${prNumber}`,
           ),
@@ -138,6 +257,41 @@ export class Store {
         .orderBy(desc(runs.createdAt))
         .get() ?? null
     );
+  }
+
+  /** The run still working on (or queued for) this issue, GitHub or Linear. One thread per issue at a time. */
+  activeRunForIssue(issueUrl: string, statuses: Run["status"][] = ["started", "queued"]): Run | null {
+    return (
+      this.db
+        .select()
+        .from(runs)
+        .where(and(inArray(runs.status, statuses), sql`json_extract(${runs.context}, '$.issue_url') = ${issueUrl}`))
+        .orderBy(desc(runs.createdAt))
+        .get() ?? null
+    );
+  }
+
+  /**
+   * Latest run per PR or issue URL, for the inbox: webhook, Slack and inbox
+   * runs alike, so an item shows the review a webhook started too.
+   */
+  latestRunsByUrl(urls: string[]): Map<string, Run> {
+    if (urls.length === 0) return new Map();
+    const prUrl = sql<string>`json_extract(${runs.context}, '$.pr_url')`;
+    const issueUrl = sql<string>`json_extract(${runs.context}, '$.issue_url')`;
+    const rows = this.db
+      .select()
+      .from(runs)
+      .where(or(inArray(prUrl, urls), inArray(issueUrl, urls)))
+      .orderBy(desc(runs.createdAt), desc(sql`rowid`))
+      .all();
+    const latest = new Map<string, Run>();
+    for (const run of rows) {
+      for (const url of [run.context?.pr_url, run.context?.issue_url]) {
+        if (url && !latest.has(url)) latest.set(url, run);
+      }
+    }
+    return latest;
   }
 
   /** Finished runs of this PR that have a reply (reviews and handoffs alike), newest first (rowid breaks same-millisecond ties). */
@@ -230,6 +384,8 @@ export class Store {
       const finished = prRuns.filter((run) => run.status === "done" && run.result !== null);
       const status: PullRequestStatus = reviews.some((run) => run.status === "started")
         ? "reviewing"
+        : reviews.some((run) => run.status === "queued")
+          ? "queued"
         : limit > 0 && changesRequestedStreak(finished).length >= limit
           ? "paused"
           : verdicts[0] ?? (latest.status === "failed" ? "failed" : "skipped");
@@ -256,12 +412,13 @@ export class Store {
   analytics(): Analytics {
     const counts = {
       total: count(),
+      queued: statusCount("queued"),
       started: statusCount("started"),
       done: statusCount("done"),
       skipped: statusCount("skipped"),
       failed: statusCount("failed"),
     };
-    const all = this.db.select(counts).from(runs).get() ?? { total: 0, started: 0, done: 0, skipped: 0, failed: 0 };
+    const all = this.db.select(counts).from(runs).get() ?? { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 };
     const byAuthor = this.db
       .select({ author: sql<string>`${runs.author}`, ...counts })
       .from(runs)

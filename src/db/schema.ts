@@ -1,11 +1,19 @@
 import { integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 import {
   DEFAULT_HANDOFF_PROMPT,
+  DEFAULT_MAX_CONCURRENT,
+  DEFAULT_POLLING,
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
+  EMPTY_FILTERS,
+  INBOX_KINDS,
+  INBOX_SOURCES,
   RUNTIME_MODES,
   RUN_SOURCES,
   WORKSPACE_MODES,
+  type InboxReason,
+  type PollingSettings,
+  type RuleFilters,
 } from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
@@ -30,6 +38,10 @@ export const rules = sqliteTable("rules", {
   allowBots: integer("allow_bots", { mode: "boolean" }).notNull().default(true),
   /** Skip PRs authored by the GitHub login in settings: reviewing your own PR is bad practice. */
   skipSelfReview: integer("skip_self_review", { mode: "boolean" }).notNull().default(true),
+  /** Filters on the delivery's template variables, mainly for inbox rules; see RuleFilters. */
+  filters: text({ mode: "json" }).$type<RuleFilters>().notNull().default(EMPTY_FILTERS),
+  /** Threads of this rule running at once; further matches queue. 0 means no limit. */
+  maxConcurrent: integer("max_concurrent").notNull().default(DEFAULT_MAX_CONCURRENT),
   /** T3 project to open the thread in. Null means match by the repository's git remote. */
   projectId: text("project_id"),
   workspace: text({ enum: WORKSPACE_MODES }).notNull().default("worktree"),
@@ -39,6 +51,13 @@ export const rules = sqliteTable("rules", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+/**
+ * What a run starts with: the slice of its rule that `startThreadForRule`
+ * reads. Frozen on queued runs, since the rule may change meanwhile and a
+ * dispatch from the inbox has no stored rule at all.
+ */
+export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "prompt" | "maxConcurrent">;
 
 /** Single-row table holding the global defaults. */
 export const settings = sqliteTable("settings", {
@@ -59,11 +78,76 @@ export const settings = sqliteTable("settings", {
   /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
   reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
   secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),
+  /** Whether and how often each inbox source (GitHub, Linear) is polled. */
+  polling: text({ mode: "json" }).$type<PollingSettings>().notNull().default(DEFAULT_POLLING),
 });
 
 /**
- * One webhook delivery matched against one rule. `started` means the thread
- * is running; `done`/`failed` are set once its first turn settles.
+ * A PR or issue that involves you, as last polled from GitHub or Linear. One
+ * shape for every source so the inbox, the composer and rule filters treat
+ * them alike. Rows outlive the poll: `goneAt` marks when an item stopped
+ * coming back (closed, merged, unassigned, done), and `firstSeenAt` restarts
+ * when it comes back. See src/inbox.ts for the derived types.
+ */
+export const inboxItems = sqliteTable("inbox_items", {
+  /** `github:owner/name#123` or `linear:ENG-123`. */
+  key: text().primaryKey(),
+  source: text({ enum: INBOX_SOURCES }).notNull(),
+  kind: text({ enum: INBOX_KINDS }).notNull(),
+  /** `owner/name` for GitHub; null for Linear issues, which have no repository. */
+  repo: text(),
+  /** Short handle shown in lists: `#123` or `ENG-123`. */
+  identifier: text().notNull(),
+  title: text().notNull(),
+  url: text().notNull(),
+  body: text(),
+  author: text(),
+  /** GitHub: `open` or `draft`. Linear: the workflow state name, e.g. `Todo`. */
+  state: text().notNull(),
+  /** Linear workflow state type: backlog, unstarted, started, ... Null for GitHub. */
+  stateType: text("state_type"),
+  labels: text({ mode: "json" }).$type<string[]>().notNull().default([]),
+  reasons: text({ mode: "json" }).$type<InboxReason[]>().notNull().default([]),
+  /** Linear team key. */
+  team: text(),
+  /** Linear priority label (`Urgent`, `High`, ...). */
+  priority: text(),
+  /** PR head branch, or Linear's suggested branch name. */
+  branch: text(),
+  /** PR head commit; a new one means new commits to review. */
+  headSha: text("head_sha"),
+  /** PR base branch. */
+  base: text(),
+  /** GitHub `reviewDecision`: REVIEW_REQUIRED, APPROVED, CHANGES_REQUESTED, or null. */
+  reviewDecision: text("review_decision"),
+  repoUrl: text("repo_url"),
+  defaultBranch: text("default_branch"),
+  /** The item's own timestamps, from the API. */
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  /** When this stay in the inbox began; reset when a gone item comes back. */
+  firstSeenAt: text("first_seen_at").notNull(),
+  lastSeenAt: text("last_seen_at").notNull(),
+  /** Null while the source still returns the item; set by the first poll that did not. */
+  goneAt: text("gone_at"),
+});
+
+/**
+ * Prompt presets for dispatching inbox items by hand. The composer stacks
+ * one or more into the thread's first message; rules keep their own prompt.
+ */
+export const prompts = sqliteTable("prompts", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  body: text().notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/**
+ * One delivery matched against one rule. `queued` waits for the rule's
+ * concurrency limit, `started` means the thread is running; `done`/`failed`
+ * are set once its first turn settles.
  */
 export const runs = sqliteTable(
   "runs",
@@ -78,7 +162,7 @@ export const runs = sqliteTable(
     source: text({ enum: RUN_SOURCES }).notNull().default("github"),
     /** PR or issue author the review is for. Null for connection tests. */
     author: text(),
-    status: text({ enum: ["started", "done", "skipped", "failed"] }).notNull(),
+    status: text({ enum: ["queued", "started", "done", "skipped", "failed"] }).notNull(),
     detail: text().notNull().default(""),
     threadId: text("thread_id"),
     threadUrl: text("thread_url"),
@@ -86,6 +170,8 @@ export const runs = sqliteTable(
     context: text({ mode: "json" }).$type<Record<string, string>>(),
     /** Final assistant message of the thread's first turn, once it settles. */
     result: text(),
+    /** Set while queued: what to start with once the rule has capacity. */
+    action: text({ mode: "json" }).$type<RunAction>(),
     createdAt: text("created_at").notNull(),
   },
   // GitHub retries deliveries; one thread per delivery per rule.

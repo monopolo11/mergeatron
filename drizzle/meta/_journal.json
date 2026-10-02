@@ -85,6 +85,20 @@
       "when": 1790730161915,
       "tag": "0011_rule_allow_bots_default",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790923284933,
+      "tag": "0012_inbox_filters_polling_prompts_queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1790958467325,
+      "tag": "0013_inbox_items",
+      "breakpoints": true
     }
   ]
 }

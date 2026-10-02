@@ -43,6 +43,7 @@ export function handoffIfStuck(deps: HandlerDeps, review: Run): void {
     threadUrl: null,
     context: ctx,
     result: null,
+    action: null,
   });
   const origin = slackOrigin(ctx);
   const tell = (text: string) => {

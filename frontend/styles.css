@@ -24,8 +24,10 @@
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
+  /* State tones (frontend/lib/status.ts): ok, warn, err is --destructive, active, idle is --muted-foreground. */
   --ok: oklch(0.8 0.15 150);
   --warn: oklch(0.8 0.15 80);
+  --active: oklch(0.78 0.12 240);
 }
 
 @theme inline {
@@ -53,6 +55,15 @@
   --color-ring: var(--ring);
   --color-ok: var(--ok);
   --color-warn: var(--warn);
+  --color-active: var(--active);
+}
+
+/* Links in tables and logs: quiet until hovered, so dense rows stay readable. */
+@utility link {
+  text-underline-offset: 4px;
+  &:hover {
+    text-decoration-line: underline;
+  }
 }
 
 @layer base {

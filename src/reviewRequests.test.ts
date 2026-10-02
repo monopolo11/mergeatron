@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "./db/index.ts";
 import { markMerged, renderReviewMessage, requestReview, requestSecondPass, ReviewRequestError, slackMentions, type ReviewDeps } from "./reviewRequests.ts";
-import { DEFAULT_REVIEW_REQUEST_MESSAGE } from "./shared.ts";
+import { DEFAULT_REVIEW_REQUEST_MESSAGE, EMPTY_FILTERS } from "./shared.ts";
 import type { SlackClient } from "./slack.ts";
 import { Store } from "./store.ts";
 import type { T3Client } from "./t3.ts";
@@ -19,6 +19,7 @@ function setup() {
     channel: null,
     allowBots: false,
     skipSelfReview: true,
+    filters: EMPTY_FILTERS, maxConcurrent: 0,
     projectId: null,
     workspace: "worktree",
     model: null,

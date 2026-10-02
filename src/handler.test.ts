@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { openDatabase } from "./db/index.ts";
 import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
 import type { Rule } from "./rules.ts";
-import { HANDOFF_EVENT } from "./shared.ts";
+import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
 import type { SlackClient } from "./slack.ts";
 import type { T3Client, T3Project } from "./t3.ts";
@@ -17,6 +17,7 @@ const base: Rule = {
   channel: null,
   allowBots: false,
   skipSelfReview: true,
+  filters: EMPTY_FILTERS, maxConcurrent: 0,
   projectId: null,
   workspace: "worktree",
   model: null,
