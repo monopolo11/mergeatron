@@ -5,18 +5,22 @@ import { Cause, Effect, Exit } from "effect";
 import { z } from "zod";
 import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
+import { notifyUser } from "./notify.ts";
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
 import { SlackClient } from "./slack.ts";
 
 /**
- * MCP tools for other agents: post as the Slack bot, and send PRs for review
- * with tracked threads and rounds, and mark those threads merged (see
- * reviewRequests.ts). Stateless Streamable HTTP, one server per request;
+ * MCP tools for other agents: post as the Slack bot, DM the user for their
+ * attention (see notify.ts), and send PRs for review with tracked threads and
+ * rounds, and mark those threads merged (see reviewRequests.ts). Stateless Streamable HTTP, one server per request;
  * index.ts serves it on loopback. Tool inputs stay zod schemas: that is what
  * the MCP SDK accepts and turns into the JSON Schema it advertises.
  */
 
 const log = logger("mcp");
+
+/** Failures the agent can act on: returned as tool errors without an error log. */
+const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError"]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
 const mentions = z
@@ -39,7 +43,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         if (Exit.isSuccess(exit)) return { content: [{ type: "text", text: JSON.stringify(exit.value, null, 2) }] } satisfies CallToolResult;
         const error = Cause.squash(exit.cause);
         const message = errorMessage(error);
-        const expected = typeof error === "object" && error !== null && "_tag" in error && (error._tag === "ReviewRequestError" || error._tag === "SlackApiError");
+        const expected = typeof error === "object" && error !== null && "_tag" in error && EXPECTED.has(String(error._tag));
         if (!expected) yield* log.error("tool failed", { tool, error: message });
         return { isError: true, content: [{ type: "text", text: message }] } satisfies CallToolResult;
       }).pipe(Effect.withSpan("mcp.tool", { attributes: { tool } })),
@@ -61,6 +65,20 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         annotations: { destructiveHint: false, openWorldHint: true },
       },
       ({ channel, text, thread_ts }) => result("slack_post_message", slack.post(channel, text, thread_ts)),
+    );
+
+    server.registerTool(
+      "notify_user",
+      {
+        description:
+          "DM your user in Slack to get their attention: a question you are blocked on, a decision, or finished work to look at. Say what you need and link the thread or PR. Returns thread_ts; pass it back to reply in the same DM thread.",
+        inputSchema: {
+          text: z.string().min(1).describe("Message body in Markdown"),
+          thread_ts: z.string().optional().describe("thread_ts from an earlier notify_user call, to reply in that DM thread"),
+        },
+        annotations: { destructiveHint: false, openWorldHint: true },
+      },
+      ({ text, thread_ts }) => result("notify_user", notifyUser(text, thread_ts)),
     );
 
     server.registerTool(

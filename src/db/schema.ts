@@ -77,6 +77,8 @@ export const settings = sqliteTable("settings", {
   handoffPrompt: text("handoff_prompt").notNull().default(DEFAULT_HANDOFF_PROMPT),
   /** Channel id (or `#name`) the MCP `request_review` tool posts to when the agent names none. */
   reviewChannel: text("review_channel"),
+  /** Your Slack user id (`U…`), whom the MCP `notify_user` tool DMs. Null turns the tool off. */
+  slackUserId: text("slack_user_id"),
   /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
   reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
   secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),

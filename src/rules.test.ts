@@ -36,8 +36,8 @@ describe("RuleInput", () => {
 });
 
 describe("SettingsInput", () => {
-  test("clears emptied names and strips the @ from the GitHub login", () => {
-    const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, githubLogin: " @Bernardo ", reviewChannel: "  " });
-    expect(Result.isSuccess(settings) && settings.success).toMatchObject({ githubLogin: "Bernardo", reviewChannel: null });
+  test("clears emptied names and strips the @ from the GitHub login and Slack user", () => {
+    const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, githubLogin: " @Bernardo ", reviewChannel: "  ", slackUserId: "<@U0BERNARDO|bernardo>" });
+    expect(Result.isSuccess(settings) && settings.success).toMatchObject({ githubLogin: "Bernardo", reviewChannel: null, slackUserId: "U0BERNARDO" });
   });
 });

@@ -164,7 +164,10 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                 <Field label="Review channel" hint="Where request_review posts when the agent names no channel. Channel id or #name.">
                   <Input className={mono} value={draft.reviewChannel ?? ""} onChange={(e) => patch({ reviewChannel: e.target.value || null })} placeholder="C0123456789" />
                 </Field>
-                <Field label="MCP for agents" hint="Tools: slack_post_message, request_review, request_second_pass, mark_merged, review_status.">
+                <Field label="Your Slack user id" hint="Whom notify_user DMs when an agent needs you. Profile → ⋮ → Copy member ID.">
+                  <Input className={mono} value={draft.slackUserId ?? ""} onChange={(e) => patch({ slackUserId: e.target.value || null })} placeholder="U0123456789" />
+                </Field>
+                <Field label="MCP for agents" hint="Tools: slack_post_message, notify_user, request_review, request_second_pass, mark_merged, review_status.">
                   <div className="flex h-8 items-center text-xs">
                     <Dot tone={shell.status?.mcp ? "ok" : "idle"} />
                     {shell.status?.mcp ? <code className={mono}>{shell.status.mcp}</code> : <span className="text-muted-foreground">off · needs Slack</span>}

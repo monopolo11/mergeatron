@@ -95,6 +95,7 @@ export const SettingsInput = Schema.Struct({
   maxChangesRequestedRounds: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.withDecodingDefault(Effect.succeed(3))),
   handoffPrompt: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFF_PROMPT))),
   reviewChannel: cleanedOrNull((channel) => channel),
+  slackUserId: cleanedOrNull((user) => user.replace(/^<?@?([^>|]+).*$/, "$1")),
   reviewRequestMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_REVIEW_REQUEST_MESSAGE))),
   secondPassMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SECOND_PASS_MESSAGE))),
   polling: Schema.Struct({
@@ -135,6 +136,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxChangesRequestedRounds: 3,
   handoffPrompt: DEFAULT_HANDOFF_PROMPT,
   reviewChannel: null,
+  slackUserId: null,
   reviewRequestMessage: DEFAULT_REVIEW_REQUEST_MESSAGE,
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,

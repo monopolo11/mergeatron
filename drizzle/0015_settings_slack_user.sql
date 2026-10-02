@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `slack_user_id` text;

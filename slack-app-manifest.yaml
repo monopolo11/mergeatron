@@ -11,6 +11,9 @@ features:
   bot_user:
     display_name: T3 Review
     always_online: true
+  app_home:
+    messages_tab_enabled: true # notify_user DMs land here
+    messages_tab_read_only_enabled: true
 oauth_config:
   scopes:
     bot:

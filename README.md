@@ -113,7 +113,7 @@ another turn when they report. T3 thread links are never posted to Slack; they s
 ### MCP server for agents
 
 With Slack configured, the orchestrator also serves MCP tools that let other agents
-send PRs for review through the bot. They live on their own loopback-only port
+send PRs for review through the bot and DM you when they need you. They live on their own loopback-only port
 (`MCP_PORT`, default 8788) so a tunnel to the main port never exposes them:
 
 ```sh
@@ -127,6 +127,7 @@ claude mcp add --scope user --transport http t3-review http://127.0.0.1:8788/mcp
 | `review_status` | The PR's thread, round, status, and the latest review's full reply. |
 | `mark_merged` | Once the PR is merged (checked with `gh`), reacts `:merge:` on the message that opened its thread. The workspace needs a custom `:merge:` emoji. |
 | `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`). |
+| `notify_user` | DMs you as the bot (**Settings → Your Slack user id**) when an agent needs your attention. Returns `thread_ts`; passing it back replies in the same DM thread. |
 
 The orchestrator remembers each PR's channel, thread and round, so agents only pass
 the PR URL. Add `slack.second_pass` to a rule's events for later rounds to be
