@@ -261,10 +261,15 @@ The run log shows dispatches under the preset names with source `manual`.
 ### Automations
 
 An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub
-issue** or **Inbox: Linear issue**. On top of the repository list the editor
-gets **Reasons**, **States**, **Labels** (any of the listed, or switch to all)
-and, for Linear, **Teams** instead of repositories. Each is a token field that
-suggests values seen in the inbox with counts; type to add one not seen yet.
+issue** or **Inbox: Linear issue**. A rule polls one source: picking a Linear
+inbox event drops the GitHub ones and the other way round. On top of the
+repository list the editor gets **Reasons**, **States**, **Labels** (any of the
+listed, or switch to all) and, for Linear, **Teams** instead of repositories.
+Each is a token field that suggests values seen in the inbox with counts; type
+to add one not seen yet. Labels also come from the source itself: after a poll,
+labels older than an hour are synced from every GitHub repository with inbox
+items or named in a rule, and from Linear's workspace and team labels, and the
+editor suggests those within the rule's repositories or teams.
 "Review every PR where my review is requested in acme/widgets" is a rule on
 Inbox: GitHub PR, repo `acme/widgets`, reason `review requested`. "Implement
 Linear issues in Todo assigned to me with label ready-for-dev" is Inbox: Linear

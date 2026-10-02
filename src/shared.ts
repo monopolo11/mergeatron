@@ -49,6 +49,11 @@ export function inboxEvent(source: InboxSource, kind: InboxKind): string {
   return `${INBOX_EVENT_PREFIX}${source}.${kind}`;
 }
 
+/** The source of an `inbox.<source>.<kind>` key; null for webhook and Slack events. A rule polls one source at most. */
+export function inboxSource(event: string): InboxSource | null {
+  return INBOX_SOURCES.find((source) => event.startsWith(`${INBOX_EVENT_PREFIX}${source}.`)) ?? null;
+}
+
 /**
  * Filters a rule applies on top of its event, matched against the delivery's
  * template variables (`reasons`, `labels`, `state`/`state_type`, `team`), so

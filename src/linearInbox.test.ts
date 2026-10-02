@@ -58,3 +58,26 @@ describe("LinearInbox.fetch", () => {
     expect((await inbox.fetch()).items).toHaveLength(1);
   });
 });
+
+describe("LinearInbox.labels", () => {
+  test("pages through workspace and team labels, skipping groups", async () => {
+    const cursors: unknown[] = [];
+    const inbox = new LinearInbox("key", async <T,>(_key: string, _query: string, variables?: Record<string, unknown>): Promise<T> => {
+      cursors.push(variables?.after);
+      const first = variables?.after === null;
+      return {
+        issueLabels: {
+          nodes: first
+            ? [{ name: "Bug", isGroup: false, team: null }, { name: "Area", isGroup: true, team: null }]
+            : [{ name: "ready for dev", isGroup: false, team: { key: "ENG" } }],
+          pageInfo: { hasNextPage: first, endCursor: first ? "c1" : null },
+        },
+      } as T;
+    });
+    expect(await inbox.labels()).toEqual([
+      { name: "Bug", scope: null },
+      { name: "ready for dev", scope: "ENG" },
+    ]);
+    expect(cursors).toEqual([null, "c1"]);
+  });
+});

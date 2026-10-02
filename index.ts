@@ -245,6 +245,9 @@ const server = Bun.serve({
       return json(response);
     },
 
+    /** Labels synced from each source, for the rule editor's suggestions. */
+    "/api/labels": () => json(poller.labelCatalog()),
+
     "/api/inbox/poll": {
       POST: async (req) => {
         const { source } = (await req.json().catch(() => ({}))) as { source?: string };

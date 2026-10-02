@@ -1,6 +1,6 @@
 import type { HandlerDeps } from "./handler.ts";
 import { runRules } from "./handler.ts";
-import { automationsFor, itemContext, itemEvent, type InboxItem, type PolledItem } from "./inbox.ts";
+import { automationsFor, itemContext, itemEvent, type InboxItem, type InboxLabel, type LabelsResponse, type PolledItem } from "./inbox.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { INBOX_SOURCES, type InboxSource } from "./shared.ts";
@@ -8,7 +8,15 @@ import { INBOX_SOURCES, type InboxSource } from "./shared.ts";
 const log = logger("poll");
 
 /** What a source needs to provide; see GitHubInbox and LinearInbox. */
-export type InboxSourceClient = { fetch(): Promise<{ login: string | null; items: PolledItem[] }> };
+export type InboxSourceClient = {
+  fetch(): Promise<{ login: string | null; items: PolledItem[] }>;
+  /** Labels its items can carry. GitHub labels live on repositories, so it gets the `owner/name`s to cover. */
+  labels(repos: string[]): Promise<InboxLabel[]>;
+};
+
+/** How long a source's synced labels are kept before the next poll refreshes them. */
+const LABEL_SYNC_MS = 60 * 60_000;
+const REPO_NAME = /^[\w.-]+\/[\w.-]+$/;
 
 export type PollStatus = {
   /** The source has what it needs: `gh` for GitHub, `LINEAR_API_KEY` for Linear. */
@@ -27,13 +35,17 @@ export type PollStatus = {
 /**
  * Polls each configured source on its own interval (Settings), writes the
  * items to the store (see `Store.syncInbox`) and after every poll starts the
- * rules armed for them (see `automationsFor`). Items survive restarts, so the
+ * rules armed for them (see `automationsFor`) and refreshes stale labels
+ * (see `syncLabels`). Items survive restarts, so the
  * inbox is full before the first poll; the run log's delivery ids keep
  * automations from firing twice.
  */
 export class Poller {
   private readonly timers = new Map<InboxSource, Timer>();
   private readonly status = new Map<InboxSource, PollStatus>();
+  /** Last synced labels per source, with the repos they cover; in memory, since the first poll after a start refills them. */
+  private readonly labels = new Map<InboxSource, { labels: InboxLabel[]; repos: string; syncedAt: number }>();
+  private readonly syncingLabels = new Set<InboxSource>();
   private stopped = false;
 
   constructor(
@@ -79,6 +91,10 @@ export class Poller {
     return this.deps.store.getInboxItem(key);
   }
 
+  labelCatalog(): LabelsResponse {
+    return Object.fromEntries(INBOX_SOURCES.map((source) => [source, this.labels.get(source)?.labels ?? []])) as LabelsResponse;
+  }
+
   statuses(): Record<InboxSource, PollStatus> {
     return Object.fromEntries(INBOX_SOURCES.map((source) => [source, this.state(source)])) as Record<InboxSource, PollStatus>;
   }
@@ -105,6 +121,7 @@ export class Poller {
       this.deps.store.pruneInbox();
       Object.assign(status, { login, items: items.length, lastError: null, lastPolledAt: new Date().toISOString() });
       const started = this.runAutomations(items);
+      void this.syncLabels(source);
       log.info("polled", {
         source,
         items: items.length,
@@ -136,6 +153,35 @@ export class Poller {
         return runRules(this.deps, { deliveryId, event: itemEvent(item), ctx: itemContext(item) }, [rule]);
       }),
     );
+  }
+
+  /**
+   * Refreshes a source's labels when they are an hour old or, for GitHub,
+   * when the repositories to cover changed. A failed sync keeps the previous
+   * labels and is retried after the next poll.
+   */
+  async syncLabels(source: InboxSource): Promise<void> {
+    const client = this.sources[source];
+    const repos = source === "github" ? this.labelRepos() : [];
+    const synced = this.labels.get(source);
+    const fresh = synced && synced.repos === repos.join(",") && Date.now() - synced.syncedAt < LABEL_SYNC_MS;
+    if (!client || fresh || this.syncingLabels.has(source)) return;
+    this.syncingLabels.add(source);
+    try {
+      const labels = await client.labels(repos);
+      this.labels.set(source, { labels, repos: repos.join(","), syncedAt: Date.now() });
+      log.info("labels synced", { source, labels: labels.length, repos: repos.length || undefined });
+    } catch (error) {
+      log.warn("label sync failed", { source, error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.syncingLabels.delete(source);
+    }
+  }
+
+  /** Repositories GitHub labels are synced for: those of retained inbox items and of rule filters, lowercased. */
+  private labelRepos(): string[] {
+    const repos = [...this.list({ gone: true }).flatMap((item) => item.repo ?? []), ...this.deps.store.listRules().flatMap((rule) => rule.repos)];
+    return [...new Set(repos.map((repo) => repo.toLowerCase()).filter((repo) => REPO_NAME.test(repo)))].toSorted();
   }
 
   private schedule(source: InboxSource, delayMs: number): void {

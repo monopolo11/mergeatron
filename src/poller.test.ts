@@ -18,7 +18,7 @@ function setup(items = [pr, linear]) {
     startThread: async (input: { title: string }) => (started.push(input.title), { threadId: `t${started.length}`, threadUrl: `http://t3/t${started.length}` }),
   } as unknown as T3Client;
   const deps = { store, t3, slack: null };
-  const poller = new Poller(deps, { github: { fetch: async () => ({ login: "me", items }) }, linear: null });
+  const poller = new Poller(deps, { github: { fetch: async () => ({ login: "me", items }), labels: async () => [] }, linear: null });
   return { store, deps, poller, started };
 }
 
@@ -51,7 +51,7 @@ describe("Poller", () => {
   test("a failing source keeps the previous items and records the error", async () => {
     const { deps } = setup();
     let fail = false;
-    const poller = new Poller(deps, { github: { fetch: async () => { if (fail) throw new Error("gh: not logged in"); return { login: "me", items: [pr] }; } }, linear: null });
+    const poller = new Poller(deps, { github: { fetch: async () => { if (fail) throw new Error("gh: not logged in"); return { login: "me", items: [pr] }; }, labels: async () => [] }, linear: null });
     await poller.poll("github");
     fail = true;
     const status = await poller.poll("github");
@@ -59,6 +59,34 @@ describe("Poller", () => {
     // A failed poll marks nothing gone: the last good inbox stays.
     expect(poller.list().map((item) => [item.key, item.goneAt])).toEqual([["github:acme/widgets#42", null]]);
     expect(poller.statuses().linear).toMatchObject({ configured: false, nextAt: null });
+  });
+
+  test("labels sync for the repos of inbox items and rules, again only when those change or fail", async () => {
+    const { deps, store } = setup();
+    const asked: string[][] = [];
+    let fail = false;
+    const labels = async (repos: string[]) => {
+      asked.push(repos);
+      if (fail) throw new Error("gh: rate limited");
+      return repos.map((repo) => ({ name: "ready", scope: repo }));
+    };
+    const poller = new Poller(deps, { github: { fetch: async () => ({ login: "me", items: [pr] }), labels }, linear: null });
+    await poller.poll("github");
+    await settle();
+    expect(asked).toEqual([["acme/widgets"]]);
+    expect(poller.labelCatalog()).toEqual({ github: [{ name: "ready", scope: "acme/widgets" }], linear: [] });
+
+    // Fresh and covering the same repos: no new sync.
+    await poller.syncLabels("github");
+    expect(asked).toHaveLength(1);
+
+    // A rule naming another repo widens the sync; a failure keeps the last labels.
+    const { id, createdAt, updatedAt, ...input } = rule;
+    store.createRule({ ...input, repos: ["Acme/Gadgets", "not a repo"] });
+    fail = true;
+    await poller.syncLabels("github");
+    expect(asked[1]).toEqual(["acme/gadgets", "acme/widgets"]);
+    expect(poller.labelCatalog().github).toHaveLength(1);
   });
 });
 

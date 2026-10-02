@@ -76,3 +76,16 @@ describe("GitHubInbox.fetch", () => {
     await expect(inbox.fetch()).rejects.toThrow("bad credentials");
   });
 });
+
+describe("GitHubInbox.labels", () => {
+  test("lists each repo's labels and leaves out repos that fail", async () => {
+    const inbox = new GitHubInbox(undefined, async (repo) => {
+      if (repo === "acme/gone") throw new Error("HTTP 404");
+      return ["bug", "ready"];
+    });
+    expect(await inbox.labels(["acme/widgets", "acme/gone"])).toEqual([
+      { name: "bug", scope: "acme/widgets" },
+      { name: "ready", scope: "acme/widgets" },
+    ]);
+  });
+});

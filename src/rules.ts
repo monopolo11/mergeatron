@@ -10,6 +10,7 @@ import {
   INBOX_REASONS,
   RUNTIME_MODES,
   WORKSPACE_MODES,
+  inboxSource,
   type PollingSettings,
   type RuleFilters,
 } from "./shared.ts";
@@ -53,7 +54,12 @@ export const RuleInput = z.object({
   workspace: z.enum(WORKSPACE_MODES).default("worktree"),
   model: ModelSelectionSchema.nullable().default(null),
   prompt: z.string().min(1),
-}) satisfies z.ZodType<Omit<Rule, "id" | "createdAt" | "updatedAt">, unknown>;
+})
+  // One inbox source per rule keeps its filters and label suggestions to one provider.
+  .refine((rule) => new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1, {
+    message: "An inbox rule polls one source: pick GitHub or Linear inbox events, not both.",
+    path: ["events"],
+  }) satisfies z.ZodType<Omit<Rule, "id" | "createdAt" | "updatedAt">, unknown>;
 export type RuleInput = z.infer<typeof RuleInput>;
 
 const PollSourceSchema = z.object({

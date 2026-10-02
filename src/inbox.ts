@@ -12,6 +12,17 @@ export type InboxItem = typeof inboxItems.$inferSelect;
 /** What a source returns for one PR or issue; the store adds the tracking columns. */
 export type PolledItem = Omit<InboxItem, "firstSeenAt" | "lastSeenAt" | "goneAt">;
 
+/**
+ * A label items of a source can carry, synced so the rule editor can suggest
+ * labels no inbox item has yet. `scope` is the repository (`owner/name`,
+ * lowercased) for GitHub, the team key for Linear, or null for Linear
+ * workspace labels, which every team shares.
+ */
+export type InboxLabel = { name: string; scope: string | null };
+
+/** `GET /api/labels`: the last synced labels per source, empty until a sync succeeds. */
+export type LabelsResponse = Record<InboxSource, InboxLabel[]>;
+
 /** The latest run on an item's PR or issue, from any trigger. The reply stays out: it can be long. */
 export type InboxRun = Pick<Run, "id" | "status" | "ruleName" | "detail" | "threadUrl" | "createdAt"> & { verdict: Verdict | null };
 

@@ -1,4 +1,4 @@
-import type { PolledItem } from "./inbox.ts";
+import type { InboxLabel, PolledItem } from "./inbox.ts";
 import { logger } from "./log.ts";
 import type { InboxReason } from "./shared.ts";
 
@@ -68,8 +68,12 @@ type SearchResult = {
 export type InboxFetch = { login: string | null; items: PolledItem[] };
 
 export class GitHubInbox {
-  /** `gh api graphql` with the search; injectable for tests. */
-  constructor(private readonly search: (query: string, q: string) => Promise<SearchResult> = ghGraphql) {}
+  constructor(
+    /** `gh api graphql` with the search; injectable for tests. */
+    private readonly search: (query: string, q: string) => Promise<SearchResult> = ghGraphql,
+    /** Label names of one `owner/name` repository; injectable for tests. */
+    private readonly repoLabels: (repo: string) => Promise<string[]> = ghRepoLabels,
+  ) {}
 
   /** The searches run at once: four small GraphQL calls every few minutes sit far below GitHub's limits. */
   async fetch(): Promise<InboxFetch> {
@@ -84,6 +88,22 @@ export class GitHubInbox {
       }),
     );
     return { login, items: mergeItems(batches) };
+  }
+
+  /** Labels live on repositories: one listing per repo, at once. A repo that fails (renamed, no access) is left out. */
+  async labels(repos: string[]): Promise<InboxLabel[]> {
+    const lists = await Promise.all(
+      repos.map((repo) =>
+        this.repoLabels(repo).then(
+          (names) => names.map((name) => ({ name, scope: repo })),
+          (error: unknown) => {
+            log.warn("labels fetch failed", { repo, error: error instanceof Error ? error.message : String(error) });
+            return [];
+          },
+        ),
+      ),
+    );
+    return lists.flat();
   }
 }
 
@@ -144,4 +164,10 @@ async function ghGraphql(query: string, q: string): Promise<SearchResult> {
     throw new Error(stderr || `gh exited with ${result.exitCode}`);
   }
   return result.json() as SearchResult;
+}
+
+async function ghRepoLabels(repo: string): Promise<string[]> {
+  const result = await Bun.$`gh api --paginate ${`repos/${repo}/labels?per_page=100`} --jq ${".[].name"}`.quiet().nothrow();
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString().trim() || `gh exited with ${result.exitCode}`);
+  return result.stdout.toString().split("\n").filter(Boolean);
 }

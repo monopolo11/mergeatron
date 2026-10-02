@@ -28,7 +28,7 @@ import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { saveLabel, useAutosave } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
-import { itemContext, itemEvent, type InboxItem, type InboxResponse } from "../../src/inbox.ts";
+import { itemContext, itemEvent, type InboxItem, type InboxResponse, type LabelsResponse } from "../../src/inbox.ts";
 import { ruleMismatch, sameName } from "../../src/match.ts";
 import type { Prompt, Rule, RuleInput, Run } from "../../src/rules.ts";
 import {
@@ -39,6 +39,7 @@ import {
   SUGGESTED_EVENTS,
   TEMPLATE_VARS,
   WORKSPACE_MODES,
+  inboxSource,
   type RuleFilters,
 } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
@@ -91,8 +92,8 @@ export function RuleEditor({
   const isSlack = events.some((event) => event.startsWith(SLACK_EVENT_PREFIX));
   const isInbox = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX));
   const isWebhook = events.some((event) => !event.startsWith(SLACK_EVENT_PREFIX) && !event.startsWith(INBOX_EVENT_PREFIX));
-  const inboxLinear = events.includes("inbox.linear.issue");
-  const inboxGitHub = events.some((event) => event.startsWith("inbox.github."));
+  const inboxLinear = events.some((event) => inboxSource(event) === "linear");
+  const inboxGitHub = events.some((event) => inboxSource(event) === "github");
   const inboxPr = events.includes("inbox.github.pull_request");
   const inboxIssue = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX) && event.endsWith(".issue"));
   // Slack messages carry PR variables once a PR link is found in the text.
@@ -102,16 +103,21 @@ export function RuleEditor({
   // Inbox items feed the token suggestions and the match preview; only fetched for inbox rules.
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: isInbox });
   const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<Prompt[]>("/api/prompts") });
+  // Labels synced from the rule's provider, so suggestions cover labels no inbox item carries yet.
+  const synced = useQuery({ queryKey: ["labels"], queryFn: () => api<LabelsResponse>("/api/labels"), enabled: isInbox || isWebhook, staleTime: 5 * 60_000 });
   const candidates = (inbox.data?.items ?? []).filter((item) => events.includes(itemEvent(item)));
   // Labels and states are counted within the chosen repos and teams, so the suggestions fit the rule.
-  const scoped = candidates.filter(
-    (item) =>
-      (value.repos.length === 0 || !item.repo || value.repos.some((repo) => sameName(repo, item.repo!))) &&
-      (value.filters.teams.length === 0 || !item.team || value.filters.teams.some((team) => sameName(team, item.team!))),
-  );
+  const scoped = candidates.filter((item) => within(value.repos, item.repo) && within(value.filters.teams, item.team));
+  const syncedLabels = [
+    ...(isWebhook || inboxGitHub ? (synced.data?.github ?? []).filter((label) => within(value.repos, label.scope)) : []),
+    ...(inboxLinear ? (synced.data?.linear ?? []).filter((label) => within(value.filters.teams, label.scope)) : []),
+  ];
   const repoOptions = countOptions([...candidates.flatMap((item) => (item.repo ? [item.repo] : [])), ...runs.flatMap((run) => (run.repo ? [run.repo] : []))]);
   const teamOptions = countOptions(candidates.flatMap((item) => (item.team ? [item.team] : [])));
-  const labelOptions = countOptions(scoped.flatMap((item) => item.labels));
+  const labelOptions = countOptions(
+    scoped.flatMap((item) => item.labels),
+    syncedLabels.map((label) => label.name),
+  );
   const stateOptions = countOptions(scoped.flatMap((item) => [item.state, ...(item.stateType ? [item.stateType] : [])]));
 
   // What the rule as drafted would fire on, with the matcher's own reason for every miss.
@@ -465,31 +471,43 @@ function MatchesTable({ matches }: { matches: Match[] }) {
   );
 }
 
-/** Distinct values with how often they occur, most common first. */
-function countOptions(values: string[]): TokenOption[] {
-  const counts = new Map<string, { value: string; count: number }>();
+/** Distinct values with how often they occur, most common first; `known` values that never occur follow, uncounted. */
+function countOptions(values: string[], known: string[] = []): TokenOption[] {
+  const counts = new Map<string, TokenOption>();
   for (const value of values) {
     const key = value.toLowerCase();
     const entry = counts.get(key);
-    if (entry) entry.count += 1;
+    if (entry) entry.count = (entry.count ?? 0) + 1;
     else counts.set(key, { value, count: 1 });
   }
-  return [...counts.values()].toSorted((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+  for (const value of known) if (!counts.has(value.toLowerCase())) counts.set(value.toLowerCase(), { value });
+  return [...counts.values()].toSorted((a, b) => (b.count ?? 0) - (a.count ?? 0) || a.value.localeCompare(b.value));
+}
+
+/** True when nothing is wanted, the value is unscoped (a Linear workspace label, a GitHub item's team), or it is one of the wanted names. */
+function within(wanted: string[], name: string | null): boolean {
+  return wanted.length === 0 || !name || wanted.some((w) => sameName(w, name));
 }
 
 const EVENT_GROUPS = [
   { label: "GitHub webhook", events: SUGGESTED_EVENTS.filter((e) => !e.key.startsWith(SLACK_EVENT_PREFIX) && !e.key.startsWith(INBOX_EVENT_PREFIX)) },
   { label: "Slack", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(SLACK_EVENT_PREFIX)) },
-  { label: "Inbox (polled)", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(INBOX_EVENT_PREFIX)) },
+  { label: "Inbox (polled) · one source per rule", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(INBOX_EVENT_PREFIX)) },
 ];
 
-/** Multi-select of event keys. Keys saved via the API that are not in the list stay selected and show under "Custom". */
+/**
+ * Multi-select of event keys. Keys saved via the API that are not in the list
+ * stay selected and show under "Custom". Picking an inbox event of one source
+ * drops the other source's inbox events: a rule polls one source.
+ */
 function EventPicker({ value, onChange }: { value: string[]; onChange: (events: string[]) => void }) {
   const known = new Set<string>(SUGGESTED_EVENTS.map((e) => e.key));
   const custom = value.filter((key) => !known.has(key)).map((key) => ({ key, label: key }));
   const groups = custom.length > 0 ? [...EVENT_GROUPS, { label: "Custom", events: custom }] : EVENT_GROUPS;
   const toggle = (key: string, checked: boolean) => {
-    const next = checked ? [...value, key] : value.filter((k) => k !== key);
+    const source = inboxSource(key);
+    const otherSource = (k: string) => source !== null && inboxSource(k) !== null && inboxSource(k) !== source;
+    const next = checked ? [...value.filter((k) => !otherSource(k)), key] : value.filter((k) => k !== key);
     if (next.length > 0) onChange(next);
   };
   const labelOf = (key: string) => SUGGESTED_EVENTS.find((e) => e.key === key)?.label ?? key;

@@ -1,4 +1,4 @@
-import type { PolledItem } from "./inbox.ts";
+import type { InboxLabel, PolledItem } from "./inbox.ts";
 import { logger } from "./log.ts";
 import type { InboxReason } from "./shared.ts";
 
@@ -43,6 +43,17 @@ query Mentions {
   }
 }`;
 
+/** Workspace and team labels. Groups are skipped: issues carry their child labels, never the group. */
+const LABELS_QUERY = `query Labels($after: String) {
+  issueLabels(first: 250, after: $after) {
+    nodes { name isGroup team { key } }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+/** Stops paging a runaway connection; 20 pages is 5000 labels. */
+const MAX_LABEL_PAGES = 20;
+
 export type LinearIssue = {
   id: string;
   identifier: string;
@@ -62,6 +73,12 @@ export type LinearIssue = {
 
 type MineResult = { viewer: { id: string; displayName: string }; issues: { nodes: LinearIssue[] } };
 type MentionsResult = { notifications: { nodes: ({ type?: string; issue?: LinearIssue } | Record<string, never>)[] } };
+type LabelsResult = {
+  issueLabels: {
+    nodes: { name: string; isGroup: boolean; team: { key: string } | null }[];
+    pageInfo: { hasNextPage: boolean; endCursor: string | null };
+  };
+};
 
 /** Workflow state types that mean the issue is over; `duplicate` is its own type in Linear, not a kind of canceled. */
 const DONE_STATES = new Set(["completed", "canceled", "duplicate"]);
@@ -70,7 +87,7 @@ export class LinearInbox {
   constructor(
     private readonly apiKey: string,
     /** GraphQL transport; injectable for tests. */
-    private readonly query: <T>(apiKey: string, query: string) => Promise<T> = linearGraphql,
+    private readonly query: <T>(apiKey: string, query: string, variables?: Record<string, unknown>) => Promise<T> = linearGraphql,
   ) {}
 
   async fetch(): Promise<{ login: string | null; items: PolledItem[] }> {
@@ -100,6 +117,19 @@ export class LinearInbox {
       log.warn("notifications query failed; inbox has assigned and created issues only", { error });
     }
     return { login: mine.viewer.displayName, items: [...items.values()] };
+  }
+
+  /** Every label issues can carry, scoped to its team or null for workspace labels. Linear has no repositories to cover. */
+  async labels(): Promise<InboxLabel[]> {
+    const labels: InboxLabel[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < MAX_LABEL_PAGES; page++) {
+      const { issueLabels }: LabelsResult = await this.query<LabelsResult>(this.apiKey, LABELS_QUERY, { after });
+      for (const label of issueLabels.nodes) if (!label.isGroup) labels.push({ name: label.name, scope: label.team?.key ?? null });
+      after = issueLabels.pageInfo.endCursor;
+      if (!issueLabels.pageInfo.hasNextPage || !after) break;
+    }
+    return labels;
   }
 }
 
@@ -131,11 +161,11 @@ export function linearItem(issue: LinearIssue, reasons: InboxReason[]): PolledIt
   };
 }
 
-async function linearGraphql<T>(apiKey: string, query: string): Promise<T> {
+async function linearGraphql<T>(apiKey: string, query: string, variables?: Record<string, unknown>): Promise<T> {
   const response = await fetch(LINEAR_API, {
     method: "POST",
     headers: { authorization: apiKey, "content-type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({ query, variables }),
   });
   const body = (await response.json().catch(() => null)) as { data?: T; errors?: { message: string }[] } | null;
   if (!response.ok || !body?.data) {
