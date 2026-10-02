@@ -1,4 +1,5 @@
 import { Data, Effect } from "effect";
+import { assertChannelAllowed } from "./channels.ts";
 import type { WebhookContext } from "./github.ts";
 import { handleDelivery, type HandlerServices } from "./handler.ts";
 import { logger } from "./log.ts";
@@ -55,6 +56,8 @@ export const requestReview = Effect.fn("review.request")(function* (ask: ReviewA
   const settings = yield* store.getSettings();
   const channel = ask.channel ?? settings.reviewChannel;
   if (!channel) return yield* Effect.fail(new ReviewRequestError({ message: "No channel: pass `channel`, or set a review channel in the orchestrator's Settings." }));
+
+  yield* assertChannelAllowed(channel);
 
   const ctx = yield* pulls.details({ repo: pr.repo, pr_url: pr.url, pr_number: pr.number });
   const mentions = yield* slackMentions(ask.mentions);

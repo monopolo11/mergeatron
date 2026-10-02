@@ -20,8 +20,9 @@ function setup() {
   const t3 = fakeT3({ projects: () => Effect.succeed([]) });
   const pulls = fakePulls({ details: (ctx) => Effect.succeed({ ...ctx, pr_title: "Add widgets" }), merged: () => Effect.sync(() => merged.value) });
   const layer = testLayer({ slack, t3, pulls });
+  // Agents may only post to the review channel or a rule's channel; these tests use #reviews.
   const withRule = Effect.flatMap(Store, (store) =>
-    store.createRule({
+    Effect.andThen(Effect.flatMap(store.getSettings(), (settings) => store.saveSettings({ ...settings, reviewChannel: "#reviews" })), store.createRule({
       name: "review",
       enabled: true,
       events: ["slack.message", "slack.second_pass"],
@@ -35,7 +36,7 @@ function setup() {
       workspace: "worktree",
       model: null,
       prompt: "review {{pr_url}} round {{review_round}}",
-    }),
+    })),
   );
   return { layer, withRule, posts, reactions, merged };
 }

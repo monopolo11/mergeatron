@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Cause, Effect, Exit } from "effect";
 import { z } from "zod";
+import { assertChannelAllowed } from "./channels.ts";
 import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
 import { notifyUser } from "./notify.ts";
@@ -20,7 +21,7 @@ import { SlackClient } from "./slack.ts";
 const log = logger("mcp");
 
 /** Failures the agent can act on: returned as tool errors without an error log. */
-const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError"]);
+const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError"]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
 const mentions = z
@@ -56,7 +57,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "slack_post_message",
       {
         description:
-          "Post a message to Slack as the bot. The bot must be a member of the channel. Returns the message ts; pass it as thread_ts to reply in that thread.",
+          "Post a message to Slack as the bot. Only the review channel in Settings and channels set on enabled rules are allowed; no DMs (use notify_user). The bot must be a member of the channel. Returns the message ts; pass it as thread_ts to reply in that thread.",
         inputSchema: {
           channel: z.string().describe("Channel id (C0123...) or #name of a public channel"),
           text: z.string().min(1).describe("Message body in Markdown; raw Slack syntax such as <@U123> passes through"),
@@ -64,7 +65,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         },
         annotations: { destructiveHint: false, openWorldHint: true },
       },
-      ({ channel, text, thread_ts }) => result("slack_post_message", slack.post(channel, text, thread_ts)),
+      ({ channel, text, thread_ts }) => result("slack_post_message", assertChannelAllowed(channel).pipe(Effect.andThen(slack.post(channel, text, thread_ts)))),
     );
 
     server.registerTool(
