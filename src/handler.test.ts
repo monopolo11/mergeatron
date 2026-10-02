@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { openDatabase } from "./db/index.ts";
+import { Effect } from "effect";
 import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
 import type { Rule } from "./rules.ts";
 import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
-import type { SlackClient } from "./slack.ts";
-import type { T3Client, T3Project } from "./t3.ts";
+import type { T3Project } from "./t3.ts";
+import { fakeSlack, runWith, settle, testLayer } from "./testing.ts";
 
 const base: Rule = {
   id: "r1",
@@ -94,103 +94,112 @@ describe("resolveProject", () => {
 });
 
 describe("handleDelivery", () => {
-  test("a Slack message that matches no rule gets a skipped reaction and no run", () => {
-    const store = new Store(openDatabase(":memory:"));
-    store.createRule({ ...base, events: ["slack.message"], channel: "C-other" });
+  // The default fake T3 fails every call with "unexpected": these deliveries must be decided before T3 is reached.
+
+  test("a Slack message that matches no rule gets a skipped reaction and no run", async () => {
     const reactions: string[] = [];
-    const slack = { react: (_: unknown, name: string) => (reactions.push(name), Promise.resolve()) } as unknown as SlackClient;
-    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
-    const ctx = { repo: "acme/widgets", pr_number: "1", pr_url: "https://github.com/acme/widgets/pull/1", slack_channel: "C1", slack_ts: "1.0" };
-
-    handleDelivery({ store, t3, slack }, { deliveryId: "d0", event: "slack.message", ctx });
-    expect(reactions).toEqual(["fast_forward"]);
-    expect(store.listRuns()).toHaveLength(0);
+    const slack = fakeSlack({ react: (_, name) => Effect.sync(() => void reactions.push(name)) });
+    await runWith(
+      testLayer({ slack }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.createRule({ ...base, events: ["slack.message"], channel: "C-other" });
+        const ctx = { repo: "acme/widgets", pr_number: "1", pr_url: "https://github.com/acme/widgets/pull/1", slack_channel: "C1", slack_ts: "1.0" };
+        yield* handleDelivery({ deliveryId: "d0", event: "slack.message", ctx });
+        expect(reactions).toEqual(["fast_forward"]);
+        expect(yield* store.listRuns()).toHaveLength(0);
+      }),
+    );
   });
 
-  test("one review per PR at a time: a second delivery is skipped and points at the running thread", () => {
-    const store = new Store(openDatabase(":memory:"));
-    const rule = store.createRule({ ...base, repos: [], events: ["slack.message"] });
-    const ctx = { repo: "acme/widgets", pr_number: "42", pr_url: "https://github.com/acme/widgets/pull/42" };
-    store.recordRun({
-      ruleId: "other-rule", ruleName: "github review", deliveryId: "d1", event: "pull_request.review_requested", repo: "Acme/Widgets",
-      source: "github", author: "alice", status: "started", detail: "", threadId: "t1", threadUrl: "http://t3/t1", context: ctx, result: null,
-    });
-    // T3 must never be reached: the lock is decided before any thread starts.
-    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
+  test("one review per PR at a time: a second delivery is skipped and points at the running thread", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const rule = yield* store.createRule({ ...base, repos: [], events: ["slack.message"] });
+        const ctx = { repo: "acme/widgets", pr_number: "42", pr_url: "https://github.com/acme/widgets/pull/42" };
+        yield* store.recordRun({
+          ruleId: "other-rule", ruleName: "github review", deliveryId: "d1", event: "pull_request.review_requested", repo: "Acme/Widgets",
+          source: "github", author: "alice", status: "started", detail: "", threadId: "t1", threadUrl: "http://t3/t1", context: ctx, result: null,
+        });
 
-    const result = handleDelivery({ store, t3, slack: null }, { deliveryId: "d2", event: "slack.message", ctx });
-    expect(result.matched).toEqual([]);
-    const skipped = store.listRuns().find((run) => run.deliveryId === "d2");
-    expect(skipped).toMatchObject({ ruleId: rule.id, status: "skipped", threadUrl: "http://t3/t1" });
-    expect(skipped?.detail).toContain("already running for acme/widgets#42");
+        const result = yield* handleDelivery({ deliveryId: "d2", event: "slack.message", ctx });
+        expect(result.matched).toEqual([]);
+        const skipped = (yield* store.listRuns()).find((run) => run.deliveryId === "d2");
+        expect(skipped).toMatchObject({ ruleId: rule.id, status: "skipped", threadUrl: "http://t3/t1" });
+        expect(skipped?.detail).toContain("already running for acme/widgets#42");
 
-    // Once the first review settles, the PR is free again and its reply feeds the next review's prompt.
-    store.updateRun(store.listRuns().find((run) => run.deliveryId === "d1")!.id, { status: "done", result: "first pass findings" });
-    expect(store.activeRunForPullRequest("acme/widgets", "42")).toBeNull();
-    const again = handleDelivery({ store, t3, slack: null }, { deliveryId: "d3", event: "slack.message", ctx: { ...ctx } });
-    expect(again.matched).toEqual([rule.name]);
-    const run = store.listRuns().find((r) => r.deliveryId === "d3");
-    expect(run?.context).toMatchObject({ previous_result: "first pass findings", previous_thread_url: "http://t3/t1" });
-  });
+        // Once the first review settles, the PR is free again and its reply feeds the next review's prompt.
+        const first = (yield* store.listRuns()).find((run) => run.deliveryId === "d1")!;
+        yield* store.updateRun(first.id, { status: "done", result: "first pass findings" });
+        expect(yield* store.activeRunForPullRequest("acme/widgets", "42")).toBeNull();
+        const again = yield* handleDelivery({ deliveryId: "d3", event: "slack.message", ctx: { ...ctx } });
+        expect(again.matched).toEqual([rule.name]);
+        const run = (yield* store.listRuns()).find((r) => r.deliveryId === "d3");
+        expect(run?.context).toMatchObject({ previous_result: "first pass findings", previous_thread_url: "http://t3/t1" });
+      }),
+    ));
 
   test("a PR authored by the configured GitHub login is skipped before T3 is reached", async () => {
-    const store = new Store(openDatabase(":memory:"));
-    store.saveSettings({ ...store.getSettings(), githubLogin: "Bernardo" });
-    const rule = store.createRule({ ...base, skipSelfReview: true });
-    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
-    const ctx = { repo: "acme/widgets", pr_number: "7", pr_author: "bernardo", slack_channel: "C1", slack_ts: "1.0" };
     const reactions: string[] = [];
-    const slack = {
-      react: (_: unknown, name: string) => (reactions.push(name), Promise.resolve()),
-      reply: () => Promise.resolve(),
-    } as unknown as SlackClient;
+    const slack = fakeSlack({ react: (_, name) => Effect.sync(() => void reactions.push(name)) });
+    await runWith(
+      testLayer({ slack }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.saveSettings({ ...(yield* store.getSettings()), githubLogin: "Bernardo" });
+        const rule = yield* store.createRule({ ...base, skipSelfReview: true });
+        const ctx = { repo: "acme/widgets", pr_number: "7", pr_author: "bernardo", slack_channel: "C1", slack_ts: "1.0" };
 
-    handleDelivery({ store, t3, slack }, { deliveryId: "d4", event: base.events[0]!, ctx });
-    await Bun.sleep(0);
-    const run = store.listRuns().find((r) => r.deliveryId === "d4");
-    expect(run).toMatchObject({ ruleId: rule.id, status: "skipped", threadId: null });
-    expect(run?.detail).toContain("self review");
-    // A skip is not a failure: ⏩, never ❌.
-    expect(reactions).toEqual(["fast_forward"]);
+        yield* handleDelivery({ deliveryId: "d4", event: base.events[0]!, ctx });
+        yield* settle;
+        const run = (yield* store.listRuns()).find((r) => r.deliveryId === "d4");
+        expect(run).toMatchObject({ ruleId: rule.id, status: "skipped", threadId: null });
+        expect(run?.detail).toContain("self review");
+        // A skip is not a failure: ⏩, never ❌.
+        expect(reactions).toEqual(["fast_forward"]);
 
-    // Rule opted out, or no login configured: not our concern, so T3 is reached and the mock rejects.
-    store.updateRule(rule.id, { ...base, skipSelfReview: false });
-    handleDelivery({ store, t3, slack: null }, { deliveryId: "d5", event: base.events[0]!, ctx });
-    await Bun.sleep(0);
-    expect(store.listRuns().find((r) => r.deliveryId === "d5")).toMatchObject({ status: "failed", detail: "unexpected" });
+        // Rule opted out, or no login configured: not our concern, so T3 is reached and the fake fails.
+        yield* store.updateRule(rule.id, { ...base, skipSelfReview: false });
+        yield* handleDelivery({ deliveryId: "d5", event: base.events[0]!, ctx: { ...ctx, slack_channel: undefined, slack_ts: undefined } });
+        yield* settle;
+        expect((yield* store.listRuns()).find((r) => r.deliveryId === "d5")).toMatchObject({ status: "failed", detail: "unexpected" });
+      }),
+    );
   });
 
   test("a paused PR is skipped and points at the handoff; a Slack second pass reviews anyway", async () => {
-    const store = new Store(openDatabase(":memory:"));
-    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 2 });
-    const rule = store.createRule({ ...base, events: ["slack.message", "slack.second_pass"] });
-    const ctx = { repo: "acme/widgets", pr_number: "9", pr_url: "https://github.com/acme/widgets/pull/9", slack_channel: "C1", slack_ts: "1.0" };
-    const done = (result: string, event = "slack.message", threadUrl: string | null = null) =>
-      store.recordRun({
-        ruleId: rule.id, ruleName: rule.name, deliveryId: crypto.randomUUID(), event, repo: ctx.repo, source: "slack", author: "alice",
-        status: "done", detail: "", threadId: threadUrl, threadUrl, context: ctx, result,
-      });
-    done("CHANGES_REQUESTED: 4 comments");
-    done("CHANGES_REQUESTED: 2 comments");
-    done("# Handoff\nScope moved twice.", HANDOFF_EVENT, "http://t3/handoff");
     const replies: string[] = [];
-    const slack = {
-      react: () => Promise.resolve(),
-      reply: (_: unknown, text: string) => (replies.push(text), Promise.resolve()),
-    } as unknown as SlackClient;
-    const t3 = { projects: () => Promise.reject(new Error("unexpected")) } as unknown as T3Client;
+    const slack = fakeSlack({ reply: (_, text) => Effect.sync(() => void replies.push(text)) });
+    await runWith(
+      testLayer({ slack }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.saveSettings({ ...(yield* store.getSettings()), maxChangesRequestedRounds: 2 });
+        const rule = yield* store.createRule({ ...base, events: ["slack.message", "slack.second_pass"] });
+        const ctx = { repo: "acme/widgets", pr_number: "9", pr_url: "https://github.com/acme/widgets/pull/9", slack_channel: "C1", slack_ts: "1.0" };
+        const done = (result: string, event = "slack.message", threadUrl: string | null = null) =>
+          store.recordRun({
+            ruleId: rule.id, ruleName: rule.name, deliveryId: crypto.randomUUID(), event, repo: ctx.repo, source: "slack", author: "alice",
+            status: "done", detail: "", threadId: threadUrl, threadUrl, context: ctx, result,
+          });
+        yield* done("CHANGES_REQUESTED: 4 comments");
+        yield* done("CHANGES_REQUESTED: 2 comments");
+        yield* done("# Handoff\nScope moved twice.", HANDOFF_EVENT, "http://t3/handoff");
 
-    expect(handleDelivery({ store, t3, slack }, { deliveryId: "d6", event: "slack.message", ctx }).matched).toEqual([]);
-    await Bun.sleep(0);
-    const skipped = store.listRuns().find((run) => run.deliveryId === "d6");
-    expect(skipped).toMatchObject({ status: "skipped", threadUrl: "http://t3/handoff" });
-    expect(skipped?.detail).toContain("paused");
-    expect(replies[0]).toContain("2 reviews in a row requested changes");
+        expect((yield* handleDelivery({ deliveryId: "d6", event: "slack.message", ctx })).matched).toEqual([]);
+        const skipped = (yield* store.listRuns()).find((run) => run.deliveryId === "d6");
+        expect(skipped).toMatchObject({ status: "skipped", threadUrl: "http://t3/handoff" });
+        expect(skipped?.detail).toContain("paused");
+        expect(replies[0]).toContain("2 reviews in a row requested changes");
 
-    // A human asking for a second pass overrides the pause, and the handoff never feeds the review prompt.
-    const again = handleDelivery({ store, t3, slack }, { deliveryId: "d7", event: "slack.second_pass", ctx: { ...ctx } });
-    expect(again.matched).toEqual([rule.name]);
-    await Bun.sleep(0);
-    expect(store.listRuns().find((run) => run.deliveryId === "d7")?.context?.previous_result).toBe("CHANGES_REQUESTED: 2 comments");
+        // A human asking for a second pass overrides the pause, and the handoff never feeds the review prompt.
+        const again = yield* handleDelivery({ deliveryId: "d7", event: "slack.second_pass", ctx: { ...ctx } });
+        expect(again.matched).toEqual([rule.name]);
+        yield* settle;
+        expect((yield* store.listRuns()).find((run) => run.deliveryId === "d7")?.context?.previous_result).toBe("CHANGES_REQUESTED: 2 comments");
+      }),
+    );
   });
 });

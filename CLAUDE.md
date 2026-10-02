@@ -109,3 +109,15 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
+
+## Effect
+
+The backend is Effect v4 (`effect`, `@effect/platform-bun`). Conventions:
+
+- A dependency is a `Context.Service` class with a static `layer` (see `src/store.ts`, `src/t3.ts`); `index.ts` composes the layer graph and launches it with `BunRuntime.runMain`. Services are read with `yield* Store`, never imported as singletons.
+- Expected failures are `Data.TaggedError` classes handled with `Effect.catchTag`/`catchTags`; unexpected ones are defects. Do not throw.
+- Anything that outlives a request goes through `Background.fork`/`watch` (`src/background.ts`), never a bare promise or `setTimeout`. Intervals and retries are `Schedule`s.
+- Log with `logger(scope)` from `src/log.ts` (returns effects; fields become `key=value` annotations). Wrap meaningful operations in `Effect.fn("name")` or `Effect.withSpan` so they trace.
+- API payloads are Effect `Schema`s in `src/rules.ts`; zod is only used for MCP tool inputs, which the MCP SDK requires.
+- Tests build services from `src/testing.ts` (`testLayer`, `fakeT3`, `fakeSlack`, `settle`) and run bodies with `runWith`.
+- `src/inbox.ts`, `src/match.ts`, `src/shared.ts` and `src/template.ts` are imported by the frontend bundle: keep them free of Effect and server imports.

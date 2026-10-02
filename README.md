@@ -321,8 +321,27 @@ changes cannot be updated from the UI. `GET /api/update` returns the same check.
 
 ## Development
 
-Storage is SQLite via Drizzle (`src/db/schema.ts`). Migrations in `drizzle/` run
-at startup; after changing the schema run `bun x drizzle-kit generate`.
+The service is written with [Effect](https://effect.website) v4. Every
+dependency (database, T3 client, Slack, the `gh` CLI, the inbox poller, the
+updater) is a `Context.Service` class with a `layer`, and `index.ts` composes
+them into one layer graph that `BunRuntime.runMain` launches. Shutting down
+(`SIGINT`/`SIGTERM`) closes that graph in reverse: the HTTP servers stop,
+background fibers (completion watchers, inbox polls, the Slack socket) are
+interrupted, the database closes. `src/background.ts` supervises everything
+that outlives a request, so no work runs as a dangling promise; the queue
+advance and the stuck-PR check run on the supervisor fiber (`src/supervisor.ts`)
+off a queue of run events. Failures are typed (`T3HttpError`, `T3RpcError`,
+`SlackApiError`, `InboxSourceError`, `UpdateError`, `ReviewRequestError`) and
+handled where they are expected; intervals and retries are `Schedule`s: the
+Slack socket reconnects with exponential backoff (1s doubling to 30s, jittered),
+watchers poll T3 every 5s for up to 3h, each inbox source polls on its own
+interval, and `gh`/`git` run as child processes that interruption kills.
+
+Storage is SQLite via Drizzle (`src/db/schema.ts`); `src/store.ts` wraps the
+synchronous queries in `Effect.sync`. Migrations in `drizzle/` run at startup;
+after changing the schema run `bun x drizzle-kit generate`. API payloads are
+Effect `Schema`s in `src/rules.ts`: decoding fills defaults, trims names and
+answers a bad request with the failing path.
 
 The UI is React + Tailwind v4 + shadcn/ui (`frontend/components/ui`, add more with
 `bunx --bun shadcn@latest add <component>`; fix any `from "cn"` import it emits to
@@ -333,3 +352,21 @@ of the HTML skips the plugin.
 ```sh
 bun test
 ```
+
+Tests get fresh services from `src/testing.ts`: an in-memory store, the
+background supervisor and fakes for T3, Slack and the `gh` lookups. A test
+provides `testLayer({ t3, slack })`, runs its body as an Effect, and waits for
+background work with `settle` instead of sleeping.
+
+## Observability
+
+Logs are one line per decision, rendered by Effect's logger (`src/log.ts`);
+annotations such as the delivery or run id become `key=value` pairs. Metrics
+are served in Prometheus format at `GET /api/metrics`: `orchestrator_deliveries_total`
+by trigger, `orchestrator_runs_total` by initial status, `orchestrator_runs_settled_total`
+by outcome, `orchestrator_thread_duration`, `orchestrator_watchers_active`,
+`orchestrator_polls_total` and `orchestrator_inbox_items` by source, plus
+Effect's fiber runtime metrics. Deliveries, thread starts, watchers, T3 RPCs,
+Slack calls, polls, updates and MCP tool calls each run in a tracing span. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to export logs, metrics and traces over OTLP to a
+collector (Grafana, Jaeger, Honeycomb, ...); without it nothing is exported.

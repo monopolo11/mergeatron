@@ -1,4 +1,8 @@
+import { Effect } from "effect";
+import { ChildProcessSpawner } from "effect/process";
+import { exec } from "./exec.ts";
 import type { InboxLabel, PolledItem } from "./inbox.ts";
+import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
 import { logger } from "./log.ts";
 import type { InboxReason } from "./shared.ts";
 
@@ -59,52 +63,56 @@ type SearchNode = {
   labels: { nodes: { name: string }[] };
 };
 
-type SearchResult = {
+export type SearchResult = {
   /** Nodes are typed on the way through `parseSearchNodes`, which checks `__typename`. */
   data?: { viewer: { login: string }; search: { nodes: unknown[] } };
   errors?: { message: string }[];
 };
 
-export type InboxFetch = { login: string | null; items: PolledItem[] };
+/** How the source talks to GitHub; the live one runs `gh`, tests inject fakes. */
+export type GitHubTransport = {
+  /** `gh api graphql` with the search. */
+  readonly search: (query: string, q: string) => Effect.Effect<SearchResult, InboxSourceError>;
+  /** Label names of one `owner/name` repository. */
+  readonly repoLabels: (repo: string) => Effect.Effect<string[], InboxSourceError>;
+};
 
-export class GitHubInbox {
-  constructor(
-    /** `gh api graphql` with the search; injectable for tests. */
-    private readonly search: (query: string, q: string) => Promise<SearchResult> = ghGraphql,
-    /** Label names of one `owner/name` repository; injectable for tests. */
-    private readonly repoLabels: (repo: string) => Promise<string[]> = ghRepoLabels,
-  ) {}
+const failed = (message: string) => new InboxSourceError({ source: "github", message });
 
-  /** The searches run at once: four small GraphQL calls every few minutes sit far below GitHub's limits. */
-  async fetch(): Promise<InboxFetch> {
-    let login: string | null = null;
-    const batches = await Promise.all(
-      GITHUB_SEARCHES.map(async ({ reason, q }) => {
-        const result = await this.search(SEARCH_QUERY, q);
-        if (result.errors?.length) throw new Error(`GitHub search "${q}" failed: ${result.errors.map((e) => e.message).join("; ")}`);
-        if (!result.data) throw new Error(`GitHub search "${q}" returned no data`);
-        login = result.data.viewer.login;
-        return parseSearchNodes(result.data.search.nodes, reason);
-      }),
-    );
-    return { login, items: mergeItems(batches) };
-  }
+export function makeGitHubInbox(transport: GitHubTransport): InboxSourceClient {
+  return {
+    /** The searches run at once: four small GraphQL calls every few minutes sit far below GitHub's limits. */
+    fetch: () =>
+      Effect.gen(function* () {
+        const batches = yield* Effect.forEach(
+          GITHUB_SEARCHES,
+          ({ reason, q }) =>
+            Effect.gen(function* () {
+              const result = yield* transport.search(SEARCH_QUERY, q);
+              if (result.errors?.length) return yield* Effect.fail(failed(`GitHub search "${q}" failed: ${result.errors.map((e) => e.message).join("; ")}`));
+              if (!result.data) return yield* Effect.fail(failed(`GitHub search "${q}" returned no data`));
+              return { login: result.data.viewer.login, items: parseSearchNodes(result.data.search.nodes, reason) };
+            }),
+          { concurrency: "unbounded" },
+        );
+        return { login: batches.at(-1)?.login ?? null, items: mergeItems(batches.map((batch) => batch.items)) };
+      }).pipe(Effect.withSpan("github.inbox.fetch")),
 
-  /** Labels live on repositories: one listing per repo, at once. A repo that fails (renamed, no access) is left out. */
-  async labels(repos: string[]): Promise<InboxLabel[]> {
-    const lists = await Promise.all(
-      repos.map((repo) =>
-        this.repoLabels(repo).then(
-          (names) => names.map((name) => ({ name, scope: repo })),
-          (error: unknown) => {
-            log.warn("labels fetch failed", { repo, error: error instanceof Error ? error.message : String(error) });
-            return [];
-          },
-        ),
+    /** Labels live on repositories: one listing per repo, at once. A repo that fails (renamed, no access) is left out. */
+    labels: (repos) =>
+      Effect.forEach(
+        repos,
+        (repo) =>
+          transport.repoLabels(repo).pipe(
+            Effect.map((names): InboxLabel[] => names.map((name) => ({ name, scope: repo }))),
+            Effect.catch((error) => log.warn("labels fetch failed", { repo, error: error.message }).pipe(Effect.as([] as InboxLabel[]))),
+          ),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map((lists) => lists.flat()),
+        Effect.withSpan("github.inbox.labels", { attributes: { repos: repos.length } }),
       ),
-    );
-    return lists.flat();
-  }
+  };
 }
 
 /** Items from one search's nodes, all tagged with the reason the search stands for. */
@@ -156,18 +164,24 @@ export function mergeItems(batches: PolledItem[][]): PolledItem[] {
   return [...byKey.values()];
 }
 
-async function ghGraphql(query: string, q: string): Promise<SearchResult> {
-  const result = await Bun.$`gh api graphql -f query=${query} -f q=${q}`.quiet().nothrow();
-  if (result.exitCode !== 0) {
-    const stderr = result.stderr.toString().trim();
-    log.warn("gh api graphql failed", { q, error: stderr });
-    throw new Error(stderr || `gh exited with ${result.exitCode}`);
-  }
-  return result.json() as SearchResult;
-}
+/** The live transport: `gh` child processes. */
+export const ghTransport: Effect.Effect<GitHubTransport, never, ChildProcessSpawner.ChildProcessSpawner> = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const gh = (args: string[]) =>
+    exec("gh", args).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.mapError((error) => failed(error.message)),
+      Effect.flatMap((output) => (output.exitCode === 0 ? Effect.succeed(output.stdout) : Effect.fail(failed(output.stderr || `gh exited with ${output.exitCode}`)))),
+    );
+  return {
+    search: (query, q) =>
+      gh(["api", "graphql", "-f", `query=${query}`, "-f", `q=${q}`]).pipe(
+        Effect.tapError((error) => log.warn("gh api graphql failed", { q, error: error.message })),
+        Effect.flatMap((stdout) => Effect.try({ try: () => JSON.parse(stdout) as SearchResult, catch: () => failed("gh returned no JSON") })),
+      ),
+    repoLabels: (repo) => Effect.map(gh(["api", "--paginate", `repos/${repo}/labels?per_page=100`, "--jq", ".[].name"]), (stdout) => stdout.split("\n").filter(Boolean)),
+  };
+});
 
-async function ghRepoLabels(repo: string): Promise<string[]> {
-  const result = await Bun.$`gh api --paginate ${`repos/${repo}/labels?per_page=100`} --jq ${".[].name"}`.quiet().nothrow();
-  if (result.exitCode !== 0) throw new Error(result.stderr.toString().trim() || `gh exited with ${result.exitCode}`);
-  return result.stdout.toString().split("\n").filter(Boolean);
-}
+/** The GitHub inbox source as the poller uses it. */
+export const GitHubInbox = { make: makeGitHubInbox, live: Effect.map(ghTransport, makeGitHubInbox) };

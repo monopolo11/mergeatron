@@ -1,53 +1,66 @@
 import { describe, expect, test } from "bun:test";
-import { openDatabase } from "./db/index.ts";
+import { Effect } from "effect";
 import { handoffIfStuck, handoffPrompt } from "./handoff.ts";
-import type { RuleInput } from "./rules.ts";
+import type { RuleInput, Run } from "./rules.ts";
 import { DEFAULT_HANDOFF_PROMPT, EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
-import type { SlackClient } from "./slack.ts";
 import { Store } from "./store.ts";
-import type { StartThreadInput, T3Client } from "./t3.ts";
+import type { StartThreadInput, T3Project } from "./t3.ts";
+import { fakeSlack, fakeT3, runWith, settle, testLayer } from "./testing.ts";
 
 const rule: RuleInput = {
   name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: null, allowBots: false, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
   projectId: "p1", workspace: "worktree", model: null, prompt: "review {{pr_url}}",
 };
 const ctx = { repo: "acme/widgets", pr_number: "5", pr_url: "https://github.com/acme/widgets/pull/5", pr_title: "Add billing", pr_author: "alice", pr_base: "main", slack_channel: "C1", slack_ts: "1.0" };
+const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };
 
-/** A store with one rule and `results.length` finished reviews of the PR, plus fakes that record what was started and said. */
-function setup(results: string[], limit = 3) {
-  const store = new Store(openDatabase(":memory:"));
-  store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: limit });
-  const { id: ruleId } = store.createRule(rule);
-  const reviews = results.map((result, index) =>
-    store.recordRun({
-      ruleId, ruleName: rule.name, deliveryId: `d${index}`, event: "slack.message", repo: ctx.repo, source: "slack", author: "alice",
-      status: "done", detail: "", threadId: `t${index}`, threadUrl: `http://t3/t${index}`, context: ctx, result,
-    }),
-  );
+/** Fakes that record what was started and said, and a store with one rule and `results.length` finished reviews of the PR. */
+function setup(results: string[], limit = 3, projects: T3Project[] = [project]) {
   const started: StartThreadInput[] = [];
   const replies: string[] = [];
-  const t3 = {
-    projects: () => Promise.resolve([{ id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null }]),
-    startThread: (input: StartThreadInput) => (started.push(input), Promise.resolve({ threadId: "handoff-thread", threadUrl: "http://t3/handoff" })),
-    thread: () => new Promise(() => {}),
-  } as unknown as T3Client;
-  const slack = { reply: (_: unknown, text: string) => (replies.push(text), Promise.resolve()) } as unknown as SlackClient;
-  return { store, reviews, started, replies, deps: { store, t3, slack } };
+  const t3 = fakeT3({
+    projects: () => Effect.succeed(projects),
+    startThread: (input) => Effect.sync(() => (started.push(input), { threadId: "handoff-thread", threadUrl: "http://t3/handoff" })),
+    thread: () => Effect.never,
+  });
+  const slack = fakeSlack({ reply: (_, text) => Effect.sync(() => void replies.push(text)) });
+  const seed = Effect.gen(function* () {
+    const store = yield* Store;
+    yield* store.saveSettings({ ...(yield* store.getSettings()), maxChangesRequestedRounds: limit });
+    const { id: ruleId } = yield* store.createRule(rule);
+    const reviews: Run[] = [];
+    for (const [index, result] of results.entries()) {
+      reviews.push(
+        yield* store.recordRun({
+          ruleId, ruleName: rule.name, deliveryId: `d${index}`, event: "slack.message", repo: ctx.repo, source: "slack", author: "alice",
+          status: "done", detail: "", threadId: `t${index}`, threadUrl: `http://t3/t${index}`, context: ctx, result,
+        }),
+      );
+    }
+    return reviews;
+  });
+  return { layer: testLayer({ t3, slack }), seed, started, replies };
 }
 
 describe("handoffIfStuck", () => {
   test("the Nth change request in a row starts a handoff thread from the review's rule and tells Slack", async () => {
-    const { store, reviews, started, replies, deps } = setup(["CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED: still"]);
-    handoffIfStuck(deps, reviews.at(-1)!);
-    await Bun.sleep(0);
+    const { layer, seed, started, replies } = setup(["CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED: still"]);
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const reviews = yield* seed;
+        yield* handoffIfStuck(reviews.at(-1)!);
+        yield* settle;
 
-    expect(started).toHaveLength(1);
-    expect(started[0]).toMatchObject({ title: "Handoff: Add billing", baseBranch: null, worktree: true, project: { id: "p1" } });
-    expect(started[0]?.prompt).toContain("3 automated reviews in a row");
-    const handoff = store.listRuns().find((run) => run.event === HANDOFF_EVENT);
-    expect(handoff).toMatchObject({ status: "started", threadUrl: "http://t3/handoff", author: "alice", source: "slack" });
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("Automated review paused");
+        expect(started).toHaveLength(1);
+        expect(started[0]).toMatchObject({ title: "Handoff: Add billing", baseBranch: null, worktree: true, project: { id: "p1" } });
+        expect(started[0]?.prompt).toContain("3 automated reviews in a row");
+        const handoff = (yield* (yield* Store).listRuns()).find((run) => run.event === HANDOFF_EVENT);
+        expect(handoff).toMatchObject({ status: "started", threadUrl: "http://t3/handoff", author: "alice", source: "slack" });
+        expect(replies).toHaveLength(1);
+        expect(replies[0]).toContain("Automated review paused");
+      }),
+    );
   });
 
   test("does nothing under the limit, past it, when an approval broke the streak, or when the limit is 0", async () => {
@@ -57,21 +70,32 @@ describe("handoffIfStuck", () => {
       [["CHANGES_REQUESTED", "APPROVED", "CHANGES_REQUESTED"], 2],
       [["CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED"], 0],
     ] as const) {
-      const { reviews, started, replies, deps } = setup([...results], limit);
-      handoffIfStuck(deps, reviews.at(-1)!);
-      await Bun.sleep(0);
-      expect(started).toHaveLength(0);
-      expect(replies).toHaveLength(0);
+      const { layer, seed, started, replies } = setup([...results], limit);
+      await runWith(
+        layer,
+        Effect.gen(function* () {
+          const reviews = yield* seed;
+          yield* handoffIfStuck(reviews.at(-1)!);
+          yield* settle;
+          expect(started).toHaveLength(0);
+          expect(replies).toHaveLength(0);
+        }),
+      );
     }
   });
 
   test("a handoff that cannot start is recorded as failed and reported to Slack", async () => {
-    const { store, reviews, replies, deps } = setup(["CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED"]);
-    deps.t3.projects = () => Promise.resolve([]);
-    handoffIfStuck(deps, reviews.at(-1)!);
-    await Bun.sleep(0);
-    expect(store.listRuns().find((run) => run.event === HANDOFF_EVENT)).toMatchObject({ status: "failed", detail: "no T3 project for acme/widgets" });
-    expect(replies.at(-1)).toBe("Handoff not written: no T3 project for acme/widgets");
+    const { layer, seed, replies } = setup(["CHANGES_REQUESTED", "CHANGES_REQUESTED", "CHANGES_REQUESTED"], 3, []);
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const reviews = yield* seed;
+        yield* handoffIfStuck(reviews.at(-1)!);
+        yield* settle;
+        expect((yield* (yield* Store).listRuns()).find((run) => run.event === HANDOFF_EVENT)).toMatchObject({ status: "failed", detail: "no T3 project for acme/widgets" });
+        expect(replies.at(-1)).toBe("Handoff not written: no T3 project for acme/widgets");
+      }),
+    );
   });
 });
 

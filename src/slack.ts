@@ -1,5 +1,9 @@
+import { Context, Data, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Redacted, Schedule, SubscriptionRef } from "effect";
+import { HttpClient, HttpClientRequest } from "effect/http";
+import { AppConfig } from "./config.ts";
 import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
+import { memoSuccess } from "./memo.ts";
 
 /**
  * Slack side of the orchestrator: Socket Mode connection and event parsing on
@@ -162,128 +166,10 @@ export function socketMessage(raw: string): SocketMessage {
   return { kind: "other", envelopeId };
 }
 
-const RECONNECT_MIN_MS = 1_000;
-const RECONNECT_MAX_MS = 30_000;
-/** How often we ping Slack; a ping still unanswered at the next tick means the socket is dead. */
-const HEARTBEAT_MS = 30_000;
-
-/** Bun's client WebSocket. The DOM lib (loaded for the frontend) hides `ping` and `terminate` on the global type. */
-type SlackWebSocket = WebSocket & Pick<Bun.WebSocket, "ping" | "terminate">;
-
-/**
- * Keeps one Socket Mode connection alive and hands every Events API payload
- * to `onEvent`. Envelopes are acked before the handler runs, so the handler
- * has no deadline; Slack redelivers anything not acked within 3s. Reconnects
- * on Slack's periodic `disconnect`, on errors, and after the laptop wakes up.
- *
- * A heartbeat catches sockets that die without a close (a VPN or WARP tunnel
- * re-routing, say): the OS keeps reporting the TCP connection as open and
- * events silently stop arriving. Every `heartbeatMs` we ping; if the previous
- * ping got no pong, the socket is terminated and the usual reconnect runs.
- */
-export class SlackSocket {
-  connected = false;
-  private ws: SlackWebSocket | null = null;
-  private stopped = false;
-  private backoffMs = RECONNECT_MIN_MS;
-
-  constructor(
-    private readonly appToken: string,
-    private readonly onEvent: (payload: unknown) => void,
-    private readonly heartbeatMs = HEARTBEAT_MS,
-  ) {}
-
-  start(): void {
-    this.stopped = false;
-    void this.connect();
-  }
-
-  stop(): void {
-    this.stopped = true;
-    this.ws?.close();
-  }
-
-  private async connect(): Promise<void> {
-    if (this.stopped) return;
-    let url: string;
-    try {
-      url = await this.openUrl();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.warn("connections.open failed", { error: message, retryInSeconds: this.backoffMs / 1000 });
-      if (/certificate/i.test(message)) {
-        log.warn(
-          "TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup: export the CA bundle in the shell that launches bun, or set it in .env and re-run `bun service.ts install` so launchd gets it.",
-        );
-      }
-      return this.retry();
-    }
-
-    const ws = new WebSocket(url) as SlackWebSocket;
-    this.ws = ws;
-    let awaitingPong = false;
-    let heartbeat: Timer | undefined;
-    ws.addEventListener("pong", () => (awaitingPong = false));
-    ws.onopen = () => {
-      this.connected = true;
-      this.backoffMs = RECONNECT_MIN_MS;
-      log.info("socket connected");
-      heartbeat = setInterval(() => {
-        if (awaitingPong) {
-          log.warn("no pong from Slack, reconnecting", { waitedSeconds: this.heartbeatMs / 1000 });
-          ws.terminate();
-          return;
-        }
-        awaitingPong = true;
-        ws.ping();
-      }, this.heartbeatMs);
-    };
-    ws.onmessage = (event) => {
-      const message = socketMessage(String(event.data));
-      switch (message.kind) {
-        case "hello":
-          return;
-        case "disconnect":
-          log.info("disconnect requested, reconnecting", { reason: message.reason });
-          ws.close();
-          return;
-        case "event":
-          ws.send(JSON.stringify({ envelope_id: message.envelopeId }));
-          this.onEvent(message.payload);
-          return;
-        case "other":
-          if (message.envelopeId) ws.send(JSON.stringify({ envelope_id: message.envelopeId }));
-          return;
-      }
-    };
-    ws.onerror = () => log.warn("socket error");
-    ws.onclose = (event) => {
-      clearInterval(heartbeat);
-      if (this.ws !== ws) return;
-      this.connected = false;
-      this.ws = null;
-      if (!this.stopped) {
-        log.info("socket closed, reconnecting", { code: event.code, retryInSeconds: this.backoffMs / 1000 });
-        this.retry();
-      }
-    };
-  }
-
-  private retry(): void {
-    if (this.stopped) return;
-    setTimeout(() => void this.connect(), this.backoffMs);
-    this.backoffMs = Math.min(this.backoffMs * 2, RECONNECT_MAX_MS);
-  }
-
-  /** `apps.connections.open` needs the app-level token, not the bot token. */
-  private async openUrl(): Promise<string> {
-    const response = await fetch(`${SLACK_API}/apps.connections.open`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.appToken}` },
-    });
-    const result = (await response.json()) as { ok: boolean; url?: string; error?: string };
-    if (!result.ok || !result.url) throw new Error(result.error ?? String(response.status));
-    return result.url;
+/** A Web API call Slack rejected; `code` is Slack's error string (`invalid_name`, `channel_not_found`, ...). */
+export class SlackApiError extends Data.TaggedError("SlackApiError")<{ readonly method: string; readonly code: string }> {
+  override get message(): string {
+    return `Slack ${this.method} failed: ${this.code}`;
   }
 }
 
@@ -291,90 +177,97 @@ export class SlackSocket {
 const REPLY_MAX_CHARS = 12_000;
 
 /** Bot-token Web API client for the handful of calls the orchestrator makes. */
-export class SlackClient {
-  constructor(private readonly token: string) {}
-
-  /**
-   * Adds an emoji reaction to the triggering message. Already-reacted is not
-   * an error; an emoji the workspace lacks throws `SlackApiError` `invalid_name`.
-   */
-  async react(origin: SlackOrigin, name: string): Promise<void> {
-    await this.call("reactions.add", { channel: origin.channel, timestamp: origin.ts, name }, ["already_reacted"]);
-  }
-
-  async unreact(origin: SlackOrigin, name: string): Promise<void> {
-    await this.call("reactions.remove", { channel: origin.channel, timestamp: origin.ts, name }, ["no_reaction"]);
-  }
-
+export type SlackClientShape = {
+  /** Adds an emoji reaction to the triggering message. Already-reacted is not an error; an emoji the workspace lacks fails with `invalid_name`. */
+  readonly react: (origin: SlackOrigin, name: string) => Effect.Effect<void, SlackApiError>;
+  readonly unreact: (origin: SlackOrigin, name: string) => Effect.Effect<void, SlackApiError>;
   /** Posts a reply in the triggering message's thread. Markdown is converted to Slack mrkdwn. */
-  async reply(origin: SlackOrigin, markdown: string): Promise<void> {
-    await this.post(origin.channel, markdown, origin.thread);
-  }
-
+  readonly reply: (origin: SlackOrigin, markdown: string) => Effect.Effect<void, SlackApiError>;
   /**
    * Posts to a channel (ID, or `#name` for public channels the bot is in), in
-   * `thread` when given. Markdown is converted to Slack mrkdwn. Returns the
-   * channel id and the message's `ts`, which doubles as its thread id.
+   * `thread` when given. Returns the channel id and the message's `ts`, which
+   * doubles as its thread id.
    */
-  async post(channel: string, markdown: string, thread?: string): Promise<{ channel: string; ts: string }> {
-    const { channel: id, ts } = await this.call<{ channel: string; ts: string }>("chat.postMessage", {
-      channel,
-      thread_ts: thread,
-      text: toMrkdwn(markdown),
-      unfurl_links: false,
-      unfurl_media: false,
-    });
-    return { channel: id, ts };
-  }
-
-  private ownBotId: Promise<string> | null = null;
-
-  /** This app's bot id (`auth.test`), to tell our own posts from other bots'. Cached; retried after a failure. */
-  botId(): Promise<string> {
-    this.ownBotId ??= this.call<{ bot_id: string }>("auth.test", {}).then(
-      ({ bot_id }) => bot_id,
-      (error: unknown) => {
-        this.ownBotId = null;
-        throw error;
-      },
-    );
-    return this.ownBotId;
-  }
-
+  readonly post: (channel: string, markdown: string, thread?: string) => Effect.Effect<{ channel: string; ts: string }, SlackApiError>;
+  /** This app's bot id (`auth.test`), to tell our own posts from other bots'. Cached once it succeeds. */
+  readonly botId: Effect.Effect<string, SlackApiError>;
   /** Link to a message, for agents to hand to their user. */
-  async permalink(channel: string, ts: string): Promise<string> {
-    const { permalink } = await this.call<{ permalink: string }>("chat.getPermalink", { channel, message_ts: ts });
-    return permalink;
-  }
+  readonly permalink: (channel: string, ts: string) => Effect.Effect<string, SlackApiError>;
+};
+
+/** Builds the Web API client for a bot token. Needs an `HttpClient`. */
+export const makeSlackClient = Effect.fn("SlackClient.make")(function* (token: string) {
+  const client = yield* HttpClient.HttpClient;
 
   /**
    * Form-encoded rather than JSON: read methods such as `chat.getPermalink`
    * ignore JSON bodies, and every method accepts form params.
    */
-  private async call<T = unknown>(method: string, body: Record<string, string | boolean | undefined>, ignoreErrors: string[] = []): Promise<T> {
-    const params = Object.entries(body).flatMap(([key, value]) => (value === undefined ? [] : [[key, String(value)]]));
-    const response = await fetch(`${SLACK_API}/${method}`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${this.token}` },
-      body: new URLSearchParams(params),
-    });
-    const result = (await response.json()) as { ok: boolean; error?: string } & T;
-    if (!result.ok && !ignoreErrors.includes(result.error ?? "")) {
-      throw new SlackApiError(method, result.error ?? String(response.status));
-    }
-    return result;
-  }
-}
+  const call = <T = unknown>(method: string, body: Record<string, string | boolean | undefined>, ignoreErrors: string[] = []): Effect.Effect<T, SlackApiError> =>
+    Effect.gen(function* () {
+      const params = Object.fromEntries(Object.entries(body).flatMap(([key, value]) => (value === undefined ? [] : [[key, String(value)]])));
+      const response = yield* client.execute(
+        HttpClientRequest.post(`${SLACK_API}/${method}`).pipe(HttpClientRequest.bearerToken(token), HttpClientRequest.bodyUrlParams(params)),
+      );
+      const result = (yield* response.json) as { ok: boolean; error?: string } & T;
+      if (!result.ok && !ignoreErrors.includes(result.error ?? "")) {
+        return yield* Effect.fail(new SlackApiError({ method, code: result.error ?? String(response.status) }));
+      }
+      return result;
+    }).pipe(
+      Effect.catchTag("HttpClientError", (error) => Effect.fail(new SlackApiError({ method, code: `request failed: ${error.message}` }))),
+      Effect.withSpan("slack.call", { attributes: { method } }),
+    );
 
-/** A Web API call Slack rejected; `code` is Slack's error string (`invalid_name`, `channel_not_found`, ...). */
-export class SlackApiError extends Error {
-  constructor(
-    method: string,
-    readonly code: string,
-  ) {
-    super(`Slack ${method} failed: ${code}`);
-    this.name = "SlackApiError";
-  }
+  const post: SlackClientShape["post"] = (channel, markdown, thread) =>
+    Effect.map(
+      call<{ channel: string; ts: string }>("chat.postMessage", {
+        channel,
+        thread_ts: thread,
+        text: toMrkdwn(markdown),
+        unfurl_links: false,
+        unfurl_media: false,
+      }),
+      ({ channel, ts }) => ({ channel, ts }),
+    );
+
+  const botId = yield* memoSuccess(Effect.map(call<{ bot_id: string }>("auth.test", {}), ({ bot_id }) => bot_id));
+
+  const shape: SlackClientShape = {
+    react: (origin, name) => Effect.asVoid(call("reactions.add", { channel: origin.channel, timestamp: origin.ts, name }, ["already_reacted"])),
+    unreact: (origin, name) => Effect.asVoid(call("reactions.remove", { channel: origin.channel, timestamp: origin.ts, name }, ["no_reaction"])),
+    reply: (origin, markdown) => Effect.asVoid(post(origin.channel, markdown, origin.thread)),
+    post,
+    botId,
+    permalink: (channel, ts) => Effect.map(call<{ permalink: string }>("chat.getPermalink", { channel, message_ts: ts }), ({ permalink }) => permalink),
+  };
+  return shape;
+});
+
+const notConfigured = (method: string) => Effect.fail(new SlackApiError({ method, code: "slack_not_configured" }));
+
+export class SlackClient extends Context.Service<SlackClient, SlackClientShape>()("SlackClient") {
+  /**
+   * Without Slack tokens, reactions and replies are skipped quietly: only
+   * Slack-triggered runs make them, and there are none. Posting on behalf of
+   * agents fails with `slack_not_configured`.
+   */
+  static readonly disabled: SlackClientShape = {
+    react: () => Effect.void,
+    unreact: () => Effect.void,
+    reply: () => Effect.void,
+    post: () => notConfigured("chat.postMessage"),
+    botId: notConfigured("auth.test"),
+    permalink: () => notConfigured("chat.getPermalink"),
+  };
+
+  static readonly layer = Layer.effect(
+    this,
+    Effect.gen(function* () {
+      const { slack } = yield* AppConfig;
+      return Option.isSome(slack) ? yield* makeSlackClient(Redacted.value(slack.value.botToken)) : SlackClient.disabled;
+    }),
+  );
 }
 
 /** Good-enough Markdown to Slack mrkdwn: bold, headers, links, fenced code left as is. */
@@ -385,6 +278,147 @@ export function toMrkdwn(markdown: string): string {
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, "<$2|$1>")
     .replace(/^(\s*)[-*]\s+/gm, "$1• ");
   return text.length > REPLY_MAX_CHARS ? `${text.slice(0, REPLY_MAX_CHARS)}\n\n_(truncated; full reply in the T3 thread)_` : text;
+}
+
+const RECONNECT_MIN = Duration.seconds(1);
+const RECONNECT_MAX = Duration.seconds(30);
+/** How often we ping Slack; a ping still unanswered at the next tick means the socket is dead. */
+const HEARTBEAT = Duration.seconds(30);
+
+/** Bun's client WebSocket. The DOM lib (loaded for the frontend) hides `ping` and `terminate` on the global type. */
+type SlackWebSocket = WebSocket & Pick<Bun.WebSocket, "ping" | "terminate">;
+
+/** The socket could not be opened: `apps.connections.open` failed or the handshake did not complete. */
+class SlackSocketError extends Data.TaggedError("SlackSocketError")<{ readonly message: string }> {}
+
+export type SlackSocketOptions = {
+  readonly appToken: string;
+  /** Runs for every Events API payload, in its own fiber; it must handle its own errors. */
+  readonly onEvent: (payload: unknown) => Effect.Effect<void>;
+  /** Flipped while a socket is open, for the status endpoint. */
+  readonly connected: SubscriptionRef.SubscriptionRef<boolean>;
+  readonly heartbeat?: Duration.Input;
+  /** Pause before dialing again after a connected socket closed; opening failures back off exponentially instead. */
+  readonly reconnectDelay?: Duration.Input;
+};
+
+/**
+ * Keeps one Socket Mode connection alive and hands every Events API payload
+ * to `onEvent`. Envelopes are acked before the handler runs, so the handler
+ * has no deadline; Slack redelivers anything not acked within 3s. Reconnects
+ * on Slack's periodic `disconnect`, on errors, and after the laptop wakes up:
+ * a closed socket is dialed again after `reconnectDelay`, and a socket that
+ * cannot be opened is retried with exponential backoff (1s doubling to 30s,
+ * jittered), reset once a connection succeeds.
+ *
+ * A heartbeat catches sockets that die without a close (a VPN or WARP tunnel
+ * re-routing, say): the OS keeps reporting the TCP connection as open and
+ * events silently stop arriving. Every `heartbeat` we ping; if the previous
+ * ping got no pong, the socket is terminated and the usual reconnect runs.
+ *
+ * Never returns; run it in a scoped fiber and close the scope to stop.
+ */
+export const runSlackSocket = (options: SlackSocketOptions): Effect.Effect<never, never, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
+    const heartbeat = Duration.fromInputUnsafe(options.heartbeat ?? HEARTBEAT);
+
+    /** `apps.connections.open` needs the app-level token, not the bot token. */
+    const openUrl = Effect.gen(function* () {
+      const response = yield* client.execute(HttpClientRequest.post(`${SLACK_API}/apps.connections.open`).pipe(HttpClientRequest.bearerToken(options.appToken)));
+      const result = (yield* response.json) as { ok: boolean; url?: string; error?: string };
+      if (!result.ok || !result.url) return yield* Effect.fail(new SlackSocketError({ message: result.error ?? String(response.status) }));
+      return result.url;
+    }).pipe(Effect.catchTag("HttpClientError", (error) => Effect.fail(new SlackSocketError({ message: error.message }))));
+
+    /** One connection, from dial to close. Fails only when the socket never opened. */
+    const connectOnce = Effect.gen(function* () {
+      const url = yield* openUrl;
+      const frames = yield* Queue.unbounded<string>();
+      const opened = yield* Deferred.make<void, SlackSocketError>();
+      const closed = yield* Deferred.make<number>();
+      let awaitingPong = false;
+
+      const ws = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const ws = new WebSocket(url) as SlackWebSocket;
+          ws.addEventListener("pong", () => (awaitingPong = false));
+          ws.onopen = () => Deferred.doneUnsafe(opened, Exit.void);
+          ws.onmessage = (event) => Queue.offerUnsafe(frames, String(event.data));
+          ws.onerror = () => Deferred.doneUnsafe(opened, Exit.fail(new SlackSocketError({ message: "websocket error" })));
+          ws.onclose = (event) => {
+            Deferred.doneUnsafe(opened, Exit.fail(new SlackSocketError({ message: `socket closed (${event.code}) before it opened` })));
+            Deferred.doneUnsafe(closed, Exit.succeed(event.code));
+          };
+          return ws;
+        }),
+        (ws) => Effect.sync(() => ws.close()),
+      );
+      yield* Deferred.await(opened);
+      yield* SubscriptionRef.set(options.connected, true);
+      yield* Effect.addFinalizer(() => SubscriptionRef.set(options.connected, false));
+      yield* log.info("socket connected");
+
+      const ping = Effect.gen(function* () {
+        if (awaitingPong) {
+          yield* log.warn("no pong from Slack, reconnecting", { waitedSeconds: Duration.toSeconds(heartbeat) });
+          ws.terminate();
+          return;
+        }
+        awaitingPong = true;
+        ws.ping();
+      });
+      yield* Effect.forkScoped(Effect.repeat(ping, { schedule: Schedule.spaced(heartbeat) }));
+
+      const ack = (envelopeId: string) => ws.send(JSON.stringify({ envelope_id: envelopeId }));
+      const handle = Effect.gen(function* () {
+        for (;;) {
+          const message = socketMessage(yield* Queue.take(frames));
+          switch (message.kind) {
+            case "hello":
+              break;
+            case "disconnect":
+              yield* log.info("disconnect requested, reconnecting", { reason: message.reason });
+              ws.close();
+              break;
+            case "event":
+              ack(message.envelopeId);
+              yield* Effect.forkScoped(options.onEvent(message.payload));
+              break;
+            case "other":
+              if (message.envelopeId) ack(message.envelopeId);
+              break;
+          }
+        }
+      });
+      const code = yield* Effect.race(handle, Deferred.await(closed));
+      yield* log.info("socket closed, reconnecting", { code });
+    }).pipe(Effect.scoped);
+
+    const backoff = Schedule.min([Schedule.exponential(RECONNECT_MIN).pipe(Schedule.jittered), Schedule.spaced(RECONNECT_MAX)]);
+    const dial = connectOnce.pipe(
+      Effect.tapError((error) =>
+        Effect.gen(function* () {
+          yield* log.warn("connections.open failed", { error: error.message });
+          if (/certificate/i.test(error.message)) {
+            yield* log.warn(
+              "TLS-inspecting proxy? Bun reads SSL_CERT_FILE / NODE_EXTRA_CA_CERTS at startup: export the CA bundle in the shell that launches bun, or set it in .env and re-run `bun service.ts install` so launchd gets it.",
+            );
+          }
+        }),
+      ),
+      // The backoff never gives up, so the error channel is empty in practice.
+      Effect.retry({ schedule: backoff }),
+      Effect.orDie,
+    );
+    return yield* dial.pipe(Effect.repeat({ schedule: Schedule.spaced(options.reconnectDelay ?? RECONNECT_MIN) }), Effect.andThen(Effect.never));
+  });
+
+export type SlackSocketStatus = "off" | "connecting" | "connected";
+
+/** Status of the Socket Mode connection, for the header: `off` without Slack tokens. */
+export class SlackSocket extends Context.Service<SlackSocket, { readonly status: Effect.Effect<SlackSocketStatus> }>()("SlackSocket") {
+  static readonly off = Layer.succeed(this, { status: Effect.succeed("off" as const) });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

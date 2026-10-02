@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Effect, Fiber, SubscriptionRef } from "effect";
+import { FetchHttpClient } from "effect/http";
 import { createHash } from "node:crypto";
 import { turnOutcome } from "./completion.ts";
-import { cleanSlackText, extractSlackContext, SlackSocket, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
+import { cleanSlackText, extractSlackContext, runSlackSocket, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
 
 const mention = {
   type: "event_callback",
@@ -123,19 +125,21 @@ describe("turnOutcome", () => {
 
 describe("SlackSocket heartbeat", () => {
   const HEARTBEAT_MS = 50;
-  let cleanup: (() => void)[] = [];
-  afterEach(() => {
-    for (const fn of cleanup) fn();
+  let cleanup: (() => unknown)[] = [];
+  afterEach(async () => {
+    for (const fn of cleanup.toReversed()) await fn();
     cleanup = [];
   });
 
-  /** Points `apps.connections.open` at a local socket URL and starts a SlackSocket on it. */
+  /** Points `apps.connections.open` at a local socket URL and runs the Socket Mode loop against it until the test ends. */
   function connectTo(url: string) {
-    const openConnection = Object.assign(async () => Response.json({ ok: true, url }), { preconnect: fetch.preconnect });
-    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(openConnection);
-    const socket = new SlackSocket("xapp-test", () => {}, HEARTBEAT_MS);
-    socket.start();
-    cleanup.push(() => socket.stop(), () => fetchSpy.mockRestore());
+    const openConnection = (async () => Response.json({ ok: true, url })) as unknown as typeof fetch;
+    const socket = Effect.gen(function* () {
+      const connected = yield* SubscriptionRef.make(false);
+      yield* runSlackSocket({ appToken: "xapp-test", onEvent: () => Effect.void, connected, heartbeat: `${HEARTBEAT_MS} millis`, reconnectDelay: "10 millis" });
+    }).pipe(Effect.provide(FetchHttpClient.layer), Effect.provideService(FetchHttpClient.Fetch, openConnection));
+    const fiber = Effect.runFork(socket);
+    cleanup.push(() => Effect.runPromise(Fiber.interrupt(fiber)));
   }
 
   test("reconnects when a socket stops answering pings", async () => {

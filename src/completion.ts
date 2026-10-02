@@ -1,25 +1,23 @@
+import { Clock, Duration, Effect, Metric, Option, Queue, Schedule } from "effect";
+import { Background, RunEvents } from "./background.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
-import { SlackApiError, slackOrigin, type SlackClient, type SlackOrigin } from "./slack.ts";
-import type { Store } from "./store.ts";
-import { T3HttpError, type T3Client, type T3ThreadTurn } from "./t3.ts";
+import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
+import { Store } from "./store.ts";
+import { T3, type T3ThreadTurn } from "./t3.ts";
+import { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
+
+export { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
 
 const log = logger("completion");
 
-export type CompletionDeps = {
-  store: Store;
-  t3: T3Client;
-  slack: SlackClient | null;
-  /** Called once a review (not a handoff) settles as `done`, after its Slack reply; see handoffIfStuck. */
-  afterReview?: (run: Run) => void;
-  /** Called when a run of this rule stops running, so a queued run can take its place; see startQueued. */
-  onCapacity?: (ruleId: string) => void;
-};
+/** Everything a watcher needs; the handler and the poller run inside the same set. */
+export type CompletionServices = Store | T3 | SlackClient | Background | RunEvents;
 
-const POLL_MS = 5_000;
+const POLL = Duration.seconds(5);
 /** A review that has run this long is not going to report back; fail it and stop polling. */
-const GIVE_UP_MS = 3 * 60 * 60_000;
+const GIVE_UP = Duration.hours(3);
 /** Time allowed for the turn to appear after the thread was created. */
 const TURN_APPEARS_MS = 2 * 60_000;
 /**
@@ -28,6 +26,10 @@ const TURN_APPEARS_MS = 2 * 60_000;
  * calling a completed turn the end of the thread.
  */
 export const QUIET_MS = 60_000;
+
+const runsSettled = Metric.counter("orchestrator_runs_settled_total", { incremental: true, description: "Threads that finished, by outcome status" });
+const watchersActive = Metric.gauge("orchestrator_watchers_active", { description: "Threads being polled for completion" });
+const threadDuration = Metric.timer("orchestrator_thread_duration", { description: "Time from thread start to settle" });
 
 export type TurnOutcome = { status: "done" | "failed"; detail: string; result: string | null };
 
@@ -93,128 +95,112 @@ export function threadOutcome(thread: T3ThreadTurn, now = Date.now()): TurnOutco
 
 /**
  * Polls T3 until the thread is done, records the outcome on the run and, for
- * Slack-triggered runs, replies in the Slack thread. Fire and forget.
+ * Slack-triggered runs, replies in the Slack thread. Runs as a supervised
+ * background watcher keyed by run id, so it returns at once.
  * A 404 means the thread was deleted in T3, and a thread still busy after
- * `GIVE_UP_MS` is abandoned: either way the run fails and polling stops,
+ * `GIVE_UP` is abandoned: either way the run fails and polling stops,
  * which also releases the PR for a new review.
  */
-export function watchCompletion(deps: CompletionDeps, run: Pick<Run, "id" | "threadId" | "createdAt">): void {
-  if (!run.threadId) return;
-  const threadId = run.threadId;
-  const startedAt = new Date(run.createdAt).getTime();
+export const watchCompletion = (run: Pick<Run, "id" | "threadId" | "createdAt">): Effect.Effect<void, never, CompletionServices> =>
+  Effect.gen(function* () {
+    if (!run.threadId) return;
+    const background = yield* Background;
+    yield* log.info("watching thread", { run: run.id, thread: run.threadId });
+    yield* background.watch(run.id, watcher(run.id, run.threadId, Date.parse(run.createdAt)));
+  });
 
-  const pollAgain = (elapsed: number) => {
-    if (elapsed < GIVE_UP_MS) return void setTimeout(() => void poll(), POLL_MS);
-    const hours = GIVE_UP_MS / 3_600_000;
-    log.warn("gave up watching", { run: run.id, thread: threadId, hours });
-    settle(deps, run.id, { status: "failed", detail: `no result after ${hours}h`, result: null });
-  };
-  const poll = async (): Promise<void> => {
-    const elapsed = Date.now() - startedAt;
-    let thread: T3ThreadTurn;
-    try {
-      thread = await deps.t3.thread(threadId);
-    } catch (error) {
-      if (error instanceof T3HttpError && error.status === 404) {
-        return settle(deps, run.id, { status: "failed", detail: "thread no longer exists in T3", result: null });
+const watcher = (runId: string, threadId: string, startedAt: number) =>
+  Effect.gen(function* () {
+    yield* Metric.modify(watchersActive, 1);
+    const t3 = yield* T3;
+    const at = { run: runId, thread: threadId };
+    const failed = (detail: string): TurnOutcome => ({ status: "failed", detail, result: null });
+
+    /** One snapshot: the outcome when the thread is done, none while it is still working. */
+    const poll = Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const snapshot = yield* Effect.result(t3.thread(threadId));
+      if (snapshot._tag === "Failure") {
+        if (snapshot.failure.status === 404) return Option.some(failed("thread no longer exists in T3"));
+        yield* log.warn("snapshot failed", { ...at, error: snapshot.failure.message });
+        return Option.none<TurnOutcome>();
       }
-      log.warn("snapshot failed", { run: run.id, thread: threadId, error });
-      return pollAgain(elapsed);
+      const outcome = threadOutcome(snapshot.success, now);
+      if (outcome) return Option.some(outcome);
+      if (!snapshot.success.latestTurn && now - startedAt > TURN_APPEARS_MS) return Option.some(failed("thread never started a turn"));
+      return Option.none<TurnOutcome>();
+    });
+
+    // Resumed watchers (after a restart) keep the original deadline.
+    const remaining = Math.max(0, Duration.toMillis(GIVE_UP) - ((yield* Clock.currentTimeMillis) - startedAt));
+    const settled = yield* Effect.sleep(POLL).pipe(
+      Effect.andThen(poll.pipe(Effect.repeat({ schedule: Schedule.spaced(POLL), until: Option.isSome }))),
+      Effect.timeoutOption(Duration.millis(remaining)),
+    );
+    const outcome = Option.isSome(settled) ? settled.value : Option.none<TurnOutcome>();
+    if (Option.isSome(outcome)) {
+      yield* settle(runId, outcome.value, startedAt);
+    } else {
+      const hours = Duration.toHours(GIVE_UP);
+      yield* log.warn("gave up watching", { ...at, hours });
+      yield* settle(runId, failed(`no result after ${hours}h`), startedAt);
     }
-    const outcome = threadOutcome(thread);
-    if (!outcome) {
-      if (!thread.latestTurn && elapsed > TURN_APPEARS_MS) {
-        return settle(deps, run.id, { status: "failed", detail: "thread never started a turn", result: null });
-      }
-      return pollAgain(elapsed);
-    }
-    settle(deps, run.id, outcome);
-  };
-  log.info("watching thread", { run: run.id, thread: threadId });
-  setTimeout(() => void poll(), POLL_MS);
-}
+  }).pipe(
+    Effect.ensuring(Metric.modify(watchersActive, -1)),
+    Effect.withSpan("completion.watch", { attributes: { run: runId, thread: threadId } }),
+  );
 
 /** Re-attaches watchers to runs left `started` by a previous process. */
-export function resumeWatchers(deps: CompletionDeps): void {
-  const unsettled = deps.store.listUnsettledRuns().filter((run) => run.threadId);
-  for (const run of unsettled) watchCompletion(deps, run);
-  if (unsettled.length > 0) log.info("resumed watchers for unsettled runs", { count: unsettled.length });
-}
+export const resumeWatchers: Effect.Effect<void, never, CompletionServices> = Effect.gen(function* () {
+  const store = yield* Store;
+  const unsettled = (yield* store.listUnsettledRuns()).filter((run) => run.threadId);
+  yield* Effect.forEach(unsettled, watchCompletion, { discard: true });
+  if (unsettled.length > 0) yield* log.info("resumed watchers for unsettled runs", { count: unsettled.length });
+});
 
 /**
  * Records the outcome and, for Slack runs, posts the reply. A review then
- * flips 👀 to the verdict's reaction and reports to `afterReview`; a handoff
- * only posts its document.
+ * flips 👀 to the verdict's reaction; a handoff only posts its document. The
+ * supervisor then advances the rule's queue and checks whether the PR is stuck.
  */
-function settle(deps: CompletionDeps, runId: string, outcome: TurnOutcome): void {
-  const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
-  log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
-  deps.store.updateRun(runId, outcome);
-  const run = deps.store.getRun(runId);
-  if (!run) return;
-  deps.onCapacity?.(run.ruleId);
-  const review = run.event !== HANDOFF_EVENT;
-  const origin = slackOrigin(run.context);
-  const slack = deps.slack;
-  const posted =
-    origin && slack
-      ? slack
-          .reply(origin, outcome.status === "done" ? (outcome.result ?? "_(no reply)_") : `Review failed: ${outcome.detail}`)
-          .then(() => (review ? slack.unreact(origin, "eyes").then(() => reactVerdict(slack, origin, outcome)) : undefined))
-          .catch((error: unknown) => log.warn("slack reply failed", { run: runId, error }))
-      : Promise.resolve();
-  if (review && outcome.status === "done") void posted.then(() => deps.afterReview?.(run));
-}
-
-export type Verdict = "approved" | "changes_requested" | "commented";
-
-const CHANGES_REQUESTED = /\bchanges[_ ]requested\b|\brequest(?:ed|ing)?[_ ]changes\b/i;
-const APPROVED = /\bapproved?\b/i;
-
-/**
- * Reads the review's verdict out of the agent's final message, which names the
- * GitHub review state it published ("**APPROVE** on `33d5528`",
- * "**CHANGES_REQUESTED**, 7 inline comments", "Verdict: approve"). A change
- * request that says "approve once fixed" is still a change request, so that
- * check wins. Anything else, including a reply that never reviewed, is
- * `commented`.
- */
-export function reviewVerdict(result: string | null): Verdict {
-  if (!result) return "commented";
-  if (CHANGES_REQUESTED.test(result)) return "changes_requested";
-  if (APPROVED.test(result)) return "approved";
-  return "commented";
-}
-
-/**
- * The latest reviews of a PR that asked for changes in a row, newest first, from
- * its finished runs. An approval ends the streak, a reply with no verdict is
- * ignored, and handoffs are not reviews.
- */
-export function changesRequestedStreak<T extends Pick<Run, "event" | "result">>(finished: T[]): T[] {
-  const streak: T[] = [];
-  for (const run of finished) {
-    if (run.event === HANDOFF_EVENT) continue;
-    const verdict = reviewVerdict(run.result);
-    if (verdict === "approved") break;
-    if (verdict === "changes_requested") streak.push(run);
-  }
-  return streak;
-}
+const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
+  Effect.gen(function* () {
+    const store = yield* Store;
+    const slack = yield* SlackClient;
+    const events = yield* RunEvents;
+    const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
+    yield* log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
+    yield* Metric.update(Metric.withAttributes(runsSettled, { status: outcome.status }), 1);
+    yield* Metric.update(threadDuration, Duration.millis((yield* Clock.currentTimeMillis) - startedAt));
+    yield* store.updateRun(runId, outcome);
+    const run = yield* store.getRun(runId);
+    if (!run) return;
+    const review = run.event !== HANDOFF_EVENT;
+    const origin = slackOrigin(run.context);
+    if (origin) {
+      yield* slack.reply(origin, outcome.status === "done" ? (outcome.result ?? "_(no reply)_") : `Review failed: ${outcome.detail}`).pipe(
+        Effect.andThen(review ? Effect.andThen(slack.unreact(origin, "eyes"), reactVerdict(slack, origin, outcome)) : Effect.void),
+        Effect.catch((error) => log.warn("slack reply failed", { run: runId, error: error.message })),
+      );
+    }
+    yield* Queue.offer(events, { _tag: "Settled", run, outcome });
+  });
 
 /**
  * Why automated review of this PR is paused: at least `maxChangesRequestedRounds`
  * reviews in a row requested changes. Null while under the limit or when the
  * limit is 0. `handoff` is the run that wrote the handoff document, if it exists.
  */
-export function pausedReview(store: Store, repo: string, prNumber: string): { rounds: number; handoff: Run | null } | null {
-  const limit = store.getSettings().maxChangesRequestedRounds;
-  if (limit <= 0) return null;
-  const finished = store.finishedRunsForPullRequest(repo, prNumber);
-  const rounds = changesRequestedStreak(finished).length;
-  if (rounds < limit) return null;
-  return { rounds, handoff: finished.find((run) => run.event === HANDOFF_EVENT) ?? null };
-}
+export const pausedReview = (repo: string, prNumber: string): Effect.Effect<{ rounds: number; handoff: Run | null } | null, never, Store> =>
+  Effect.gen(function* () {
+    const store = yield* Store;
+    const limit = (yield* store.getSettings()).maxChangesRequestedRounds;
+    if (limit <= 0) return null;
+    const finished = yield* store.finishedRunsForPullRequest(repo, prNumber);
+    const rounds = changesRequestedStreak(finished).length;
+    if (rounds < limit) return null;
+    return { rounds, handoff: finished.find((run) => run.event === HANDOFF_EVENT) ?? null };
+  });
 
 /**
  * Reaction per outcome on the triggering message: ❌ failed, 🔁 changes
@@ -228,13 +214,13 @@ const VERDICT_REACTION: Record<Verdict, string> = {
 };
 const APPROVED_FALLBACK = "white_check_mark";
 
-export async function reactVerdict(slack: Pick<SlackClient, "react">, origin: SlackOrigin, outcome: TurnOutcome): Promise<void> {
+export const reactVerdict = (slack: Pick<SlackClientShape, "react">, origin: SlackOrigin, outcome: TurnOutcome): Effect.Effect<void, SlackApiError> => {
   if (outcome.status === "failed") return slack.react(origin, "x");
   const verdict = reviewVerdict(outcome.result);
-  try {
-    await slack.react(origin, VERDICT_REACTION[verdict]);
-  } catch (error) {
-    if (verdict !== "approved" || !(error instanceof SlackApiError) || error.code !== "invalid_name") throw error;
-    await slack.react(origin, APPROVED_FALLBACK);
-  }
-}
+  return slack.react(origin, VERDICT_REACTION[verdict]).pipe(
+    Effect.catchIf(
+      (error) => verdict === "approved" && error.code === "invalid_name",
+      () => slack.react(origin, APPROVED_FALLBACK),
+    ),
+  );
+};

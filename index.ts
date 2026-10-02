@@ -1,78 +1,401 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { BunChildProcessSpawner, BunHttpServer, BunRuntime, BunServices, BunSocket } from "@effect/platform-bun";
+import { Cause, Config, Effect, Layer, Metric, Option, Redacted, SubscriptionRef } from "effect";
+import { FetchHttpClient, HttpRouter, HttpServerRequest, HttpServerResponse, type HttpServerError } from "effect/http";
+import { Otlp, OtlpSerialization, PrometheusMetrics } from "effect/observability";
 import index from "./frontend/index.html";
-import { resumeWatchers, watchCompletion } from "./src/completion.ts";
+import { Background, RunEvents } from "./src/background.ts";
+import { resumeWatchers, reviewVerdict, watchCompletion } from "./src/completion.ts";
+import { AppConfig } from "./src/config.ts";
+import { Database } from "./src/db/index.ts";
+import { errorMessage } from "./src/errors.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
-import { reviewVerdict } from "./src/completion.ts";
-import { GitHubInbox } from "./src/githubInbox.ts";
-import { handleDelivery, runRules, startQueued, type HandlerDeps } from "./src/handler.ts";
-import { handoffIfStuck } from "./src/handoff.ts";
+import { handleDelivery, runRules, startQueued, type HandlerServices } from "./src/handler.ts";
 import { itemContext, itemEvent, type InboxResponse } from "./src/inbox.ts";
-import { LinearInbox } from "./src/linearInbox.ts";
-import { logger } from "./src/log.ts";
-import { handleMcpRequest } from "./src/mcp.ts";
-import { openDatabase } from "./src/db/index.ts";
+import { logger, loggerLayer } from "./src/log.ts";
+import { makeMcpHandler } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
+import { PullRequests } from "./src/pulls.ts";
 import { DispatchInput, PromptInput, RuleInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
-import { SlackClient, SlackSocket } from "./src/slack.ts";
+import { runSlackSocket, SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
-import { T3Client } from "./src/t3.ts";
-import { applyUpdate, checkForUpdate, restart } from "./src/update.ts";
+import { supervisorLayer } from "./src/supervisor.ts";
+import { T3 } from "./src/t3.ts";
+import { Updater } from "./src/update.ts";
 
-const t3Home = process.env.T3CODE_HOME ?? join(homedir(), ".t3");
 const log = logger("server");
 const webhookLog = logger("webhook");
 
-/** Falls back to the origin the running desktop/server wrote to server-runtime.json. */
-async function resolveT3Origin(): Promise<string> {
-  if (process.env.T3_ORIGIN) return process.env.T3_ORIGIN;
-  const runtime = Bun.file(join(t3Home, "userdata", "server-runtime.json"));
-  if (await runtime.exists()) {
-    const state = (await runtime.json()) as { origin?: string };
-    if (state.origin) return state.origin;
-  }
-  return "http://127.0.0.1:3773";
-}
+/*
+ * The service is one Effect layer graph, launched with BunRuntime.runMain:
+ *
+ *   platform (HTTP client, WebSocket constructor, child processes) + AppConfig
+ *     └─ services: Database → Store, T3, SlackClient, PullRequests, Background, RunEvents, Updater
+ *          └─ Poller, SlackSocket
+ *               └─ HTTP API, MCP API, supervisor, startup, telemetry
+ *
+ * Shutting down (SIGINT/SIGTERM) closes the scope in reverse: servers stop,
+ * background fibers (watchers, polls, the Slack socket) are interrupted, the
+ * database closes.
+ */
 
-const token = process.env.T3_TOKEN;
-if (!token) {
-  log.error("T3_TOKEN is required. Issue one with: npx t3 auth session issue --token-only --ttl 365d");
-  process.exit(1);
-}
-const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
-if (!webhookSecret) {
-  log.warn("GITHUB_WEBHOOK_SECRET is not set: webhook signatures will not be verified.");
-}
+/** Everything a route may need; captured once so handlers run with no requirements of their own. */
+type ApiServices = HandlerServices | AppConfig | Poller | Updater | SlackSocket | PullRequests;
 
-const slackAppToken = process.env.SLACK_APP_TOKEN;
-const slackBotToken = process.env.SLACK_BOT_TOKEN;
-if ((slackAppToken || slackBotToken) && !(slackAppToken && slackBotToken)) {
-  log.warn("Slack needs both SLACK_APP_TOKEN and SLACK_BOT_TOKEN; the Slack trigger is disabled.");
-}
+const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
-const t3 = new T3Client(await resolveT3Origin(), token);
-const store = new Store(openDatabase(process.env.DATA_PATH ?? "data/orchestrator.sqlite"));
-store.ensureDefaultPrompts();
-const deps: HandlerDeps = {
-  store,
-  t3,
-  slack: slackAppToken && slackBotToken ? new SlackClient(slackBotToken) : null,
-  afterReview: (run) => handoffIfStuck(deps, run),
-  onCapacity: (ruleId) => startQueued(deps, ruleId),
-};
-resumeWatchers(deps);
-for (const ruleId of store.queuedRuleIds()) startQueued(deps, ruleId);
+/** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, T3HttpError: 502, T3RpcError: 502, UpdateError: 409 };
+
+const api = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const services = yield* Effect.context<ApiServices>();
+    const config = yield* AppConfig;
+    const store = yield* Store;
+    const t3 = yield* T3;
+    const poller = yield* Poller;
+    const updater = yield* Updater;
+    const slackSocket = yield* SlackSocket;
+    const background = yield* Background;
+    const webhookSecret = Option.map(config.webhookSecret, Redacted.value);
+    const mcpUrl = Option.isSome(config.slack) ? `http://127.0.0.1:${config.mcpPort}/mcp` : null;
+
+    /** Runs a route with the services and turns typed failures into JSON error responses. */
+    const route = <E extends { readonly _tag: string; readonly message: string }>(effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, ApiServices | HttpServerRequest.HttpServerRequest | HttpRouter.RouteContext>) =>
+      effect.pipe(
+        Effect.catch((error) => Effect.succeed(json({ error: error.message }, STATUS[error._tag] ?? 500))),
+        Effect.provide(services),
+      );
+    const body = HttpServerRequest.schemaBodyJson;
+    const param = (name: string) => Effect.map(HttpRouter.params, (params) => params[name] ?? "");
+
+    yield* router.add(
+      "GET",
+      "/api/status",
+      route(
+        Effect.gen(function* () {
+          const environment = yield* t3.environment.pipe(Effect.orElseSucceed(() => null));
+          return json({
+            t3: { origin: t3.origin, environment },
+            webhookSecretConfigured: Option.isSome(webhookSecret),
+            slack: yield* slackSocket.status,
+            mcp: mcpUrl,
+          });
+        }),
+      ),
+    );
+
+    yield* router.add("GET", "/api/t3/projects", route(Effect.map(t3.projects(), json)));
+    yield* router.add("GET", "/api/t3/providers", route(Effect.map(t3.providers(), json)));
+
+    /** Starts a tiny thread in a project to prove the token, RPC and provider work end to end. */
+    yield* router.add(
+      "POST",
+      "/api/t3/test-thread",
+      route(
+        Effect.gen(function* () {
+          const input = yield* body(TestThreadInput);
+          const project = (yield* t3.projects()).find((p) => p.id === input.projectId);
+          if (!project) return json({ error: "project not found in T3" }, 404);
+          const settings = yield* store.getSettings();
+          const run = yield* store.recordRun({
+            ruleId: "manual",
+            ruleName: "connection test",
+            deliveryId: crypto.randomUUID(),
+            event: "manual.test",
+            repo: project.title,
+            source: "manual",
+            author: null,
+            status: "started",
+            detail: "starting thread",
+            threadId: null,
+            threadUrl: null,
+            context: null,
+            result: null,
+            action: null,
+          });
+          const started = yield* Effect.result(
+            t3.startThread({
+              project,
+              title: "Orchestrator connection test",
+              prompt: "Connection test from the GitHub webhook orchestrator. Reply with the single word ok and do nothing else.",
+              modelSelection: project.defaultModelSelection ?? settings.model,
+              runtimeMode: settings.runtimeMode,
+              baseBranch: null,
+              worktree: false,
+              pullRequest: null,
+            }),
+          );
+          if (started._tag === "Failure") {
+            yield* store.updateRun(run.id, { status: "failed", detail: started.failure.message, threadId: null, threadUrl: null });
+            return json({ error: started.failure.message }, 502);
+          }
+          yield* store.updateRun(run.id, { status: "started", detail: `checkout ${project.workspaceRoot}`, ...started.success });
+          yield* watchCompletion({ ...run, threadId: started.success.threadId });
+          return json(started.success, 201);
+        }),
+      ),
+    );
+
+    /** Compares the running code with upstream; POST fast-forwards, installs and restarts. */
+    yield* router.add("GET", "/api/update", route(Effect.map(updater.check, json)));
+    yield* router.add(
+      "POST",
+      "/api/update",
+      route(
+        Effect.gen(function* () {
+          const result = yield* updater.apply;
+          yield* log.info("update applied, restarting", { from: result.from, to: result.to, restart: result.restart });
+          // Let the response leave before the process goes away.
+          yield* background.fork(Effect.delay(updater.restart(result.restart), "500 millis"));
+          return json(result);
+        }),
+      ),
+    );
+
+    yield* router.add("GET", "/api/settings", route(Effect.map(store.getSettings(), json)));
+    yield* router.add(
+      "PUT",
+      "/api/settings",
+      route(
+        Effect.gen(function* () {
+          const settings = yield* body(SettingsInput);
+          yield* store.saveSettings(settings);
+          yield* poller.reschedule;
+          return json(settings);
+        }),
+      ),
+    );
+
+    /**
+     * Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items.
+     * Only PR runs get a review verdict: an issue run's reply is a work summary, and quoting a "changes requested" review there is not one.
+     */
+    yield* router.add(
+      "GET",
+      "/api/inbox",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const items = yield* poller.list({ gone: new URL(request.url, "http://localhost").searchParams.get("gone") === "1" });
+          const latest = yield* store.latestRunsByUrl(items.map((item) => item.url));
+          const response: InboxResponse = {
+            polling: yield* poller.statuses,
+            gone: yield* store.countGoneInbox(),
+            items: items.map((item) => {
+              const run = latest.get(item.url);
+              const verdict = run?.status === "done" && item.kind === "pull_request" ? reviewVerdict(run.result) : null;
+              return {
+                ...item,
+                lastRun: run
+                  ? { id: run.id, status: run.status, ruleName: run.ruleName, detail: run.detail, threadUrl: run.threadUrl, createdAt: run.createdAt, verdict }
+                  : null,
+              };
+            }),
+          };
+          return json(response);
+        }),
+      ),
+    );
+
+    /** Labels synced from each source, for the rule editor's suggestions. */
+    yield* router.add("GET", "/api/labels", route(Effect.map(poller.labelCatalog, json)));
+
+    yield* router.add(
+      "POST",
+      "/api/inbox/poll",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { source } = (yield* request.json.pipe(Effect.orElseSucceed(() => ({})))) as { source?: string };
+          const known = INBOX_SOURCES.find((s) => s === source);
+          if (!known) return json({ error: `source must be one of ${INBOX_SOURCES.join(", ")}` }, 400);
+          return json(yield* poller.pollNow(known));
+        }),
+      ),
+    );
+
+    /** One thread per item with the composed prompt. Dispatches by hand review even paused PRs. */
+    yield* router.add(
+      "POST",
+      "/api/inbox/dispatch",
+      route(
+        Effect.gen(function* () {
+          const { keys, name, ...action } = yield* body(DispatchInput);
+          const items = yield* Effect.forEach(keys, (key) => poller.find(key));
+          const missing = keys.filter((_, i) => !items[i]);
+          if (missing.length > 0) return json({ error: `not in the inbox: ${missing.join(", ")}` }, 404);
+          const now = new Date().toISOString();
+          const rule: Rule = {
+            id: "dispatch",
+            name,
+            enabled: true,
+            events: [],
+            repos: [],
+            reviewer: null,
+            channel: null,
+            allowBots: true,
+            skipSelfReview: false,
+            filters: EMPTY_FILTERS,
+            ...action,
+            createdAt: now,
+            updatedAt: now,
+          };
+          const runs = yield* Effect.forEach(items, (item) =>
+            runRules({ deliveryId: crypto.randomUUID(), event: itemEvent(item!), ctx: itemContext(item!), source: "manual", force: true }, [rule]),
+          );
+          return json(runs.flat(), 201);
+        }),
+      ),
+    );
+
+    yield* router.add("GET", "/api/prompts", route(Effect.map(store.listPrompts(), json)));
+    yield* router.add("POST", "/api/prompts", route(Effect.flatMap(body(PromptInput), (input) => Effect.map(store.createPrompt(input), (prompt) => json(prompt, 201)))));
+    yield* router.add(
+      "PUT",
+      "/api/prompts/:id",
+      route(
+        Effect.gen(function* () {
+          const prompt = yield* store.updatePrompt(yield* param("id"), yield* body(PromptInput));
+          return prompt ? json(prompt) : json({ error: "not found" }, 404);
+        }),
+      ),
+    );
+    yield* router.add(
+      "DELETE",
+      "/api/prompts/:id",
+      route(Effect.map(Effect.flatMap(param("id"), store.deletePrompt), (deleted) => (deleted ? HttpServerResponse.empty({ status: 204 }) : json({ error: "not found" }, 404)))),
+    );
+
+    yield* router.add("GET", "/api/rules", route(Effect.map(store.listRules(), json)));
+    yield* router.add("POST", "/api/rules", route(Effect.flatMap(body(RuleInput), (input) => Effect.map(store.createRule(input), (rule) => json(rule, 201)))));
+    yield* router.add(
+      "PUT",
+      "/api/rules/:id",
+      route(
+        Effect.gen(function* () {
+          const rule = yield* store.updateRule(yield* param("id"), yield* body(RuleInput));
+          if (!rule) return json({ error: "not found" }, 404);
+          // A raised limit lets queued runs start now rather than at the next settle.
+          yield* startQueued(rule.id);
+          return json(rule);
+        }),
+      ),
+    );
+    yield* router.add(
+      "DELETE",
+      "/api/rules/:id",
+      route(Effect.map(Effect.flatMap(param("id"), store.deleteRule), (deleted) => (deleted ? HttpServerResponse.empty({ status: 204 }) : json({ error: "not found" }, 404)))),
+    );
+
+    /** Backfill: runs an inbox rule on every item it matches now, not only on new activity. */
+    yield* router.add(
+      "POST",
+      "/api/rules/:id/run-now",
+      route(
+        Effect.gen(function* () {
+          const rule = yield* store.getRule(yield* param("id"));
+          if (!rule) return json({ error: "not found" }, 404);
+          return json(yield* poller.runAutomations(yield* poller.list(), { armed: false, ruleId: rule.id }), 201);
+        }),
+      ),
+    );
+
+    yield* router.add("GET", "/api/runs", route(Effect.map(store.listRuns(), json)));
+    yield* router.add("GET", "/api/analytics", route(Effect.map(store.analytics(), json)));
+    yield* router.add("GET", "/api/pulls", route(Effect.map(store.pullRequests(), json)));
+
+    yield* router.add(
+      "POST",
+      "/webhooks/github",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const rawBody = yield* request.text;
+          const deliveryId = request.headers["x-github-delivery"] ?? crypto.randomUUID();
+          const eventName = request.headers["x-github-event"];
+          if (Option.isSome(webhookSecret) && !verifySignature(webhookSecret.value, rawBody, request.headers["x-hub-signature-256"] ?? null)) {
+            yield* webhookLog.warn("rejected: invalid signature", { delivery: deliveryId, github: eventName });
+            return json({ error: "invalid signature" }, 401);
+          }
+          if (!eventName) {
+            yield* webhookLog.warn("rejected: missing X-GitHub-Event header", { delivery: deliveryId });
+            return json({ error: "missing X-GitHub-Event header" }, 400);
+          }
+          if (eventName === "ping") {
+            yield* webhookLog.info("ping", { delivery: deliveryId });
+            return json({ ok: true });
+          }
+          const payload = yield* Effect.try(() => JSON.parse(rawBody) as unknown).pipe(Effect.option);
+          if (Option.isNone(payload)) {
+            yield* webhookLog.warn("rejected: body is not JSON", { delivery: deliveryId, github: eventName });
+            return json({ error: "body is not JSON" }, 400);
+          }
+          const event = eventKey(eventName, payload.value);
+          const ctx = extractContext(eventName, payload.value);
+          yield* webhookLog.info("event received", {
+            delivery: deliveryId,
+            event,
+            repo: ctx.repo || undefined,
+            pr: ctx.pr_number,
+            sender: ctx.sender,
+            reviewer: ctx.requested_reviewer,
+          });
+          return json(yield* handleDelivery({ deliveryId, event, ctx }), 202);
+        }),
+      ),
+    );
+  }),
+);
+
+/** The UI and API on `PORT`. Client-side routes serve the HTML bundle; the router in frontend/app.tsx picks the view. */
+const httpLayer = Layer.unwrap(
+  Effect.map(AppConfig, (config) =>
+    HttpRouter.serve(Layer.mergeAll(api, PrometheusMetrics.layerHttp({ path: "/api/metrics" })), { disableLogger: true, disableListenLog: true }).pipe(
+      Layer.provide(
+        BunHttpServer.layer({
+          port: config.port,
+          development: config.development,
+          // Fetching over SSH plus bun install (POST /api/update) outlasts Bun's 10s default.
+          idleTimeout: 120,
+          routes: { "/": index, "/inbox": index, "/reviews": index, "/analytics": index, "/settings": index },
+        }),
+      ),
+    ),
+  ),
+);
 
 /**
- * Inbox: PRs and issues that involve you, polled from GitHub (through `gh`)
- * and Linear (`LINEAR_API_KEY`). Rules on `inbox.*` events run on new activity.
+ * MCP tools for other agents (see src/mcp.ts) on their own loopback-only
+ * port: the main port may be tunnelled to GitHub, and these post as the bot.
+ * Only with Slack configured.
  */
-const linearKey = process.env.LINEAR_API_KEY;
-if (!linearKey) log.warn("LINEAR_API_KEY is not set: the inbox polls GitHub only.");
-const poller = new Poller(deps, { github: new GitHubInbox(), linear: linearKey ? new LinearInbox(linearKey) : null });
-poller.start();
+const mcpRoutes = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const handle = yield* makeMcpHandler;
+    yield* router.add(
+      "*",
+      "/mcp",
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const web = yield* HttpServerRequest.toWeb(request);
+        const response = yield* Effect.promise(() => handle(web));
+        return HttpServerResponse.fromWeb(response);
+      }),
+    );
+  }),
+);
+const mcpLayer: Layer.Layer<never, HttpServerError.ServeError, AppConfig | HandlerServices | PullRequests> = Layer.unwrap(
+  Effect.map(AppConfig, (config) =>
+    Option.isSome(config.slack)
+      ? HttpRouter.serve(mcpRoutes, { disableLogger: true, disableListenLog: true }).pipe(
+          // request_review waits on `gh` and a few Slack calls.
+          Layer.provide(BunHttpServer.layer({ hostname: "127.0.0.1", port: config.mcpPort, idleTimeout: 60 })),
+        )
+      : Layer.empty,
+  ),
+);
 
 /**
  * Slack events arrive over Socket Mode, not a webhook: each `event_callback`
@@ -80,319 +403,79 @@ poller.start();
  * a review thread re-reviews that PR in a new T3 thread. Slack redelivers
  * unacked envelopes; `event_id` dedupes those.
  */
-const slackSocket = slackAppToken && deps.slack ? new SlackSocket(slackAppToken, (payload) => void handleSlackEvent(deps, payload)) : null;
-slackSocket?.start();
+const slackSocketLayer = Layer.effect(
+  SlackSocket,
+  Effect.gen(function* () {
+    const config = yield* AppConfig;
+    if (Option.isNone(config.slack)) return { status: Effect.succeed("off" as const) };
+    const services = yield* Effect.context<HandlerServices | PullRequests>();
+    const connected = yield* SubscriptionRef.make(false);
+    yield* Effect.forkScoped(
+      runSlackSocket({
+        appToken: Redacted.value(config.slack.value.appToken),
+        connected,
+        onEvent: (payload) =>
+          handleSlackEvent(payload).pipe(
+            Effect.provide(services),
+            Effect.catchCause((cause) => log.error("slack event failed", { error: errorMessage(Cause.squash(cause)) })),
+          ),
+      }),
+    );
+    return { status: Effect.map(SubscriptionRef.get(connected), (open) => (open ? ("connected" as const) : ("connecting" as const))) };
+  }),
+);
+
+/** Seeds presets, re-attaches watchers and queues left by the previous process, starts polling, and says hello. */
+const startupLayer = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const config = yield* AppConfig;
+    const store = yield* Store;
+    const t3 = yield* T3;
+    const poller = yield* Poller;
+    yield* store.ensureDefaultPrompts();
+    yield* resumeWatchers;
+    yield* Effect.forEach(yield* store.queuedRuleIds(), startQueued, { discard: true });
+    yield* poller.start;
+    yield* log.info("GitHub -> T3 Code orchestrator started", {
+      url: `http://localhost:${config.port}/`,
+      t3: t3.origin,
+      webhook: `http://localhost:${config.port}/webhooks/github`,
+      slack: Option.isSome(config.slack) ? "starting" : "off",
+      mcp: Option.isSome(config.slack) ? `http://127.0.0.1:${config.mcpPort}/mcp` : "off (needs Slack)",
+      inbox: Option.isSome(config.linearApiKey) ? "github, linear" : "github",
+      metrics: `http://localhost:${config.port}/api/metrics`,
+    });
+  }),
+);
 
 /**
- * MCP tools for other agents (see src/mcp.ts) on their own loopback-only
- * port: the main port may be tunnelled to GitHub, and these post as the bot.
+ * Telemetry: logs, metrics and traces go to an OTLP collector when
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` is set (Grafana, Jaeger, Honeycomb, ...);
+ * metrics are always scraped from `/api/metrics` in Prometheus format.
  */
-const slack = deps.slack;
-const mcp = slack
-  ? Bun.serve({
-      hostname: "127.0.0.1",
-      port: Number(process.env.MCP_PORT ?? 8788),
-      // request_review waits on `gh` and a few Slack calls.
-      idleTimeout: 60,
-      routes: { "/mcp": (req) => handleMcpRequest({ ...deps, slack }, req) },
-    })
-  : null;
+const telemetryLayer = Layer.unwrap(
+  Effect.map(Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(Config.option), (endpoint) =>
+    Option.isSome(endpoint)
+      ? Otlp.layer({ baseUrl: endpoint.value, resource: { serviceName: "t3-review-orchestrator" }, loggerMergeWithExisting: true }).pipe(
+          Layer.provide([FetchHttpClient.layer, OtlpSerialization.layerJson]),
+        )
+      : Layer.empty,
+  ),
+).pipe(Layer.provideMerge(Metric.enableRuntimeMetricsLayer));
 
-const json = (body: unknown, status = 200) => Response.json(body, { status });
-const badRequest = (error: unknown) =>
-  json({ error: error instanceof Error ? error.message : String(error) }, 400);
+const platformLayer = Layer.mergeAll(FetchHttpClient.layer, BunSocket.layerWebSocketConstructor, BunChildProcessSpawner.layer.pipe(Layer.provide(BunServices.layer)));
+const databaseLayer = Layer.unwrap(Effect.map(AppConfig, (config) => Database.layer(config.dataPath)));
+const servicesLayer = Layer.mergeAll(
+  Store.layer.pipe(Layer.provide(databaseLayer)),
+  T3.layer,
+  SlackClient.layer,
+  PullRequests.layer,
+  Background.layer,
+  RunEvents.layer,
+  Updater.layer,
+).pipe(Layer.provideMerge(Layer.mergeAll(AppConfig.layer, platformLayer)));
+const appLayer = Layer.mergeAll(Poller.layer, slackSocketLayer).pipe(Layer.provideMerge(servicesLayer));
 
-const server = Bun.serve({
-  port: Number(process.env.PORT ?? 8787),
-  development: process.env.NODE_ENV !== "production",
-  routes: {
-    // Client-side routes; the router in frontend/app.tsx picks the view.
-    "/": index,
-    "/inbox": index,
-    "/reviews": index,
-    "/analytics": index,
-    "/settings": index,
+const mainLayer = Layer.mergeAll(httpLayer, mcpLayer, supervisorLayer, startupLayer, telemetryLayer).pipe(Layer.provide(appLayer), Layer.provide(loggerLayer));
 
-    "/api/status": async () => {
-      const environment = await t3.environment().catch(() => null);
-      return json({
-        t3: { origin: t3.origin, environment },
-        webhookSecretConfigured: Boolean(webhookSecret),
-        slack: slackSocket ? (slackSocket.connected ? "connected" : "connecting") : "off",
-        mcp: mcp ? `${mcp.url.href}mcp` : null,
-      });
-    },
-
-    "/api/t3/projects": async () => {
-      try {
-        return json(await t3.projects());
-      } catch (error) {
-        return json({ error: error instanceof Error ? error.message : String(error) }, 502);
-      }
-    },
-
-    "/api/t3/providers": async () => {
-      try {
-        return json(await t3.providers());
-      } catch (error) {
-        return json({ error: error instanceof Error ? error.message : String(error) }, 502);
-      }
-    },
-
-    /** Starts a tiny thread in a project to prove the token, RPC and provider work end to end. */
-    "/api/t3/test-thread": {
-      POST: async (req) => {
-        const parsed = TestThreadInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        const project = (await t3.projects()).find((p) => p.id === parsed.data.projectId);
-        if (!project) return json({ error: "project not found in T3" }, 404);
-        const settings = store.getSettings();
-        const run = store.recordRun({
-          ruleId: "manual",
-          ruleName: "connection test",
-          deliveryId: crypto.randomUUID(),
-          event: "manual.test",
-          repo: project.title,
-          source: "manual",
-          author: null,
-          status: "started",
-          detail: "starting thread",
-          threadId: null,
-          threadUrl: null,
-          context: null,
-          result: null,
-          action: null,
-        });
-        try {
-          const thread = await t3.startThread({
-            project,
-            title: "Orchestrator connection test",
-            prompt:
-              "Connection test from the GitHub webhook orchestrator. Reply with the single word ok and do nothing else.",
-            modelSelection: project.defaultModelSelection ?? settings.model,
-            runtimeMode: settings.runtimeMode,
-            baseBranch: null,
-            worktree: false,
-            pullRequest: null,
-          });
-          store.updateRun(run.id, { status: "started", detail: `checkout ${project.workspaceRoot}`, ...thread });
-          watchCompletion(deps, { ...run, threadId: thread.threadId });
-          return json(thread, 201);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          store.updateRun(run.id, { status: "failed", detail, threadId: null, threadUrl: null });
-          return json({ error: detail }, 502);
-        }
-      },
-    },
-
-    /** Compares the running code with upstream; POST fast-forwards, installs and restarts. */
-    "/api/update": {
-      GET: async () => {
-        try {
-          return json(await checkForUpdate());
-        } catch (error) {
-          return json({ error: error instanceof Error ? error.message : String(error) }, 502);
-        }
-      },
-      POST: async (req, server) => {
-        // Fetching over SSH plus bun install outlasts the 10s default idle timeout.
-        server.timeout(req, 120);
-        try {
-          const result = await applyUpdate();
-          log.info("update applied, restarting", { from: result.from, to: result.to, restart: result.restart });
-          // Let the response leave before the process goes away.
-          setTimeout(() => restart(result.restart), 500);
-          return json(result);
-        } catch (error) {
-          return json({ error: error instanceof Error ? error.message : String(error) }, 409);
-        }
-      },
-    },
-
-    "/api/settings": {
-      GET: () => json(store.getSettings()),
-      PUT: async (req) => {
-        const parsed = SettingsInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        store.saveSettings(parsed.data);
-        poller.reschedule();
-        return json(parsed.data);
-      },
-    },
-
-    /**
-     * Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items.
-     * Only PR runs get a review verdict: an issue run's reply is a work summary, and quoting a "changes requested" review there is not one.
-     */
-    "/api/inbox": (req) => {
-      const items = poller.list({ gone: new URL(req.url).searchParams.get("gone") === "1" });
-      const latest = store.latestRunsByUrl(items.map((item) => item.url));
-      const response: InboxResponse = {
-        polling: poller.statuses(),
-        gone: store.countGoneInbox(),
-        items: items.map((item) => {
-          const run = latest.get(item.url);
-          const verdict = run?.status === "done" && item.kind === "pull_request" ? reviewVerdict(run.result) : null;
-          return {
-            ...item,
-            lastRun: run
-              ? { id: run.id, status: run.status, ruleName: run.ruleName, detail: run.detail, threadUrl: run.threadUrl, createdAt: run.createdAt, verdict }
-              : null,
-          };
-        }),
-      };
-      return json(response);
-    },
-
-    /** Labels synced from each source, for the rule editor's suggestions. */
-    "/api/labels": () => json(poller.labelCatalog()),
-
-    "/api/inbox/poll": {
-      POST: async (req) => {
-        const { source } = (await req.json().catch(() => ({}))) as { source?: string };
-        const known = INBOX_SOURCES.find((s) => s === source);
-        if (!known) return badRequest(`source must be one of ${INBOX_SOURCES.join(", ")}`);
-        return json(await poller.pollNow(known));
-      },
-    },
-
-    /** One thread per item with the composed prompt. Dispatches by hand review even paused PRs. */
-    "/api/inbox/dispatch": {
-      POST: async (req) => {
-        const parsed = DispatchInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        const { keys, name, ...action } = parsed.data;
-        const items = keys.map((key) => poller.find(key));
-        const missing = keys.filter((_, index) => !items[index]);
-        if (missing.length > 0) return json({ error: `not in the inbox: ${missing.join(", ")}` }, 404);
-        const now = new Date().toISOString();
-        const rule: Rule = {
-          id: "dispatch",
-          name,
-          enabled: true,
-          events: [],
-          repos: [],
-          reviewer: null,
-          channel: null,
-          allowBots: true,
-          skipSelfReview: false,
-          filters: EMPTY_FILTERS,
-          ...action,
-          createdAt: now,
-          updatedAt: now,
-        };
-        const runs = items.flatMap((item) =>
-          runRules(deps, { deliveryId: crypto.randomUUID(), event: itemEvent(item!), ctx: itemContext(item!), source: "manual", force: true }, [rule]),
-        );
-        return json(runs, 201);
-      },
-    },
-
-    "/api/prompts": {
-      GET: () => json(store.listPrompts()),
-      POST: async (req) => {
-        const parsed = PromptInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        return json(store.createPrompt(parsed.data), 201);
-      },
-    },
-
-    "/api/prompts/:id": {
-      PUT: async (req) => {
-        const parsed = PromptInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        const prompt = store.updatePrompt(req.params.id, parsed.data);
-        return prompt ? json(prompt) : json({ error: "not found" }, 404);
-      },
-      DELETE: (req) =>
-        store.deletePrompt(req.params.id) ? new Response(null, { status: 204 }) : json({ error: "not found" }, 404),
-    },
-
-    "/api/rules": {
-      GET: () => json(store.listRules()),
-      POST: async (req) => {
-        const parsed = RuleInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        return json(store.createRule(parsed.data), 201);
-      },
-    },
-
-    "/api/rules/:id": {
-      PUT: async (req) => {
-        const parsed = RuleInput.safeParse(await req.json());
-        if (!parsed.success) return badRequest(parsed.error);
-        const rule = store.updateRule(req.params.id, parsed.data);
-        if (!rule) return json({ error: "not found" }, 404);
-        // A raised limit lets queued runs start now rather than at the next settle.
-        startQueued(deps, rule.id);
-        return json(rule);
-      },
-      DELETE: (req) =>
-        store.deleteRule(req.params.id) ? new Response(null, { status: 204 }) : json({ error: "not found" }, 404),
-    },
-
-    /** Backfill: runs an inbox rule on every item it matches now, not only on new activity. */
-    "/api/rules/:id/run-now": {
-      POST: (req) => {
-        const rule = store.getRule(req.params.id);
-        if (!rule) return json({ error: "not found" }, 404);
-        return json(poller.runAutomations(poller.list(), { armed: false, ruleId: rule.id }), 201);
-      },
-    },
-
-    "/api/runs": () => json(store.listRuns()),
-
-    "/api/analytics": () => json(store.analytics()),
-
-    "/api/pulls": () => json(store.pullRequests()),
-
-    "/webhooks/github": {
-      POST: async (req) => {
-        const rawBody = await req.text();
-        const deliveryId = req.headers.get("x-github-delivery") ?? crypto.randomUUID();
-        const eventName = req.headers.get("x-github-event");
-        if (webhookSecret && !verifySignature(webhookSecret, rawBody, req.headers.get("x-hub-signature-256"))) {
-          webhookLog.warn("rejected: invalid signature", { delivery: deliveryId, github: eventName ?? undefined });
-          return json({ error: "invalid signature" }, 401);
-        }
-        if (!eventName) {
-          webhookLog.warn("rejected: missing X-GitHub-Event header", { delivery: deliveryId });
-          return badRequest("missing X-GitHub-Event header");
-        }
-        if (eventName === "ping") {
-          webhookLog.info("ping", { delivery: deliveryId });
-          return json({ ok: true });
-        }
-
-        let payload: unknown;
-        try {
-          payload = JSON.parse(rawBody);
-        } catch {
-          webhookLog.warn("rejected: body is not JSON", { delivery: deliveryId, github: eventName });
-          return badRequest("body is not JSON");
-        }
-        const event = eventKey(eventName, payload);
-        const ctx = extractContext(eventName, payload);
-        webhookLog.info("event received", {
-          delivery: deliveryId,
-          event,
-          repo: ctx.repo || undefined,
-          pr: ctx.pr_number,
-          sender: ctx.sender,
-          reviewer: ctx.requested_reviewer,
-        });
-        return json(handleDelivery(deps, { deliveryId, event, ctx }), 202);
-      },
-    },
-  },
-});
-
-log.info("GitHub -> T3 Code orchestrator started", {
-  url: server.url.href,
-  t3: t3.origin,
-  webhook: `${server.url.href}webhooks/github`,
-  slack: slackSocket ? "starting" : "off",
-  mcp: mcp ? `${mcp.url.href}mcp` : "off (needs Slack)",
-  inbox: linearKey ? "github, linear" : "github",
-});
+BunRuntime.runMain(Layer.launch(mainLayer).pipe(Effect.provide(loggerLayer)));

@@ -12,10 +12,12 @@
  * `data/` path resolve exactly as they do when run by hand. `install` also copies
  * SSL_CERT_FILE / NODE_EXTRA_CA_CERTS into the plist; re-run it when they change.
  */
+import { BunChildProcessSpawner, BunRuntime, BunServices } from "@effect/platform-bun";
+import { Console, Data, Effect, FileSystem, Layer, Schedule, type PlatformError } from "effect";
+import { ChildProcess, type ChildProcessSpawner } from "effect/process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { mkdirSync } from "node:fs";
-import { $ } from "bun";
+import { exec, execOk } from "./src/exec.ts";
 import { SERVICE_LABEL as LABEL } from "./src/shared.ts";
 
 const projectDir = import.meta.dir;
@@ -23,6 +25,9 @@ const plistPath = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 const logDir = join(homedir(), "Library", "Logs", "t3-review-orchestrator");
 const logPath = join(logDir, "orchestrator.log");
 const domain = `gui/${process.getuid?.() ?? 501}`;
+
+/** A command cannot proceed; printed as is, without a stack. */
+class ServiceError extends Data.TaggedError("ServiceError")<{ readonly message: string }> {}
 
 /**
  * CA bundle variables Bun reads at startup. launchd starts the agent with none of
@@ -87,64 +92,61 @@ function agentPlist(): string {
   ].join("\n");
 }
 
-async function isLoaded(): Promise<boolean> {
-  return (await $`launchctl print ${domain}/${LABEL}`.quiet().nothrow()).exitCode === 0;
-}
+const launchctl = (...args: string[]) => execOk("launchctl", args).pipe(Effect.mapError((error) => new ServiceError({ message: error.message })));
+
+const isLoaded = Effect.map(exec("launchctl", ["print", `${domain}/${LABEL}`]), (output) => output.exitCode === 0).pipe(Effect.orElseSucceed(() => false));
 
 /** `launchctl bootout` returns before the agent is gone; bootstrapping too early fails with I/O error 5. */
-async function bootoutAndWait(): Promise<void> {
-  await $`launchctl bootout ${domain}/${LABEL}`.quiet();
-  for (let attempt = 0; attempt < 50 && (await isLoaded()); attempt++) await Bun.sleep(100);
-}
+const bootoutAndWait = Effect.gen(function* () {
+  yield* launchctl("bootout", `${domain}/${LABEL}`);
+  // Up to 50 checks, 100ms apart.
+  yield* isLoaded.pipe(Effect.repeat({ schedule: Schedule.spaced("100 millis").pipe(Schedule.upTo({ times: 50 })), while: (loaded) => loaded }));
+});
 
-async function install() {
-  if (!(await Bun.file(join(projectDir, ".env")).exists())) {
-    console.warn("No .env in project directory; the service will exit until T3_TOKEN is set (see README).");
+const install = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  if (!(yield* fs.exists(join(projectDir, ".env")))) {
+    yield* Console.warn("No .env in project directory; the service will exit until T3_TOKEN is set (see README).");
   }
   const caEnv = caCertEnv();
   for (const [key, path] of Object.entries(caEnv)) {
-    if (!(await Bun.file(path).exists())) throw new Error(`${key} points to a missing file: ${path}`);
+    if (!(yield* fs.exists(path))) return yield* Effect.fail(new ServiceError({ message: `${key} points to a missing file: ${path}` }));
   }
-  mkdirSync(dirname(plistPath), { recursive: true });
-  mkdirSync(logDir, { recursive: true });
-  await Bun.write(plistPath, agentPlist());
-  if (await isLoaded()) await bootoutAndWait();
-  await $`launchctl bootstrap ${domain} ${plistPath}`;
+  yield* fs.makeDirectory(dirname(plistPath), { recursive: true });
+  yield* fs.makeDirectory(logDir, { recursive: true });
+  yield* fs.writeFileString(plistPath, agentPlist());
+  if (yield* isLoaded) yield* bootoutAndWait;
+  yield* launchctl("bootstrap", domain, plistPath);
   const caLine = Object.entries(caEnv)
     .map(([key, path]) => `  ${key.toLowerCase().replaceAll("_", " ")} ${path}`)
     .join("\n");
-  console.log(
-    [`Installed ${LABEL}`, `  plist ${plistPath}`, `  logs  ${logPath}`, caLine || "  no CA bundle baked in (SSL_CERT_FILE / NODE_EXTRA_CA_CERTS unset)"]
-      .join("\n"),
+  yield* Console.log(
+    [`Installed ${LABEL}`, `  plist ${plistPath}`, `  logs  ${logPath}`, caLine || "  no CA bundle baked in (SSL_CERT_FILE / NODE_EXTRA_CA_CERTS unset)"].join("\n"),
   );
-}
+});
 
-async function uninstall() {
-  if (await isLoaded()) await $`launchctl bootout ${domain}/${LABEL}`;
-  const file = Bun.file(plistPath);
-  if (await file.exists()) await file.delete();
-  console.log(`Removed ${LABEL}`);
-}
+const uninstall = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  if (yield* isLoaded) yield* launchctl("bootout", `${domain}/${LABEL}`);
+  if (yield* fs.exists(plistPath)) yield* fs.remove(plistPath);
+  yield* Console.log(`Removed ${LABEL}`);
+});
 
-async function restart() {
-  if (!(await isLoaded())) throw new Error(`${LABEL} is not installed; run: bun service.ts install`);
-  await $`launchctl kickstart -k ${domain}/${LABEL}`;
-  console.log(`Restarted ${LABEL}`);
-}
+const restart = Effect.gen(function* () {
+  if (!(yield* isLoaded)) return yield* Effect.fail(new ServiceError({ message: `${LABEL} is not installed; run: bun service.ts install` }));
+  yield* launchctl("kickstart", "-k", `${domain}/${LABEL}`);
+  yield* Console.log(`Restarted ${LABEL}`);
+});
 
-async function status() {
-  if (!(await isLoaded())) {
-    console.log(`${LABEL} is not installed`);
-    return;
-  }
-  const out = await $`launchctl print ${domain}/${LABEL}`.text();
+const status = Effect.gen(function* () {
+  if (!(yield* isLoaded)) return yield* Console.log(`${LABEL} is not installed`);
+  const out = (yield* launchctl("print", `${domain}/${LABEL}`)).stdout;
   const lines = out.split("\n").filter((line) => /^\t(state|pid|last exit code|last terminating signal) = /.test(line));
-  console.log([LABEL, ...lines.map((line) => `  ${line.trim()}`), `  logs = ${logPath}`].join("\n"));
-}
+  yield* Console.log([LABEL, ...lines.map((line) => `  ${line.trim()}`), `  logs = ${logPath}`].join("\n"));
+});
 
-async function logs() {
-  await $`tail -n 50 -f ${logPath}`;
-}
+/** Streams the log to this terminal until interrupted. */
+const logs = Effect.scoped(Effect.flatMap(ChildProcess.make("tail", ["-n", "50", "-f", logPath], { stdout: "inherit", stderr: "inherit" }), (handle) => handle.exitCode));
 
 const commands = { install, uninstall, restart, status, logs };
 const command = process.argv[2] as keyof typeof commands | undefined;
@@ -157,9 +159,13 @@ if (!command || !(command in commands)) {
   console.error(`usage: bun service.ts <${Object.keys(commands).join("|")}>`);
   process.exit(1);
 }
-try {
-  await commands[command]();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-}
+
+const program: Effect.Effect<unknown, ServiceError | PlatformError.PlatformError, ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem> = commands[command];
+
+BunRuntime.runMain(
+  program.pipe(
+    Effect.asVoid,
+    Effect.catch((error) => Effect.andThen(Console.error(error.message), Effect.sync(() => process.exit(1)))),
+    Effect.provide(Layer.mergeAll(BunServices.layer, BunChildProcessSpawner.layer.pipe(Layer.provide(BunServices.layer)))),
+  ),
+);

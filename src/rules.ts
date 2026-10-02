@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { Effect, Schema, SchemaGetter } from "effect";
 import type { prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -22,99 +22,104 @@ export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
 export type { ModelSelection, RunAction } from "./db/schema.ts";
 
-const ModelSelectionSchema = z.object({
-  instanceId: z.string().trim().min(1),
-  model: z.string().trim().min(1),
-});
+/**
+ * Payloads accepted from the UI, as Effect schemas. Decoding trims names,
+ * fills defaults for omitted fields and reports every problem with its path;
+ * the decoded types line up with the database rows (checked below).
+ */
 
-const names = z.array(z.string().trim().min(1)).default([]);
+/** A trimmed, non-empty string. */
+const nonEmpty = Schema.Trim.check(Schema.isNonEmpty());
+const names = Schema.Array(nonEmpty).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([])));
+/** Optional name: null, or a trimmed non-empty string. */
+const optionalName = Schema.NullOr(nonEmpty).pipe(Schema.withDecodingDefault(Effect.succeed(null)));
 
-const RuleFiltersSchema = z.object({
-  reasons: z.array(z.enum(INBOX_REASONS)).default([]),
+/** Trimmed and cleaned by `clean`; an empty result (a cleared field in the UI) becomes null. */
+const cleanedOrNull = (clean: (value: string) => string) =>
+  Schema.NullOr(Schema.String).pipe(
+    Schema.decodeTo(Schema.NullOr(Schema.String), {
+      decode: SchemaGetter.transform((value) => (value === null ? null : clean(value.trim()) || null)),
+      encode: SchemaGetter.passthrough(),
+    }),
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  );
+
+const ModelSelectionSchema = Schema.Struct({ instanceId: nonEmpty, model: nonEmpty });
+
+const RuleFiltersSchema = Schema.Struct({
+  reasons: Schema.Array(Schema.Literals(INBOX_REASONS)).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
   labels: names,
-  allLabels: z.boolean().default(false),
+  allLabels: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   states: names,
   teams: names,
-  rerunOnPush: z.boolean().default(true),
-}) satisfies z.ZodType<RuleFilters, unknown>;
+  rerunOnPush: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+});
 
 /** Payload accepted from the UI when creating or updating a rule. */
-export const RuleInput = z.object({
-  name: z.string().trim().min(1),
-  enabled: z.boolean().default(true),
-  events: z.array(z.string().trim().min(1)).min(1),
-  repos: z.array(z.string().trim().min(1)).default([]),
-  reviewer: z.string().trim().min(1).nullable().default(null),
-  channel: z.string().trim().min(1).nullable().default(null),
-  allowBots: z.boolean().default(true),
-  skipSelfReview: z.boolean().default(true),
-  filters: RuleFiltersSchema.default(EMPTY_FILTERS),
-  maxConcurrent: z.number().int().min(0).default(DEFAULT_MAX_CONCURRENT),
-  projectId: z.string().trim().min(1).nullable().default(null),
-  workspace: z.enum(WORKSPACE_MODES).default("worktree"),
-  model: ModelSelectionSchema.nullable().default(null),
-  prompt: z.string().min(1),
-})
+export const RuleInput = Schema.Struct({
+  name: nonEmpty,
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  events: Schema.Array(nonEmpty).pipe(Schema.mutable).check(Schema.isMinLength(1)),
+  repos: names,
+  reviewer: optionalName,
+  channel: optionalName,
+  allowBots: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  skipSelfReview: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  filters: RuleFiltersSchema.pipe(Schema.withDecodingDefault(Effect.succeed(EMPTY_FILTERS))),
+  maxConcurrent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_MAX_CONCURRENT))),
+  projectId: optionalName,
+  workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
+  model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  prompt: Schema.String.check(Schema.isMinLength(1)),
+}).check(
   // One inbox source per rule keeps its filters and label suggestions to one provider.
-  .refine((rule) => new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1, {
-    message: "An inbox rule polls one source: pick GitHub or Linear inbox events, not both.",
-    path: ["events"],
-  }) satisfies z.ZodType<Omit<Rule, "id" | "createdAt" | "updatedAt">, unknown>;
-export type RuleInput = z.infer<typeof RuleInput>;
+  Schema.makeFilter((rule) =>
+    new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1
+      ? undefined
+      : { path: ["events"], issue: "An inbox rule polls one source: pick GitHub or Linear inbox events, not both." },
+  ),
+);
+export type RuleInput = typeof RuleInput.Type;
 
-const PollSourceSchema = z.object({
-  enabled: z.boolean(),
-  minutes: z.number().int().min(1).max(24 * 60),
+const PollSourceSchema = Schema.Struct({
+  enabled: Schema.Boolean,
+  minutes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(24 * 60)),
 });
 
-export const SettingsInput = z.object({
+export const SettingsInput = Schema.Struct({
   model: ModelSelectionSchema,
-  runtimeMode: z.enum(RUNTIME_MODES),
-  githubLogin: z
-    .string()
-    .trim()
-    .transform((login) => login.replace(/^@/, "") || null)
-    .nullable()
-    .default(null),
-  maxChangesRequestedRounds: z.number().int().min(0).default(3),
-  handoffPrompt: z.string().min(1).default(DEFAULT_HANDOFF_PROMPT),
-  reviewChannel: z
-    .string()
-    .trim()
-    .transform((channel) => channel || null)
-    .nullable()
-    .default(null),
-  reviewRequestMessage: z.string().min(1).default(DEFAULT_REVIEW_REQUEST_MESSAGE),
-  secondPassMessage: z.string().min(1).default(DEFAULT_SECOND_PASS_MESSAGE),
-  polling: z
-    .object({
-      github: PollSourceSchema,
-      linear: PollSourceSchema,
-    })
-    .default(DEFAULT_POLLING) satisfies z.ZodType<PollingSettings, unknown>,
-}) satisfies z.ZodType<Settings, unknown>;
+  runtimeMode: Schema.Literals(RUNTIME_MODES),
+  githubLogin: cleanedOrNull((login) => login.replace(/^@/, "")),
+  maxChangesRequestedRounds: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.withDecodingDefault(Effect.succeed(3))),
+  handoffPrompt: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFF_PROMPT))),
+  reviewChannel: cleanedOrNull((channel) => channel),
+  reviewRequestMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_REVIEW_REQUEST_MESSAGE))),
+  secondPassMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SECOND_PASS_MESSAGE))),
+  polling: Schema.Struct({ github: PollSourceSchema, linear: PollSourceSchema }).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING))),
+});
+export type SettingsInput = typeof SettingsInput.Type;
 
-export const TestThreadInput = z.object({ projectId: z.string().trim().min(1) });
+export const TestThreadInput = Schema.Struct({ projectId: nonEmpty });
 
-export const PromptInput = z.object({
-  name: z.string().trim().min(1),
-  body: z.string().min(1),
-}) satisfies z.ZodType<Omit<Prompt, "id" | "createdAt" | "updatedAt">, unknown>;
-export type PromptInput = z.infer<typeof PromptInput>;
+export const PromptInput = Schema.Struct({
+  name: nonEmpty,
+  body: Schema.String.check(Schema.isMinLength(1)),
+});
+export type PromptInput = typeof PromptInput.Type;
 
 /** A dispatch from the inbox view: one thread per item key, all with the same composed prompt. */
-export const DispatchInput = z.object({
-  keys: z.array(z.string().min(1)).min(1),
+export const DispatchInput = Schema.Struct({
+  keys: Schema.Array(Schema.String.check(Schema.isMinLength(1))).pipe(Schema.mutable).check(Schema.isMinLength(1)),
   /** Shown as the rule name in the run log, e.g. the preset names used. */
-  name: z.string().trim().min(1).default("dispatch"),
-  prompt: z.string().min(1),
-  projectId: z.string().trim().min(1).nullable().default(null),
-  workspace: z.enum(WORKSPACE_MODES).default("worktree"),
-  model: ModelSelectionSchema.nullable().default(null),
+  name: nonEmpty.pipe(Schema.withDecodingDefault(Effect.succeed("dispatch"))),
+  prompt: Schema.String.check(Schema.isMinLength(1)),
+  projectId: optionalName,
+  workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
+  model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   /** Threads started at once across dispatches from the inbox; the rest queue. 0 means all at once. */
-  maxConcurrent: z.number().int().min(0).default(DEFAULT_MAX_CONCURRENT),
+  maxConcurrent: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_MAX_CONCURRENT))),
 });
-export type DispatchInput = z.infer<typeof DispatchInput>;
+export type DispatchInput = typeof DispatchInput.Type;
 
 export const DEFAULT_SETTINGS: Settings = {
   model: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
@@ -127,3 +132,13 @@ export const DEFAULT_SETTINGS: Settings = {
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,
 };
+
+// The decoded payloads must be storable as rows: a schema that drifts from its table fails to compile here.
+type Extends<T extends U, U> = T;
+export type RowChecks = [
+  Extends<RuleInput, Omit<Rule, "id" | "createdAt" | "updatedAt">>,
+  Extends<SettingsInput, Settings>,
+  Extends<PromptInput, Omit<Prompt, "id" | "createdAt" | "updatedAt">>,
+  Extends<SettingsInput["polling"], PollingSettings>,
+  Extends<RuleInput["filters"], RuleFilters>,
+];

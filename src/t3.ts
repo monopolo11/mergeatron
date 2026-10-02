@@ -1,4 +1,11 @@
+import { Context, Data, Effect, Layer, Option, Redacted } from "effect";
+import { identity } from "effect/Function";
+import { HttpClient, HttpClientRequest } from "effect/http";
+import { Socket } from "effect/socket";
+import { join } from "node:path";
+import { AppConfig } from "./config.ts";
 import { logger } from "./log.ts";
+import { memoSuccess } from "./memo.ts";
 import type { ModelSelection } from "./rules.ts";
 import type { RuntimeMode } from "./shared.ts";
 
@@ -95,7 +102,9 @@ export type StartThreadInput = {
   pullRequest: { repository: string; number: number; url: string } | null;
 };
 
-/** Effect RPC JSON envelopes we care about (effect/unstable/rpc/RpcMessage). */
+export type StartedThread = { threadId: string; threadUrl: string };
+
+/** Effect RPC JSON envelopes we care about (effect/rpc/RpcMessage). */
 type RpcExit =
   | { _tag: "Success"; value: unknown }
   | { _tag: "Failure"; cause: unknown };
@@ -105,85 +114,125 @@ type RpcMessage =
   | { _tag: "Defect"; defect: unknown }
   | { _tag: string };
 
-/** Non-2xx reply from T3's HTTP API; `status` lets callers tell "gone" (404) from "flaky". */
-export class T3HttpError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-    this.name = "T3HttpError";
-  }
-}
+/** Non-2xx reply from T3's HTTP API, or no reply at all (`status` 0); `status` lets callers tell "gone" (404) from "flaky". */
+export class T3HttpError extends Data.TaggedError("T3HttpError")<{ readonly status: number; readonly message: string }> {}
+/** The WebSocket RPC did not answer with a success: a failure exit, a defect, a dropped socket or a timeout. */
+export class T3RpcError extends Data.TaggedError("T3RpcError")<{ readonly message: string }> {}
+export type T3Error = T3HttpError | T3RpcError;
 
-const DISPATCH_TIMEOUT_MS = 10 * 60_000;
+const DISPATCH_TIMEOUT = "10 minutes";
+const PROVIDERS_CACHE = "30 seconds";
+const DEFAULT_ORIGIN = "http://127.0.0.1:3773";
 
-const PROVIDERS_CACHE_MS = 30_000;
-
-export class T3Client {
-  private environmentPromise: Promise<T3Environment> | null = null;
-  private providersCache: { at: number; value: T3Provider[] } | null = null;
-
-  constructor(
-    readonly origin: string,
-    private readonly token: string,
-  ) {}
-
+export type T3Shape = {
+  readonly origin: string;
   /** Public descriptor; cached because the environment id never changes while the server runs. */
-  environment(): Promise<T3Environment> {
-    this.environmentPromise ??= this.request<T3Environment>("GET", "/.well-known/t3/environment", {
-      authenticated: false,
-    }).catch((error) => {
-      this.environmentPromise = null;
-      throw error;
-    });
-    return this.environmentPromise;
-  }
-
-  async projects(): Promise<T3Project[]> {
-    const snapshot = await this.request<{ projects: T3Project[] }>("GET", "/api/orchestration/snapshot");
-    return snapshot.projects.filter((project) => project.deletedAt === null);
-  }
-
+  readonly environment: Effect.Effect<T3Environment, T3HttpError>;
+  readonly projects: () => Effect.Effect<T3Project[], T3HttpError>;
   /** Provider instances with their model lists, from `server.getConfig`. Cached briefly: the config payload is large. */
-  async providers(): Promise<T3Provider[]> {
-    if (this.providersCache && Date.now() - this.providersCache.at < PROVIDERS_CACHE_MS) {
-      return this.providersCache.value;
-    }
-    const config = await this.rpc<ServerConfig>("server.getConfig", {});
-    const value = config.providers.map((provider) => ({
-      instanceId: provider.instanceId,
-      driver: provider.driver,
-      displayName: provider.displayName ?? provider.instanceId,
-      enabled: provider.enabled,
-      status: provider.status,
-      models: provider.models.map((model) => ({
-        slug: model.slug,
-        name: model.name,
-        isDefault: model.isDefault === true,
-        isLegacy: model.isLegacy === true,
-      })),
-    }));
-    this.providersCache = { at: Date.now(), value };
-    return value;
-  }
-
+  readonly providers: () => Effect.Effect<T3Provider[], T3Error>;
   /** Latest turn of a thread with only that turn's messages (`turnLimit=1`). */
-  async thread(threadId: string): Promise<T3ThreadTurn> {
-    const snapshot = await this.request<{ thread: T3ThreadTurn }>(
-      "GET",
-      `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`,
-    );
-    return snapshot.thread;
-  }
-
+  readonly thread: (threadId: string) => Effect.Effect<T3ThreadTurn, T3HttpError>;
   /** Creates the thread (and worktree, when asked), sends the prompt, links the PR. */
-  async startThread(input: StartThreadInput) {
+  readonly startThread: (input: StartThreadInput) => Effect.Effect<StartedThread, T3Error>;
+};
+
+/** Builds the client for one origin and token. Needs an `HttpClient` and a `WebSocketConstructor`. */
+export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: string) {
+  const client = yield* HttpClient.HttpClient;
+  const sockets = yield* Socket.WebSocketConstructor;
+  const decoder = new TextDecoder();
+
+  const request = <T>(method: "GET" | "POST", path: string, options: { authenticated?: boolean } = {}): Effect.Effect<T, T3HttpError> =>
+    Effect.gen(function* () {
+      const response = yield* client.execute(
+        HttpClientRequest.make(method)(`${origin}${path}`).pipe(options.authenticated === false ? identity : HttpClientRequest.bearerToken(token)),
+      );
+      if (response.status < 200 || response.status >= 300) {
+        const body = yield* response.text;
+        return yield* Effect.fail(new T3HttpError({ status: response.status, message: `T3 ${method} ${path} failed: ${response.status} ${body}` }));
+      }
+      return (yield* response.json) as T;
+    }).pipe(Effect.catchTag("HttpClientError", (error) => Effect.fail(new T3HttpError({ status: 0, message: `T3 ${method} ${path} failed: ${error.message}` }))));
+
+  /**
+   * One RPC request per socket. The socket stays open until the server
+   * replies: closing early would cancel an in-flight worktree bootstrap.
+   */
+  const rpc = <T>(tag: string, payload: Record<string, unknown>): Effect.Effect<T, T3Error> =>
+    Effect.gen(function* () {
+      const { ticket } = yield* request<{ ticket: string }>("POST", "/api/auth/websocket-ticket");
+      const url = new URL("/ws", origin);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("wsTicket", ticket);
+      const what = tag === "orchestration.dispatchCommand" ? `dispatch ${String(payload.type)}` : tag;
+      const fail = (message: string) => new T3RpcError({ message: `T3 ${what} failed: ${message}` });
+
+      const socket = yield* Socket.makeWebSocket(url.toString()).pipe(Effect.provideService(Socket.WebSocketConstructor, sockets));
+      const exchange = Effect.gen(function* () {
+        const writer = yield* socket.writer;
+        const reader = yield* socket.reader;
+        yield* writer.write(JSON.stringify({ _tag: "Request", id: "1", tag, payload, headers: [] }));
+        for (;;) {
+          const frames = yield* reader.pull;
+          for (const frame of frames) {
+            const decoded = yield* Effect.try({
+              try: () => JSON.parse(typeof frame === "string" ? frame : decoder.decode(frame)) as RpcMessage | RpcMessage[],
+              catch: () => fail("unreadable reply"),
+            });
+            for (const message of Array.isArray(decoded) ? decoded : [decoded]) {
+              if (message._tag === "Ping") {
+                yield* writer.write(JSON.stringify({ _tag: "Pong" }));
+              } else if (message._tag === "Exit" && "exit" in message) {
+                if (message.exit._tag === "Success") return message.exit.value as T;
+                return yield* Effect.fail(fail(JSON.stringify(message.exit.cause)));
+              } else if (message._tag === "Defect" && "defect" in message) {
+                return yield* Effect.fail(fail(JSON.stringify(message.defect)));
+              }
+            }
+          }
+        }
+      });
+      return yield* exchange.pipe(
+        Effect.scoped,
+        Effect.timeout(DISPATCH_TIMEOUT),
+        Effect.catchTags({
+          SocketError: (error) => Effect.fail(fail(error.message)),
+          TimeoutError: () => Effect.fail(fail(`no reply after ${DISPATCH_TIMEOUT}`)),
+        }),
+      );
+    }).pipe(Effect.withSpan("t3.rpc", { attributes: { tag } }));
+
+  const environment = yield* memoSuccess(request<T3Environment>("GET", "/.well-known/t3/environment", { authenticated: false }));
+
+  const providers = yield* memoSuccess(
+    Effect.map(rpc<ServerConfig>("server.getConfig", {}), (config): T3Provider[] =>
+      config.providers.map((provider) => ({
+        instanceId: provider.instanceId,
+        driver: provider.driver,
+        displayName: provider.displayName ?? provider.instanceId,
+        enabled: provider.enabled,
+        status: provider.status,
+        models: provider.models.map((model) => ({
+          slug: model.slug,
+          name: model.name,
+          isDefault: model.isDefault === true,
+          isLegacy: model.isLegacy === true,
+        })),
+      })),
+    ),
+    PROVIDERS_CACHE,
+  );
+
+  const dispatch = (command: Record<string, unknown>) => rpc<{ sequence: number }>("orchestration.dispatchCommand", command);
+
+  const startThread = Effect.fn("t3.startThread")(function* (input: StartThreadInput) {
     const threadId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const prepareWorktree = input.worktree && input.baseBranch !== null;
+    yield* Effect.annotateCurrentSpan({ project: input.project.id, thread: threadId, worktree: prepareWorktree });
 
-    await this.dispatch({
+    yield* dispatch({
       type: "thread.turn.start",
       commandId: crypto.randomUUID(),
       threadId,
@@ -227,7 +276,7 @@ export class T3Client {
 
     if (input.pullRequest) {
       // Best effort: the thread is already running, a failed link is only cosmetic.
-      await this.dispatch({
+      yield* dispatch({
         type: "thread.pull-request.link",
         commandId: crypto.randomUUID(),
         threadId,
@@ -236,88 +285,50 @@ export class T3Client {
         number: input.pullRequest.number,
         url: input.pullRequest.url,
         source: "manual",
-      }).catch((error: unknown) => {
-        log.warn("pull request link failed", { thread: threadId, error });
-      });
+      }).pipe(Effect.catch((error) => log.warn("pull request link failed", { thread: threadId, error: error.message })));
     }
 
-    const { environmentId } = await this.environment();
-    return { threadId, threadUrl: `${this.origin}/${environmentId}/${threadId}` };
-  }
+    const { environmentId } = yield* environment;
+    return { threadId, threadUrl: `${origin}/${environmentId}/${threadId}` };
+  });
 
-  private dispatch(command: Record<string, unknown>): Promise<{ sequence: number }> {
-    return this.rpc("orchestration.dispatchCommand", command);
-  }
+  const shape: T3Shape = {
+    origin,
+    environment,
+    projects: () =>
+      Effect.map(request<{ projects: T3Project[] }>("GET", "/api/orchestration/snapshot"), (snapshot) =>
+        snapshot.projects.filter((project) => project.deletedAt === null),
+      ),
+    providers: () => providers,
+    thread: (threadId) =>
+      Effect.map(request<{ thread: T3ThreadTurn }>("GET", `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`), (snapshot) => snapshot.thread),
+    startThread,
+  };
+  return shape;
+});
 
-  /**
-   * One RPC request per socket. The socket stays open until the server
-   * replies: closing early would cancel an in-flight worktree bootstrap.
-   */
-  private async rpc<T>(tag: string, payload: Record<string, unknown>): Promise<T> {
-    const { ticket } = await this.request<{ ticket: string }>("POST", "/api/auth/websocket-ticket");
-    const url = new URL("/ws", this.origin);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.searchParams.set("wsTicket", ticket);
+/** `T3_ORIGIN`, else the origin the running desktop/server wrote to server-runtime.json, else T3's default port. */
+const resolveOrigin = (config: Context.Service.Shape<typeof AppConfig>) =>
+  Option.match(config.t3Origin, {
+    onSome: Effect.succeed,
+    onNone: () =>
+      Effect.tryPromise(async () => {
+        const runtime = Bun.file(join(config.t3Home, "userdata", "server-runtime.json"));
+        if (!(await runtime.exists())) return null;
+        const state = (await runtime.json()) as { origin?: string };
+        return state.origin ?? null;
+      }).pipe(
+        Effect.orElseSucceed(() => null),
+        Effect.map((origin) => origin ?? DEFAULT_ORIGIN),
+      ),
+  });
 
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
-      let settled = false;
-      const finish = (outcome: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        outcome();
-        ws.close();
-      };
-      const what = tag === "orchestration.dispatchCommand" ? `dispatch ${String(payload.type)}` : tag;
-      const fail = (message: string) => finish(() => reject(new Error(`T3 ${what} failed: ${message}`)));
-      const timer = setTimeout(() => fail(`no reply after ${DISPATCH_TIMEOUT_MS / 1000}s`), DISPATCH_TIMEOUT_MS);
-
-      ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            _tag: "Request",
-            id: "1",
-            tag,
-            payload,
-            headers: [],
-          }),
-        );
-      };
-      ws.onmessage = (event) => {
-        const decoded: RpcMessage | RpcMessage[] = JSON.parse(String(event.data));
-        for (const message of Array.isArray(decoded) ? decoded : [decoded]) {
-          if (message._tag === "Ping") {
-            ws.send(JSON.stringify({ _tag: "Pong" }));
-          } else if (message._tag === "Exit" && "exit" in message) {
-            const exit = message.exit;
-            if (exit._tag === "Success") {
-              finish(() => resolve(exit.value as T));
-            } else {
-              fail(JSON.stringify(exit.cause));
-            }
-          } else if (message._tag === "Defect" && "defect" in message) {
-            fail(JSON.stringify(message.defect));
-          }
-        }
-      };
-      ws.onerror = () => fail("websocket error");
-      ws.onclose = (event) => fail(`socket closed (${event.code}) before a reply`);
-    });
-  }
-
-  private async request<T>(
-    method: "GET" | "POST",
-    path: string,
-    options: { authenticated?: boolean } = {},
-  ): Promise<T> {
-    const response = await fetch(`${this.origin}${path}`, {
-      method,
-      headers: options.authenticated === false ? {} : { authorization: `Bearer ${this.token}` },
-    });
-    if (!response.ok) {
-      throw new T3HttpError(response.status, `T3 ${method} ${path} failed: ${response.status} ${await response.text()}`);
-    }
-    return (await response.json()) as T;
-  }
+export class T3 extends Context.Service<T3, T3Shape>()("T3") {
+  static readonly layer = Layer.effect(
+    this,
+    Effect.gen(function* () {
+      const config = yield* AppConfig;
+      return yield* makeT3(yield* resolveOrigin(config), Redacted.value(config.t3Token));
+    }),
+  );
 }

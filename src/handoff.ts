@@ -1,13 +1,21 @@
+import { Cause, Data, Effect } from "effect";
+import { Background } from "./background.ts";
 import { changesRequestedStreak, watchCompletion } from "./completion.ts";
+import { errorMessage } from "./errors.ts";
 import type { WebhookContext } from "./github.ts";
-import { openThread, resolveProject, type HandlerDeps } from "./handler.ts";
+import { openThread, resolveProject } from "./handler.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
-import { slackOrigin } from "./slack.ts";
+import { SlackClient, slackOrigin } from "./slack.ts";
+import { Store } from "./store.ts";
+import { T3 } from "./t3.ts";
 import { renderTemplate } from "./template.ts";
 
 const log = logger("handoff");
+
+/** The handoff thread could not be opened: the review's rule or project is gone. */
+export class HandoffError extends Data.TaggedError("HandoffError")<{ readonly message: string }> {}
 
 /**
  * Called when a review settles. When it is the Nth change request in a row
@@ -17,18 +25,21 @@ const log = logger("handoff");
  * over. Runs exactly at N, so a "second pass" past the limit does not write a
  * second handoff. Slack-triggered PRs get told in their thread.
  */
-export function handoffIfStuck(deps: HandlerDeps, review: Run): void {
+export const handoffIfStuck = Effect.fn("handoff.ifStuck")(function* (review: Run) {
   const ctx = review.context;
   const prNumber = ctx?.pr_number;
   if (!ctx || !review.repo || !prNumber) return;
-  const limit = deps.store.getSettings().maxChangesRequestedRounds;
+  const store = yield* Store;
+  const slack = yield* SlackClient;
+  const background = yield* Background;
+  const limit = (yield* store.getSettings()).maxChangesRequestedRounds;
   if (limit <= 0) return;
-  const rounds = changesRequestedStreak(deps.store.finishedRunsForPullRequest(review.repo, prNumber));
+  const rounds = changesRequestedStreak(yield* store.finishedRunsForPullRequest(review.repo, prNumber));
   if (rounds.length !== limit) return;
 
   const at = { repo: review.repo, pr: prNumber, rounds: rounds.length, review: review.id };
-  log.warn("review stuck: pausing reviews and writing a handoff", at);
-  const run = deps.store.recordRun({
+  yield* log.warn("review stuck: pausing reviews and writing a handoff", at);
+  const run = yield* store.recordRun({
     // Not a rule's run: the log shows it as "handoff", like "manual" for connection tests.
     ruleId: "handoff",
     ruleName: "handoff",
@@ -46,38 +57,47 @@ export function handoffIfStuck(deps: HandlerDeps, review: Run): void {
     action: null,
   });
   const origin = slackOrigin(ctx);
-  const tell = (text: string) => {
-    if (!origin || !deps.slack) return;
-    deps.slack.reply(origin, text).catch((error: unknown) => log.warn("slack reply failed", { ...at, error }));
-  };
-  tell(`Automated review paused: ${rounds.length} reviews in a row requested changes. Writing a handoff document; a "second pass" mention reviews anyway.`);
+  const tell = (text: string) =>
+    origin ? slack.reply(origin, text).pipe(Effect.catch((error) => log.warn("slack reply failed", { ...at, error: error.message }))) : Effect.void;
+  yield* tell(`Automated review paused: ${rounds.length} reviews in a row requested changes. Writing a handoff document; a "second pass" mention reviews anyway.`);
 
-  void startHandoff(deps, review, ctx as WebhookContext, rounds).then(
-    (result) => {
-      log.info("handoff thread started", { ...at, thread: result.threadId });
-      deps.store.updateRun(run.id, result);
-      watchCompletion(deps, { ...run, threadId: result.threadId });
-    },
-    (error: unknown) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      log.error("handoff failed to start", { ...at, error: detail });
-      deps.store.updateRun(run.id, { status: "failed", detail });
-      tell(`Handoff not written: ${detail}`);
-    },
+  yield* background.fork(
+    startHandoff(review, ctx as WebhookContext, rounds).pipe(
+      Effect.flatMap((result) =>
+        Effect.gen(function* () {
+          yield* log.info("handoff thread started", { ...at, thread: result.threadId });
+          yield* store.updateRun(run.id, result);
+          yield* watchCompletion({ ...run, threadId: result.threadId });
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.gen(function* () {
+          if (Cause.hasInterruptsOnly(cause)) return;
+          const detail = errorMessage(Cause.squash(cause));
+          yield* log.error("handoff failed to start", { ...at, error: detail });
+          yield* store.updateRun(run.id, { status: "failed", detail });
+          yield* tell(`Handoff not written: ${detail}`);
+        }),
+      ),
+      Effect.withSpan("handoff.start", { attributes: at }),
+    ),
   );
-}
+});
 
 /** Opens the handoff thread in the project and workspace of the rule that ran the last review. */
-async function startHandoff(deps: HandlerDeps, review: Run, ctx: WebhookContext, rounds: Run[]) {
-  const rule = deps.store.getRule(review.ruleId);
-  if (!rule) throw new Error(`rule "${review.ruleName}" no longer exists`);
-  const project = resolveProject(rule, await deps.t3.projects(), ctx.repo);
-  if (!project) throw new Error(`no T3 project for ${ctx.repo}`);
-  return openThread(deps, rule, project, ctx, {
-    title: `Handoff: ${ctx.pr_title ?? ctx.pr_url ?? ctx.repo}`,
-    prompt: handoffPrompt(deps.store.getSettings().handoffPrompt, ctx, rounds),
+const startHandoff = (review: Run, ctx: WebhookContext, rounds: Run[]) =>
+  Effect.gen(function* () {
+    const store = yield* Store;
+    const t3 = yield* T3;
+    const rule = yield* store.getRule(review.ruleId);
+    if (!rule) return yield* Effect.fail(new HandoffError({ message: `rule "${review.ruleName}" no longer exists` }));
+    const project = resolveProject(rule, yield* t3.projects(), ctx.repo);
+    if (!project) return yield* Effect.fail(new HandoffError({ message: `no T3 project for ${ctx.repo}` }));
+    return yield* openThread(rule, project, ctx, {
+      title: `Handoff: ${ctx.pr_title ?? ctx.pr_url ?? ctx.repo}`,
+      prompt: handoffPrompt((yield* store.getSettings()).handoffPrompt, ctx, rounds),
+    });
   });
-}
 
 /**
  * First message of the handoff thread: the template from Settings with the PR

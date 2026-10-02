@@ -1,4 +1,7 @@
+import { Effect } from "effect";
+import { HttpClient, HttpClientRequest } from "effect/http";
 import type { InboxLabel, PolledItem } from "./inbox.ts";
+import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
 import { logger } from "./log.ts";
 import type { InboxReason } from "./shared.ts";
 
@@ -83,54 +86,53 @@ type LabelsResult = {
 /** Workflow state types that mean the issue is over; `duplicate` is its own type in Linear, not a kind of canceled. */
 const DONE_STATES = new Set(["completed", "canceled", "duplicate"]);
 
-export class LinearInbox {
-  constructor(
-    private readonly apiKey: string,
-    /** GraphQL transport; injectable for tests. */
-    private readonly query: <T>(apiKey: string, query: string, variables?: Record<string, unknown>) => Promise<T> = linearGraphql,
-  ) {}
+/** GraphQL transport bound to an API key; the live one uses the HttpClient, tests inject fakes. */
+export type LinearQuery = <T>(query: string, variables?: Record<string, unknown>) => Effect.Effect<T, InboxSourceError>;
 
-  async fetch(): Promise<{ login: string | null; items: PolledItem[] }> {
-    const mine = await this.query<MineResult>(this.apiKey, MINE_QUERY);
-    const me = mine.viewer.id;
-    const items = new Map<string, PolledItem>();
-    for (const issue of mine.issues.nodes) {
-      const reasons: InboxReason[] = [];
-      if (issue.assignee?.id === me) reasons.push("assigned");
-      if (issue.creator?.id === me) reasons.push("authored");
-      items.set(issue.identifier, linearItem(issue, reasons));
-    }
-    // Mentions are best effort: the notifications query failing should not hide assigned work.
-    try {
-      const mentions = await this.query<MentionsResult>(this.apiKey, MENTIONS_QUERY);
-      for (const node of mentions.notifications.nodes) {
-        const issue = node.issue;
-        if (!issue || DONE_STATES.has(issue.state.type)) continue;
-        const existing = items.get(issue.identifier);
-        if (existing) {
-          if (!existing.reasons.includes("mentioned")) existing.reasons.push("mentioned");
-        } else {
-          items.set(issue.identifier, linearItem(issue, ["mentioned"]));
+export function makeLinearInbox(query: LinearQuery): InboxSourceClient {
+  return {
+    fetch: () =>
+      Effect.gen(function* () {
+        const mine = yield* query<MineResult>(MINE_QUERY);
+        const me = mine.viewer.id;
+        const items = new Map<string, PolledItem>();
+        for (const issue of mine.issues.nodes) {
+          const reasons: InboxReason[] = [];
+          if (issue.assignee?.id === me) reasons.push("assigned");
+          if (issue.creator?.id === me) reasons.push("authored");
+          items.set(issue.identifier, linearItem(issue, reasons));
         }
-      }
-    } catch (error) {
-      log.warn("notifications query failed; inbox has assigned and created issues only", { error });
-    }
-    return { login: mine.viewer.displayName, items: [...items.values()] };
-  }
+        // Mentions are best effort: the notifications query failing should not hide assigned work.
+        const mentions = yield* query<MentionsResult>(MENTIONS_QUERY).pipe(
+          Effect.catch((error) => log.warn("notifications query failed; inbox has assigned and created issues only", { error: error.message }).pipe(Effect.as(null))),
+        );
+        for (const node of mentions?.notifications.nodes ?? []) {
+          const issue = node.issue;
+          if (!issue || DONE_STATES.has(issue.state.type)) continue;
+          const existing = items.get(issue.identifier);
+          if (existing) {
+            if (!existing.reasons.includes("mentioned")) existing.reasons.push("mentioned");
+          } else {
+            items.set(issue.identifier, linearItem(issue, ["mentioned"]));
+          }
+        }
+        return { login: mine.viewer.displayName, items: [...items.values()] };
+      }).pipe(Effect.withSpan("linear.inbox.fetch")),
 
-  /** Every label issues can carry, scoped to its team or null for workspace labels. Linear has no repositories to cover. */
-  async labels(): Promise<InboxLabel[]> {
-    const labels: InboxLabel[] = [];
-    let after: string | null = null;
-    for (let page = 0; page < MAX_LABEL_PAGES; page++) {
-      const { issueLabels }: LabelsResult = await this.query<LabelsResult>(this.apiKey, LABELS_QUERY, { after });
-      for (const label of issueLabels.nodes) if (!label.isGroup) labels.push({ name: label.name, scope: label.team?.key ?? null });
-      after = issueLabels.pageInfo.endCursor;
-      if (!issueLabels.pageInfo.hasNextPage || !after) break;
-    }
-    return labels;
-  }
+    /** Every label issues can carry, scoped to its team or null for workspace labels. Linear has no repositories to cover. */
+    labels: () =>
+      Effect.gen(function* () {
+        const labels: InboxLabel[] = [];
+        let after: string | null = null;
+        for (let page = 0; page < MAX_LABEL_PAGES; page++) {
+          const { issueLabels }: LabelsResult = yield* query<LabelsResult>(LABELS_QUERY, { after });
+          for (const label of issueLabels.nodes) if (!label.isGroup) labels.push({ name: label.name, scope: label.team?.key ?? null });
+          after = issueLabels.pageInfo.endCursor;
+          if (!issueLabels.pageInfo.hasNextPage || !after) break;
+        }
+        return labels;
+      }).pipe(Effect.withSpan("linear.inbox.labels")),
+  };
 }
 
 export function linearItem(issue: LinearIssue, reasons: InboxReason[]): PolledItem {
@@ -161,16 +163,23 @@ export function linearItem(issue: LinearIssue, reasons: InboxReason[]): PolledIt
   };
 }
 
-async function linearGraphql<T>(apiKey: string, query: string, variables?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(LINEAR_API, {
-    method: "POST",
-    headers: { authorization: apiKey, "content-type": "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  const body = (await response.json().catch(() => null)) as { data?: T; errors?: { message: string }[] } | null;
-  if (!response.ok || !body?.data) {
-    const detail = body?.errors?.map((e) => e.message).join("; ") || `${response.status} ${response.statusText}`;
-    throw new Error(`Linear API failed: ${detail}`);
-  }
-  return body.data;
-}
+const failed = (message: string) => new InboxSourceError({ source: "linear", message: `Linear API failed: ${message}` });
+
+/** The live transport over the HttpClient. */
+export const linearTransport = (apiKey: string): Effect.Effect<LinearQuery, never, HttpClient.HttpClient> =>
+  Effect.map(HttpClient.HttpClient, (client): LinearQuery => (query, variables) =>
+    Effect.gen(function* () {
+      const response = yield* client.execute(
+        HttpClientRequest.post(LINEAR_API).pipe(HttpClientRequest.setHeaders({ authorization: apiKey }), HttpClientRequest.bodyJsonUnsafe({ query, variables })),
+      );
+      const body = (yield* response.json.pipe(Effect.orElseSucceed(() => null))) as { data?: unknown; errors?: { message: string }[] } | null;
+      if (response.status < 200 || response.status >= 300 || !body?.data) {
+        const detail = body?.errors?.map((e) => e.message).join("; ") || `${response.status}`;
+        return yield* Effect.fail(failed(detail));
+      }
+      return body.data;
+    }).pipe(Effect.catchTag("HttpClientError", (error) => Effect.fail(failed(error.message)))) as never,
+  );
+
+/** The Linear inbox source as the poller uses it. */
+export const LinearInbox = { make: makeLinearInbox, live: (apiKey: string) => Effect.map(linearTransport(apiKey), makeLinearInbox) };

@@ -18,6 +18,8 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@effect/opentelemetry": "4.0.0",
+    "@effect/platform-bun": "4.0.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "@tanstack/react-query": "^5.103.2",
     "@tanstack/react-router": "1.170.18",
@@ -25,6 +27,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
+    "effect": "4.0.0",
     "lucide-react": "^1.47.0",
     "radix-ui": "^1.6.7",
     "react": "^19.3.0",

@@ -1,16 +1,15 @@
+import { Context, Data, Effect, Layer } from "effect";
+import { ChildProcessSpawner } from "effect/process";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { $ } from "bun";
+import { exec, execOk } from "./exec.ts";
+import { logger } from "./log.ts";
 import { SERVICE_LABEL } from "./shared.ts";
+
+const log = logger("update");
 
 /** Repository root: the directory `index.ts` runs from. */
 const root = join(import.meta.dir, "..");
-
-/**
- * Commit this process loaded its code from. Updates compare against it rather
- * than the checkout's HEAD, so a pull made outside the UI still offers a restart.
- */
-const running = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: root }).stdout.toString().trim();
 
 /**
  * How this process gets the new code running once it is pulled:
@@ -40,6 +39,9 @@ export type UpdateStatus = {
 
 export type UpdateResult = { from: string; to: string; restart: RestartMode };
 
+/** The check or the update could not be done; the message is shown in the UI. */
+export class UpdateError extends Data.TaggedError("UpdateError")<{ readonly message: string }> {}
+
 /** Pure part of the check, split out for tests: git outputs in, status out. */
 export function summarize(
   git: { upstream: string; current: string; latest: string; log: string; changedFiles: string; dirty: string },
@@ -67,39 +69,89 @@ export function summarize(
   };
 }
 
-const run = (...args: string[]) => $`git ${args}`.cwd(root).text();
-
-/** Fetches the tracked upstream and reports what updating the running process would bring. */
-export async function checkForUpdate(): Promise<UpdateStatus> {
-  const upstream = (await run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")).trim();
-  const [remote, ...branch] = upstream.split("/");
-  await $`git fetch --quiet ${remote} ${branch.join("/")}`.cwd(root).quiet();
-  const [latest, log, changedFiles, dirty] = await Promise.all([
-    run("rev-parse", upstream),
-    run("log", "--format=%h %s", `${running}..@{u}`),
-    run("diff", "--name-only", `${running}...@{u}`),
-    run("status", "--porcelain", "--untracked-files=no"),
-  ]);
-  return summarize({ upstream, current: running, latest: latest.trim(), log, changedFiles, dirty }, await restartMode());
-}
+export type UpdaterShape = {
+  /** Fetches the tracked upstream and reports what updating the running process would bring. */
+  readonly check: Effect.Effect<UpdateStatus, UpdateError>;
+  /**
+   * Fast-forwards to the upstream just fetched (a no-op when the checkout was
+   * pulled already) and installs dependencies when the lockfile moved.
+   * Migrations are not run here: `openDatabase` applies them when the new code
+   * starts. Call `restart` once the HTTP response is on its way.
+   */
+  readonly apply: Effect.Effect<UpdateResult, UpdateError>;
+  /** Gets the pulled code running. Never returns in `launchd` and `respawn` modes. */
+  readonly restart: (mode: RestartMode) => Effect.Effect<void>;
+};
 
 /**
- * Fast-forwards to the upstream just fetched (a no-op when the checkout was
- * pulled already) and installs dependencies when the lockfile moved.
- * Migrations are not run here: `openDatabase` applies them when the new code
- * starts. Call `restart` once the HTTP response is on its way.
+ * Remembers the commit this process loaded its code from, so updates compare
+ * against it rather than the checkout's HEAD: a pull made outside the UI
+ * still offers a restart. Detects once whether launchd owns this pid.
  */
-export async function applyUpdate(): Promise<UpdateResult> {
-  const status = await checkForUpdate();
-  if (status.dirty) throw new Error("checkout has uncommitted changes; commit or discard them first");
-  if (status.commits.length === 0) throw new Error("already up to date");
-  await $`git merge --ff-only --quiet @{u}`.cwd(root).quiet();
-  if (status.dependencies) await $`bun install --frozen-lockfile`.cwd(root).quiet();
-  return { from: status.current, to: status.latest, restart: status.restart };
-}
+const makeUpdater = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const provide = Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner);
+  const git = (...args: string[]) =>
+    execOk("git", args, { cwd: root }).pipe(
+      provide,
+      Effect.map((output) => output.stdout),
+      Effect.mapError((error) => new UpdateError({ message: error.message })),
+    );
+  const running = (yield* git("rev-parse", "HEAD")).trim();
 
-/** Gets the pulled code running. Never returns in `launchd` and `respawn` modes. */
-export function restart(mode: RestartMode): void {
+  const restartMode = yield* Effect.cached(
+    Effect.gen(function* () {
+      if (process.execArgv.includes("--hot")) return "hot" as const;
+      if (process.platform === "darwin") {
+        const uid = process.getuid?.() ?? 501;
+        const print = yield* exec("launchctl", ["print", `gui/${uid}/${SERVICE_LABEL}`]).pipe(provide, Effect.orElseSucceed(() => null));
+        if (print?.exitCode === 0 && new RegExp(`^\\s*pid = ${process.pid}$`, "m").test(print.stdout)) return "launchd" as const;
+      }
+      return "respawn" as const;
+    }),
+  );
+
+  const check: UpdaterShape["check"] = Effect.gen(function* () {
+    const upstream = (yield* git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")).trim();
+    const [remote, ...branch] = upstream.split("/");
+    yield* git("fetch", "--quiet", remote ?? "origin", branch.join("/"));
+    const [latest, logLines, changedFiles, dirty, restart] = yield* Effect.all(
+      [
+        git("rev-parse", upstream),
+        git("log", "--format=%h %s", `${running}..@{u}`),
+        git("diff", "--name-only", `${running}...@{u}`),
+        git("status", "--porcelain", "--untracked-files=no"),
+        restartMode,
+      ],
+      { concurrency: "unbounded" },
+    );
+    return summarize({ upstream, current: running, latest: latest.trim(), log: logLines, changedFiles, dirty }, restart);
+  }).pipe(Effect.withSpan("update.check"));
+
+  const apply: UpdaterShape["apply"] = Effect.gen(function* () {
+    const status = yield* check;
+    if (status.dirty) return yield* Effect.fail(new UpdateError({ message: "checkout has uncommitted changes; commit or discard them first" }));
+    if (status.commits.length === 0) return yield* Effect.fail(new UpdateError({ message: "already up to date" }));
+    yield* git("merge", "--ff-only", "--quiet", "@{u}");
+    if (status.dependencies) {
+      yield* execOk("bun", ["install", "--frozen-lockfile"], { cwd: root }).pipe(provide, Effect.mapError((error) => new UpdateError({ message: error.message })));
+    }
+    return { from: status.current, to: status.latest, restart: status.restart };
+  }).pipe(Effect.withSpan("update.apply"));
+
+  const shape: UpdaterShape = {
+    check,
+    apply,
+    restart: (mode) =>
+      Effect.gen(function* () {
+        yield* log.info("restarting", { mode });
+        restart(mode);
+      }),
+  };
+  return shape;
+});
+
+function restart(mode: RestartMode): void {
   if (mode === "hot") return;
   if (mode === "respawn") {
     // Give this process a moment to release the port before the replacement binds it.
@@ -115,19 +167,6 @@ export function restart(mode: RestartMode): void {
   process.exit(1);
 }
 
-let detectedRestartMode: Promise<RestartMode> | null = null;
-
-/** Detected once: launchd owns this pid, or `--hot` is on, or neither. */
-export function restartMode(): Promise<RestartMode> {
-  return (detectedRestartMode ??= detect());
-}
-
-async function detect(): Promise<RestartMode> {
-  if (process.execArgv.includes("--hot")) return "hot";
-  if (process.platform === "darwin") {
-    const uid = process.getuid?.() ?? 501;
-    const print = await $`launchctl print gui/${uid}/${SERVICE_LABEL}`.quiet().nothrow();
-    if (print.exitCode === 0 && new RegExp(`^\\s*pid = ${process.pid}$`, "m").test(print.stdout.toString())) return "launchd";
-  }
-  return "respawn";
+export class Updater extends Context.Service<Updater, UpdaterShape>()("Updater") {
+  static readonly layer = Layer.effect(this, makeUpdater);
 }

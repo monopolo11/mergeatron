@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { GITHUB_SEARCHES, GitHubInbox, mergeItems, parseSearchNodes } from "./githubInbox.ts";
+import { Effect } from "effect";
+import { GITHUB_SEARCHES, makeGitHubInbox, mergeItems, parseSearchNodes, type SearchResult } from "./githubInbox.ts";
+import { InboxSourceError } from "./inboxSource.ts";
+import { failureOf } from "./testing.ts";
 
 const repository = { nameWithOwner: "acme/widgets", url: "https://github.com/acme/widgets", defaultBranchRef: { name: "main" } };
 const prNode = {
@@ -34,6 +37,8 @@ const issueNode = {
   labels: { nodes: [] },
 };
 
+const failed = (message: string) => Effect.fail(new InboxSourceError({ source: "github", message }));
+
 describe("parseSearchNodes", () => {
   test("maps PRs and issues, marks drafts, skips unknown nodes", () => {
     const [pr, issue] = parseSearchNodes([prNode, issueNode, {}], "assigned");
@@ -58,13 +63,17 @@ describe("mergeItems", () => {
 describe("GitHubInbox.fetch", () => {
   test("runs one search per reason and merges", async () => {
     const asked: string[] = [];
-    const inbox = new GitHubInbox(async (_query, q) => {
-      asked.push(q);
-      return { data: { viewer: { login: "me" }, search: { nodes: q.includes("review-requested") ? [prNode] : q.includes("assignee") ? [issueNode, prNode] : [] } } };
+    const inbox = makeGitHubInbox({
+      search: (_query, q) =>
+        Effect.sync((): SearchResult => {
+          asked.push(q);
+          return { data: { viewer: { login: "me" }, search: { nodes: q.includes("review-requested") ? [prNode] : q.includes("assignee") ? [issueNode, prNode] : [] } } };
+        }),
+      repoLabels: () => Effect.succeed([]),
     });
-    const { login, items } = await inbox.fetch();
+    const { login, items } = await Effect.runPromise(inbox.fetch());
     expect(login).toBe("me");
-    expect(asked).toEqual(GITHUB_SEARCHES.map((search) => search.q));
+    expect(asked.toSorted()).toEqual(GITHUB_SEARCHES.map((search) => search.q).toSorted());
     expect(items.map((item) => [item.identifier, item.reasons])).toEqual([
       ["#42", ["review_requested", "assigned"]],
       ["#7", ["assigned"]],
@@ -72,18 +81,19 @@ describe("GitHubInbox.fetch", () => {
   });
 
   test("surfaces GraphQL errors", async () => {
-    const inbox = new GitHubInbox(async () => ({ errors: [{ message: "bad credentials" }] }));
-    await expect(inbox.fetch()).rejects.toThrow("bad credentials");
+    const inbox = makeGitHubInbox({ search: () => Effect.succeed({ errors: [{ message: "bad credentials" }] }), repoLabels: () => Effect.succeed([]) });
+    const error = await Effect.runPromise(failureOf(inbox.fetch()));
+    expect(error.message).toContain("bad credentials");
   });
 });
 
 describe("GitHubInbox.labels", () => {
   test("lists each repo's labels and leaves out repos that fail", async () => {
-    const inbox = new GitHubInbox(undefined, async (repo) => {
-      if (repo === "acme/gone") throw new Error("HTTP 404");
-      return ["bug", "ready"];
+    const inbox = makeGitHubInbox({
+      search: () => failed("unused"),
+      repoLabels: (repo) => (repo === "acme/gone" ? failed("HTTP 404") : Effect.succeed(["bug", "ready"])),
     });
-    expect(await inbox.labels(["acme/widgets", "acme/gone"])).toEqual([
+    expect(await Effect.runPromise(inbox.labels(["acme/widgets", "acme/gone"]))).toEqual([
       { name: "bug", scope: "acme/widgets" },
       { name: "ready", scope: "acme/widgets" },
     ]);

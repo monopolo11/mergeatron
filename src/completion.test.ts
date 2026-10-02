@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { Effect } from "effect";
 import { QUIET_MS, changesRequestedStreak, openTasks, pausedReview, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
-import { openDatabase } from "./db/index.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
-import { SlackApiError } from "./slack.ts";
+import { SlackApiError, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import type { T3ThreadTurn } from "./t3.ts";
+import { failureOf, runWith, testLayer } from "./testing.ts";
 
 const T0 = Date.parse("2026-09-21T22:56:00.000Z");
 const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
@@ -108,35 +109,38 @@ describe("reviewVerdict", () => {
 });
 
 describe("reactVerdict", () => {
-  const origin = { channel: "C1", ts: "1.0", thread: "1.0" };
+  const origin: SlackOrigin = { channel: "C1", ts: "1.0", thread: "1.0" };
   const recorder = (reject: string[] = []) => {
     const names: string[] = [];
     return {
       names,
-      react: async (_origin: typeof origin, name: string) => {
-        names.push(name);
-        if (reject.includes(name)) throw new SlackApiError("reactions.add", "invalid_name");
-      },
+      react: (_origin: SlackOrigin, name: string) =>
+        Effect.suspend(() => {
+          names.push(name);
+          return reject.includes(name) ? Effect.fail(new SlackApiError({ method: "reactions.add", code: "invalid_name" })) : Effect.void;
+        }),
     };
   };
 
   test("maps failed, change request and approval to their emoji", async () => {
     const slack = recorder();
-    await reactVerdict(slack, origin, { status: "failed", detail: "boom", result: null });
-    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" });
-    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" });
+    await Effect.runPromise(reactVerdict(slack, origin, { status: "failed", detail: "boom", result: null }));
+    await Effect.runPromise(reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" }));
+    await Effect.runPromise(reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" }));
     expect(slack.names).toEqual(["x", "repeat", "chayanne-approved"]);
   });
 
   test("falls back to a check mark when the workspace lacks the approval emoji", async () => {
     const slack = recorder(["chayanne-approved"]);
-    await reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" });
+    await Effect.runPromise(reactVerdict(slack, origin, { status: "done", detail: "", result: "**APPROVE**" }));
     expect(slack.names).toEqual(["chayanne-approved", "white_check_mark"]);
   });
 
   test("other Slack errors still surface", async () => {
     const slack = recorder(["repeat"]);
-    await expect(reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" })).rejects.toThrow("invalid_name");
+    const error = await Effect.runPromise(failureOf(reactVerdict(slack, origin, { status: "done", detail: "", result: "**CHANGES_REQUESTED**" })));
+    expect(error).toBeInstanceOf(SlackApiError);
+    expect(error.code).toBe("invalid_name");
   });
 });
 
@@ -153,23 +157,26 @@ describe("changesRequestedStreak", () => {
 });
 
 describe("pausedReview", () => {
-  const finished = (store: Store, result: string, event = "pull_request.synchronize", threadUrl: string | null = null) =>
-    store.recordRun({
-      ruleId: "r1", ruleName: "review", deliveryId: crypto.randomUUID(), event, repo: "Acme/Widgets", source: "github", author: "alice",
-      status: "done", detail: "", threadId: threadUrl, threadUrl, context: { repo: "acme/widgets", pr_number: "42" }, result,
-    });
-
-  test("pauses at the configured number of change requests in a row and names the handoff", () => {
-    const store = new Store(openDatabase(":memory:"));
-    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 2 });
-    finished(store, "CHANGES_REQUESTED");
-    expect(pausedReview(store, "acme/widgets", "42")).toBeNull();
-    finished(store, "request changes: still broken");
-    finished(store, "# Handoff", HANDOFF_EVENT, "http://t3/handoff");
-    expect(pausedReview(store, "acme/widgets", "42")).toMatchObject({ rounds: 2, handoff: { threadUrl: "http://t3/handoff" } });
-    // Another PR is unaffected; a limit of 0 turns the pause off.
-    expect(pausedReview(store, "acme/widgets", "43")).toBeNull();
-    store.saveSettings({ ...store.getSettings(), maxChangesRequestedRounds: 0 });
-    expect(pausedReview(store, "acme/widgets", "42")).toBeNull();
-  });
+  test("pauses at the configured number of change requests in a row and names the handoff", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const finished = (result: string, event = "pull_request.synchronize", threadUrl: string | null = null) =>
+          store.recordRun({
+            ruleId: "r1", ruleName: "review", deliveryId: crypto.randomUUID(), event, repo: "Acme/Widgets", source: "github", author: "alice",
+            status: "done", detail: "", threadId: threadUrl, threadUrl, context: { repo: "acme/widgets", pr_number: "42" }, result,
+          });
+        yield* store.saveSettings({ ...(yield* store.getSettings()), maxChangesRequestedRounds: 2 });
+        yield* finished("CHANGES_REQUESTED");
+        expect(yield* pausedReview("acme/widgets", "42")).toBeNull();
+        yield* finished("request changes: still broken");
+        yield* finished("# Handoff", HANDOFF_EVENT, "http://t3/handoff");
+        expect(yield* pausedReview("acme/widgets", "42")).toMatchObject({ rounds: 2, handoff: { threadUrl: "http://t3/handoff" } });
+        // Another PR is unaffected; a limit of 0 turns the pause off.
+        expect(yield* pausedReview("acme/widgets", "43")).toBeNull();
+        yield* store.saveSettings({ ...(yield* store.getSettings()), maxChangesRequestedRounds: 0 });
+        expect(yield* pausedReview("acme/widgets", "42")).toBeNull();
+      }),
+    ));
 });
