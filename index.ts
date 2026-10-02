@@ -221,7 +221,10 @@ const server = Bun.serve({
       },
     },
 
-    /** Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items. */
+    /**
+     * Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items.
+     * Only PR runs get a review verdict: an issue run's reply is a work summary, and quoting a "changes requested" review there is not one.
+     */
     "/api/inbox": (req) => {
       const items = poller.list({ gone: new URL(req.url).searchParams.get("gone") === "1" });
       const latest = store.latestRunsByUrl(items.map((item) => item.url));
@@ -230,10 +233,11 @@ const server = Bun.serve({
         gone: store.countGoneInbox(),
         items: items.map((item) => {
           const run = latest.get(item.url);
+          const verdict = run?.status === "done" && item.kind === "pull_request" ? reviewVerdict(run.result) : null;
           return {
             ...item,
             lastRun: run
-              ? { id: run.id, status: run.status, ruleName: run.ruleName, detail: run.detail, threadUrl: run.threadUrl, createdAt: run.createdAt, verdict: run.status === "done" ? reviewVerdict(run.result) : null }
+              ? { id: run.id, status: run.status, ruleName: run.ruleName, detail: run.detail, threadUrl: run.threadUrl, createdAt: run.createdAt, verdict }
               : null,
           };
         }),
