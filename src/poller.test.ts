@@ -22,7 +22,7 @@ function setup(github: Partial<InboxSourceClient> = {}) {
   });
   const base = testLayer({ t3 });
   const source: InboxSourceClient = { fetch: () => Effect.succeed({ login: "me", items: [pr, linear] }), labels: () => Effect.succeed([]), ...github };
-  const layer = Poller.layerWith({ github: source, linear: null }).pipe(Layer.provideMerge(base));
+  const layer = Poller.layerWith({ github: source, linear: null, sentry: null }).pipe(Layer.provideMerge(base));
   return { layer, started };
 }
 
@@ -76,6 +76,21 @@ describe("Poller", () => {
     );
   });
 
+  test("an item the store rejects fails the poll visibly instead of stopping the source", async () => {
+    // A source returning an item with a missing timestamp, as Sentry did with collapse=stats: the insert throws.
+    const { layer } = setup({ fetch: () => Effect.succeed({ login: "me", items: [{ ...pr, createdAt: null as unknown as string }] }) });
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const poller = yield* Poller;
+        const status = yield* poller.poll("github");
+        expect(status).toMatchObject({ polling: false, items: 0 });
+        expect(status.lastError).toContain("NOT NULL constraint failed: inbox_items.created_at");
+        expect(status.lastPolledAt).not.toBeNull();
+      }),
+    );
+  });
+
   test("labels sync for the repos of inbox items and rules, again only when those change or fail", async () => {
     const asked: string[][] = [];
     let fail = false;
@@ -93,7 +108,7 @@ describe("Poller", () => {
         yield* poller.poll("github");
         yield* settle;
         expect(asked).toEqual([["acme/widgets"]]);
-        expect(yield* poller.labelCatalog).toEqual({ github: [{ name: "ready", scope: "acme/widgets" }], linear: [] });
+        expect(yield* poller.labelCatalog).toEqual({ github: [{ name: "ready", scope: "acme/widgets" }], linear: [], sentry: [] });
 
         // Fresh and covering the same repos: no new sync.
         yield* poller.syncLabels("github");

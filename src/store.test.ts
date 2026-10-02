@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { linear, pr } from "./inbox.test.ts";
-import type { Run } from "./rules.ts";
-import { HANDOFF_EVENT } from "./shared.ts";
+import { DEFAULT_SETTINGS, type Run } from "./rules.ts";
+import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
 import { runWith, testLayer } from "./testing.ts";
 
@@ -22,6 +22,19 @@ const run = (patch: Partial<Run>): Omit<Run, "id" | "createdAt"> => ({
   result: null,
   action: null,
   ...patch,
+});
+
+describe("Store.getSettings", () => {
+  test("a source added after the settings were saved polls on its defaults", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const { sentry, ...saved } = { ...DEFAULT_POLLING, github: { enabled: false, minutes: 10 } };
+        yield* store.saveSettings({ ...DEFAULT_SETTINGS, polling: saved as typeof DEFAULT_POLLING });
+        expect((yield* store.getSettings()).polling).toEqual({ ...DEFAULT_POLLING, github: { enabled: false, minutes: 10 } });
+      }),
+    ));
 });
 
 describe("Store.analytics", () => {
@@ -115,12 +128,10 @@ describe("Store inbox", () => {
 
         // #43 drops out of GitHub's results; the Linear issue is another source and is untouched.
         expect(yield* store.syncInbox("github", [{ ...pr, title: "Add widgets (renamed)" }], t1)).toEqual({ appeared: 0, returned: 0, gone: 1 });
-        const byKey = Object.fromEntries((yield* store.listInbox({ gone: true })).map((item) => [item.key, item]));
-        expect(byKey[pr.key]).toMatchObject({ title: "Add widgets (renamed)", firstSeenAt: t0, lastSeenAt: t1, goneAt: null });
-        expect(byKey[other.key]).toMatchObject({ firstSeenAt: t0, lastSeenAt: t0, goneAt: t1 });
-        expect(byKey[linear.key]).toMatchObject({ goneAt: null });
+        expect(yield* store.getInboxItem(pr.key)).toMatchObject({ title: "Add widgets (renamed)", firstSeenAt: t0, lastSeenAt: t1, goneAt: null });
+        expect(yield* store.getInboxItem(other.key)).toMatchObject({ firstSeenAt: t0, lastSeenAt: t0, goneAt: t1 });
+        expect(yield* store.getInboxItem(linear.key)).toMatchObject({ goneAt: null });
         expect((yield* store.listInbox()).map((item) => item.key)).toEqual([linear.key, pr.key]);
-        expect(yield* store.countGoneInbox()).toBe(1);
 
         // #43 comes back: a new stay.
         expect(yield* store.syncInbox("github", [pr, other], t2)).toEqual({ appeared: 0, returned: 1, gone: 0 });
@@ -137,6 +148,7 @@ describe("Store inbox", () => {
       testLayer(),
       Effect.gen(function* () {
         const store = yield* Store;
+        for (const item of [pr, other]) yield* store.recordRun(run({ context: { pr_url: item.url } }));
         yield* store.syncInbox("github", [pr, other], t0);
         yield* store.syncInbox("github", [pr], t1);
         yield* store.syncInbox("github", [], t2);
@@ -148,6 +160,26 @@ describe("Store inbox", () => {
         expect(yield* store.pruneInbox(Date.parse(t1) + 29 * 86_400_000)).toBe(0);
         expect(yield* store.pruneInbox(Date.parse(t1) + 31 * 86_400_000)).toBe(1);
         expect((yield* store.listInbox({ gone: true })).map((item) => item.key)).toEqual([pr.key]);
+      }),
+    ));
+
+  test("only departed items something ran on are listed and counted; the rest stay stored for their return", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        // #42 got a review from a rule, the Linear issue a dispatch by hand; #43 never ran.
+        yield* store.recordRun(run({ source: "poll", context: { pr_url: pr.url } }));
+        yield* store.recordRun(run({ source: "manual", context: { issue_url: issue.url } }));
+        yield* store.syncInbox("github", [pr, other], t0);
+        yield* store.syncInbox("linear", [issue], t0);
+        yield* store.syncInbox("github", [], t1);
+        yield* store.syncInbox("linear", [], t1);
+
+        expect((yield* store.listInbox({ gone: true })).map((item) => item.key).toSorted()).toEqual([pr.key, linear.key]);
+        expect(yield* store.countGoneInbox()).toBe(2);
+        expect(yield* store.getInboxItem(other.key)).toMatchObject({ goneAt: t1 });
+        expect(yield* store.syncInbox("github", [other], t2)).toEqual({ appeared: 0, returned: 1, gone: 0 });
       }),
     ));
 });

@@ -26,10 +26,10 @@ export type LabelsResponse = Record<InboxSource, InboxLabel[]>;
 /** The latest run on an item's PR or issue, from any trigger. The reply stays out: it can be long. */
 export type InboxRun = Pick<Run, "id" | "status" | "ruleName" | "detail" | "threadUrl" | "createdAt"> & { verdict: Verdict | null };
 
-/** `GET /api/inbox`; `?gone=1` appends the items that left the inbox, newest departure first. */
+/** `GET /api/inbox`; `?gone=1` appends the items that left the inbox after something ran on them, newest departure first. */
 export type InboxResponse = {
   polling: Record<InboxSource, PollStatus>;
-  /** Items that left the inbox and are still retained (30 days). */
+  /** Items that left the inbox after something ran on them, within retention (30 days). */
   gone: number;
   items: (InboxItem & { lastRun: InboxRun | null })[];
 };

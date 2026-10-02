@@ -6,6 +6,8 @@ export type Status = {
   slack: "off" | "connecting" | "connected";
   /** MCP endpoint for agents, when Slack is configured. */
   mcp: string | null;
+  /** The Sentry instance and organization the inbox polls, when configured. */
+  sentry: { url: string; org: string } | null;
 };
 
 /** JSON fetch wrapper; throws with the server's `error` message on non-2xx. */

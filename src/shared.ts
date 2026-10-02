@@ -27,20 +27,32 @@ export const RUN_SOURCES = ["github", "slack", "poll", "manual"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 
 /** APIs the inbox polls for PRs and issues that involve you. */
-export const INBOX_SOURCES = ["github", "linear"] as const;
+export const INBOX_SOURCES = ["github", "linear", "sentry"] as const;
 export type InboxSource = (typeof INBOX_SOURCES)[number];
+
+/** What a source needs before it polls, shown where it is off. */
+export const INBOX_SOURCE_SETUP: Record<InboxSource, string> = {
+  github: "Install and log in to the gh CLI",
+  linear: "Set LINEAR_API_KEY in .env",
+  sentry: "Set SENTRY_AUTH_TOKEN and SENTRY_ORG in .env",
+};
 
 export const INBOX_KINDS = ["pull_request", "issue"] as const;
 export type InboxKind = (typeof INBOX_KINDS)[number];
 
-/** Why an item is in your inbox. One item can have several. */
-export const INBOX_REASONS = ["review_requested", "assigned", "mentioned", "authored"] as const;
+/**
+ * Why an item is in your inbox. One item can have several. `watching` is a
+ * Sentry issue that passes the Sentry filters in Settings; every Sentry issue
+ * has it, those assigned to you have `assigned` too.
+ */
+export const INBOX_REASONS = ["review_requested", "assigned", "mentioned", "authored", "watching"] as const;
 export type InboxReason = (typeof INBOX_REASONS)[number];
 export const INBOX_REASON_LABELS: Record<InboxReason, string> = {
   review_requested: "review requested",
   assigned: "assigned to me",
   mentioned: "mentioned",
   authored: "authored by me",
+  watching: "watching",
 };
 
 /** Rule keys for polled inbox items are `inbox.<source>.<kind>`. */
@@ -65,9 +77,9 @@ export type RuleFilters = {
   labels: string[];
   /** Require every label in `labels` instead of any one of them. */
   allLabels: boolean;
-  /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). */
+  /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). Sentry: substatus (`escalating`) or status (`unresolved`). */
   states: string[];
-  /** Linear team keys. */
+  /** Linear team keys, or Sentry project slugs. */
   teams: string[];
   /** Inbox PR rules: run again when the PR head moves, like `pull_request.synchronize`. */
   rerunOnPush: boolean;
@@ -85,7 +97,41 @@ export type PollingSettings = Record<InboxSource, { enabled: boolean; minutes: n
 export const DEFAULT_POLLING: PollingSettings = {
   github: { enabled: true, minutes: 3 },
   linear: { enabled: true, minutes: 3 },
+  sentry: { enabled: true, minutes: 3 },
 };
+
+/**
+ * Which Sentry issues reach the inbox (Settings → Sentry); an empty list does
+ * not filter. `projects` are project slugs, usually one per service.
+ * `environments` match any of the listed. `tags` are search terms such as
+ * `service:checkout`, see `sentryQuery`.
+ */
+export type SentryFilters = { projects: string[]; environments: string[]; tags: string[] };
+export const EMPTY_SENTRY_FILTERS: SentryFilters = { projects: [], environments: [], tags: [] };
+
+/**
+ * The issue search for the tag filters, as Sentry's own search would read
+ * it: unresolved issues, `key:value` terms of one key joined into
+ * `key:[a,b]` so they match any value, different keys all required. Terms
+ * without a key (free text) or already in list or quoted syntax pass as typed.
+ */
+export function sentryQuery(tags: string[]): string {
+  const byKey = new Map<string, string[]>();
+  const asTyped: string[] = [];
+  for (const term of new Set(tags.map((tag) => tag.trim()).filter(Boolean))) {
+    const colon = term.indexOf(":");
+    const value = term.slice(colon + 1);
+    if (colon <= 0 || !value || /^["[]/.test(value)) asTyped.push(term);
+    else byKey.set(term.slice(0, colon), [...(byKey.get(term.slice(0, colon)) ?? []), value]);
+  }
+  const grouped = [...byKey].map(([key, values]) => (values.length === 1 ? `${key}:${searchValue(values[0]!)}` : `${key}:[${values.map(searchValue).join(",")}]`));
+  return ["is:unresolved", ...grouped, ...asTyped].join(" ");
+}
+
+/** A search value, quoted when it holds characters the search syntax would split on. */
+function searchValue(value: string): string {
+  return /[\s,"()[\]]/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+}
 
 /**
  * Events offered by the rule editor's picker. GitHub keys are `<event>.<action>`
@@ -112,6 +158,7 @@ export const SUGGESTED_EVENTS = [
   { key: "inbox.github.pull_request", label: "Inbox: GitHub PR" },
   { key: "inbox.github.issue", label: "Inbox: GitHub issue" },
   { key: "inbox.linear.issue", label: "Inbox: Linear issue" },
+  { key: "inbox.sentry.issue", label: "Inbox: Sentry issue" },
 ] as const;
 
 /**

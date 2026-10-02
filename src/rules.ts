@@ -7,12 +7,14 @@ import {
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
   EMPTY_FILTERS,
+  EMPTY_SENTRY_FILTERS,
   INBOX_REASONS,
   RUNTIME_MODES,
   WORKSPACE_MODES,
   inboxSource,
   type PollingSettings,
   type RuleFilters,
+  type SentryFilters,
 } from "./shared.ts";
 
 export type Rule = typeof rules.$inferSelect;
@@ -76,7 +78,7 @@ export const RuleInput = Schema.Struct({
   Schema.makeFilter((rule) =>
     new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1
       ? undefined
-      : { path: ["events"], issue: "An inbox rule polls one source: pick GitHub or Linear inbox events, not both." },
+      : { path: ["events"], issue: "An inbox rule polls one source: pick inbox events of GitHub, Linear or Sentry, not several." },
   ),
 );
 export type RuleInput = typeof RuleInput.Type;
@@ -95,7 +97,12 @@ export const SettingsInput = Schema.Struct({
   reviewChannel: cleanedOrNull((channel) => channel),
   reviewRequestMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_REVIEW_REQUEST_MESSAGE))),
   secondPassMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SECOND_PASS_MESSAGE))),
-  polling: Schema.Struct({ github: PollSourceSchema, linear: PollSourceSchema }).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING))),
+  polling: Schema.Struct({
+    github: PollSourceSchema,
+    linear: PollSourceSchema,
+    sentry: PollSourceSchema.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING.sentry))),
+  }).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING))),
+  sentryFilters: Schema.Struct({ projects: names, environments: names, tags: names }).pipe(Schema.withDecodingDefault(Effect.succeed(EMPTY_SENTRY_FILTERS))),
 });
 export type SettingsInput = typeof SettingsInput.Type;
 
@@ -131,6 +138,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reviewRequestMessage: DEFAULT_REVIEW_REQUEST_MESSAGE,
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,
+  sentryFilters: EMPTY_SENTRY_FILTERS,
 };
 
 // The decoded payloads must be storable as rows: a schema that drifts from its table fails to compile here.
@@ -141,4 +149,5 @@ export type RowChecks = [
   Extends<PromptInput, Omit<Prompt, "id" | "createdAt" | "updatedAt">>,
   Extends<SettingsInput["polling"], PollingSettings>,
   Extends<RuleInput["filters"], RuleFilters>,
+  Extends<SettingsInput["sentryFilters"], SentryFilters>,
 ];

@@ -30,7 +30,14 @@ export class AppConfig extends Context.Service<AppConfig>()("AppConfig", {
     }
 
     const linearApiKey = yield* Config.Redacted("LINEAR_API_KEY").pipe(Config.option);
-    if (Option.isNone(linearApiKey)) yield* log.warn("LINEAR_API_KEY is not set: the inbox polls GitHub only.");
+    if (Option.isNone(linearApiKey)) yield* log.warn("LINEAR_API_KEY is not set: the inbox does not poll Linear.");
+
+    const sentryUrl = yield* Config.String("SENTRY_URL").pipe(Config.withDefault("https://sentry.io"));
+    const sentry = Option.map(
+      Option.all({ token: yield* Config.Redacted("SENTRY_AUTH_TOKEN").pipe(Config.option), org: yield* Config.String("SENTRY_ORG").pipe(Config.option) }),
+      (auth) => ({ ...auth, url: sentryUrl.replace(/\/+$/, "") }),
+    );
+    if (Option.isNone(sentry)) yield* log.warn("SENTRY_AUTH_TOKEN and SENTRY_ORG are not both set: the inbox does not poll Sentry.");
 
     return {
       t3Token,
@@ -41,6 +48,8 @@ export class AppConfig extends Context.Service<AppConfig>()("AppConfig", {
       /** Both Slack tokens, or none: Socket Mode needs the app token and the Web API the bot token. */
       slack,
       linearApiKey,
+      /** Token and organization, or none; `SENTRY_URL` points at a self-hosted instance or a region, sentry.io by default. */
+      sentry,
       port: yield* Config.Port("PORT").pipe(Config.withDefault(8787)),
       /** Loopback-only port of the MCP tools, so a tunnel to `port` never exposes them. */
       mcpPort: yield* Config.Port("MCP_PORT").pipe(Config.withDefault(8788)),

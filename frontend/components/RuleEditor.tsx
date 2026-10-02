@@ -93,6 +93,7 @@ export function RuleEditor({
   const isInbox = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX));
   const isWebhook = events.some((event) => !event.startsWith(SLACK_EVENT_PREFIX) && !event.startsWith(INBOX_EVENT_PREFIX));
   const inboxLinear = events.some((event) => inboxSource(event) === "linear");
+  const inboxSentry = events.some((event) => inboxSource(event) === "sentry");
   const inboxGitHub = events.some((event) => inboxSource(event) === "github");
   const inboxPr = events.includes("inbox.github.pull_request");
   const inboxIssue = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX) && event.endsWith(".issue"));
@@ -111,6 +112,7 @@ export function RuleEditor({
   const syncedLabels = [
     ...(isWebhook || inboxGitHub ? (synced.data?.github ?? []).filter((label) => within(value.repos, label.scope)) : []),
     ...(inboxLinear ? (synced.data?.linear ?? []).filter((label) => within(value.filters.teams, label.scope)) : []),
+    ...(inboxSentry ? (synced.data?.sentry ?? []) : []),
   ];
   const repoOptions = countOptions([...candidates.flatMap((item) => (item.repo ? [item.repo] : [])), ...runs.flatMap((run) => (run.repo ? [run.repo] : []))]);
   const teamOptions = countOptions(candidates.flatMap((item) => (item.team ? [item.team] : [])));
@@ -203,9 +205,9 @@ export function RuleEditor({
               <TokenInput value={draft.repos} onChange={(repos) => patch({ repos })} options={repoOptions} placeholder="owner/name" />
             </Field>
           )}
-          {inboxLinear && (
-            <Field label="Teams" hint="Linear team keys. Empty matches every team.">
-              <TokenInput value={draft.filters.teams} onChange={(teams) => patchFilters({ teams })} options={teamOptions} placeholder="ENG" />
+          {(inboxLinear || inboxSentry) && (
+            <Field label={inboxSentry ? "Projects" : "Teams"} hint={inboxSentry ? "Sentry project slugs. Empty matches every project." : "Linear team keys. Empty matches every team."}>
+              <TokenInput value={draft.filters.teams} onChange={(teams) => patchFilters({ teams })} options={teamOptions} placeholder={inboxSentry ? "checkout-api" : "ENG"} />
             </Field>
           )}
           {isInbox && (
@@ -214,8 +216,17 @@ export function RuleEditor({
             </Field>
           )}
           {isInbox && (
-            <Field label="States" hint={inboxLinear ? "State name (Todo) or type (unstarted, started). Any of the listed." : "open or draft. Any of the listed."}>
-              <TokenInput value={draft.filters.states} onChange={(states) => patchFilters({ states })} options={stateOptions} placeholder={inboxLinear ? "Todo" : "open"} />
+            <Field
+              label="States"
+              hint={
+                inboxLinear
+                  ? "State name (Todo) or type (unstarted, started). Any of the listed."
+                  : inboxSentry
+                    ? "new, ongoing, escalating or regressed. Any of the listed."
+                    : "open or draft. Any of the listed."
+              }
+            >
+              <TokenInput value={draft.filters.states} onChange={(states) => patchFilters({ states })} options={stateOptions} placeholder={inboxLinear ? "Todo" : inboxSentry ? "escalating" : "open"} />
             </Field>
           )}
           {(isInbox || isWebhook) && (
@@ -229,7 +240,7 @@ export function RuleEditor({
                   of
                 </>
               }
-              hint={draft.filters.allLabels ? "Every listed label must be present. Empty matches any." : "At least one listed label must be present. Empty matches any."}
+              hint={`${draft.filters.allLabels ? "Every listed label must be present." : "At least one listed label must be present."} Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
             >
               <TokenInput value={draft.filters.labels} onChange={(labels) => patchFilters({ labels })} options={labelOptions} placeholder="label" />
             </Field>
@@ -286,15 +297,15 @@ export function RuleEditor({
             hint={
               draft.projectId
                 ? undefined
-                : inboxLinear
-                  ? "Linear issues have no repository: pick a project."
+                : inboxLinear || inboxSentry
+                  ? `${inboxSentry ? "Sentry" : "Linear"} issues have no repository: pick a project.`
                   : isSlack
                     ? "Matched by comparing the PR linked in the message to each project's git remote."
                     : "Matched by comparing the repository to each project's git remote."
             }
           >
             <Select value={draft.projectId ?? AUTO_PROJECT} onValueChange={(v) => patch({ projectId: v === AUTO_PROJECT ? null : v })}>
-              <SelectTrigger size="sm" className={cn("w-full", inboxLinear && !draft.projectId && "border-warn")}><SelectValue /></SelectTrigger>
+              <SelectTrigger size="sm" className={cn("w-full", (inboxLinear || inboxSentry) && !draft.projectId && "border-warn")}><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
                 {projects.map((p) => (
@@ -414,7 +425,8 @@ const MATCH_ROWS = 20;
 function MatchesTable({ matches }: { matches: Match[] }) {
   const [all, setAll] = useState(false);
   const rows = all ? matches : matches.slice(0, MATCH_ROWS);
-  const linear = matches.some((match) => match.item.source === "linear");
+  // Linear teams and Sentry projects; a rule polls one source, so one header fits.
+  const team = matches.find((match) => match.item.team)?.item;
   const cell = "py-1 align-top";
   return (
     <div className="overflow-x-auto rounded-md border">
@@ -425,7 +437,7 @@ function MatchesTable({ matches }: { matches: Match[] }) {
             <TableHead>Title</TableHead>
             <TableHead>State</TableHead>
             <TableHead>Labels</TableHead>
-            {linear && <TableHead>Team</TableHead>}
+            {team && <TableHead>{team.source === "sentry" ? "Project" : "Team"}</TableHead>}
             <TableHead>Reasons</TableHead>
             <TableHead>This rule</TableHead>
           </TableRow>
@@ -439,7 +451,7 @@ function MatchesTable({ matches }: { matches: Match[] }) {
               <TableCell className={cn(cell, "min-w-40 whitespace-normal")}>{item.title}</TableCell>
               <TableCell className={cell}>{item.state}</TableCell>
               <TableCell className={cn(cell, "min-w-28 break-words whitespace-normal", mono)}>{item.labels.join(", ")}</TableCell>
-              {linear && <TableCell className={cell}>{item.team}</TableCell>}
+              {team && <TableCell className={cell}>{item.team}</TableCell>}
               <TableCell className={cn(cell, "whitespace-normal")}>{item.reasons.map((reason) => INBOX_REASON_LABELS[reason]).join(", ")}</TableCell>
               <TableCell className={cn(cell, "min-w-40 whitespace-normal")}>
                 {why !== null ? (

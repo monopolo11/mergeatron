@@ -11,7 +11,7 @@ import { api, timeAgo } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { InboxItem, InboxResponse, InboxRun } from "../../src/inbox.ts";
 import type { PollStatus } from "../../src/poller.ts";
-import { INBOX_REASON_LABELS, INBOX_REASONS, INBOX_SOURCES, type InboxKind, type InboxReason, type InboxSource } from "../../src/shared.ts";
+import { INBOX_REASON_LABELS, INBOX_REASONS, INBOX_SOURCE_SETUP, INBOX_SOURCES, type InboxKind, type InboxReason, type InboxSource } from "../../src/shared.ts";
 
 type Row = InboxResponse["items"][number];
 
@@ -72,7 +72,7 @@ export function Inbox() {
         <Count value={count((item) => item.kind === "pull_request")} label="PRs" active={kind === "pull_request"} onClick={() => setKind(kind === "pull_request" ? ALL : "pull_request")} />
         <Count value={count((item) => item.kind === "issue")} label="issues" active={kind === "issue"} onClick={() => setKind(kind === "issue" ? ALL : "issue")} />
         <ToolbarDivider />
-        <Count value={data.gone} label="left" active={showGone} onClick={() => setShowGone((v) => !v)} title="Items that stopped showing up: closed, merged, unassigned or done. Kept 30 days." />
+        <Count value={data.gone} label="left" active={showGone} onClick={() => setShowGone((v) => !v)} title="Dispatched items that stopped showing up: closed, merged, resolved or done. Kept 30 days." />
         <Input className="h-7 w-44 text-xs" placeholder="search" value={search} onChange={(e) => setSearch(e.target.value)} />
         <span className="ml-auto flex items-center gap-3">
           {INBOX_SOURCES.map((s) => <PollState key={s} source={s} status={data.polling[s]} onPolled={refresh} />)}
@@ -85,7 +85,7 @@ export function Inbox() {
       {visible.length === 0 ? (
         <Empty>
           {data.items.length === 0
-            ? "Nothing in the inbox. GitHub polls through the gh CLI; set LINEAR_API_KEY in .env for Linear. Intervals are in Settings."
+            ? "Nothing in the inbox. GitHub polls through the gh CLI; set LINEAR_API_KEY in .env for Linear, SENTRY_AUTH_TOKEN and SENTRY_ORG for Sentry. Intervals and Sentry filters are in Settings."
             : "Nothing matches these filters."}
         </Empty>
       ) : (
@@ -176,7 +176,7 @@ function PollState({ source, status, onPolled }: { source: InboxSource; status: 
     api(`/api/inbox/poll`, { method: "POST", body: JSON.stringify({ source }) }).finally(() => { setBusy(false); onPolled(); });
   };
   if (!status.configured) {
-    return <span className={cn("text-muted-foreground", mono)} title={source === "linear" ? "Set LINEAR_API_KEY in .env" : "Install and log in to the gh CLI"}>{source} off</span>;
+    return <span className={cn("text-muted-foreground", mono)} title={INBOX_SOURCE_SETUP[source]}>{source} off</span>;
   }
   const text = busy || status.polling ? "polling…" : status.lastError ? "error" : status.lastPolledAt ? timeAgo(status.lastPolledAt) : "not yet";
   const title = [status.login && `as ${status.login}`, status.lastError, status.nextAt && status.enabled && `next ${timeAgo(status.nextAt).replace(" ago", "")}`, !status.enabled && "polling off in Settings", "click to poll now"].filter(Boolean).join(" · ");

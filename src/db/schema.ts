@@ -6,6 +6,7 @@ import {
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
   EMPTY_FILTERS,
+  EMPTY_SENTRY_FILTERS,
   INBOX_KINDS,
   INBOX_SOURCES,
   RUNTIME_MODES,
@@ -14,6 +15,7 @@ import {
   type InboxReason,
   type PollingSettings,
   type RuleFilters,
+  type SentryFilters,
 } from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
@@ -78,39 +80,42 @@ export const settings = sqliteTable("settings", {
   /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
   reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
   secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),
-  /** Whether and how often each inbox source (GitHub, Linear) is polled. */
+  /** Whether and how often each inbox source (GitHub, Linear, Sentry) is polled. Sources added later are filled in by `Store.getSettings`. */
   polling: text({ mode: "json" }).$type<PollingSettings>().notNull().default(DEFAULT_POLLING),
+  /** Which Sentry issues reach the inbox: projects, environments, tags. */
+  sentryFilters: text("sentry_filters", { mode: "json" }).$type<SentryFilters>().notNull().default(EMPTY_SENTRY_FILTERS),
 });
 
 /**
- * A PR or issue that involves you, as last polled from GitHub or Linear. One
+ * A PR or issue that involves you, as last polled from GitHub, Linear or Sentry. One
  * shape for every source so the inbox, the composer and rule filters treat
  * them alike. Rows outlive the poll: `goneAt` marks when an item stopped
  * coming back (closed, merged, unassigned, done), and `firstSeenAt` restarts
  * when it comes back. See src/inbox.ts for the derived types.
  */
 export const inboxItems = sqliteTable("inbox_items", {
-  /** `github:owner/name#123` or `linear:ENG-123`. */
+  /** `github:owner/name#123`, `linear:ENG-123` or `sentry:BACKEND-3F`. */
   key: text().primaryKey(),
   source: text({ enum: INBOX_SOURCES }).notNull(),
   kind: text({ enum: INBOX_KINDS }).notNull(),
-  /** `owner/name` for GitHub; null for Linear issues, which have no repository. */
+  /** `owner/name` for GitHub; null for Linear and Sentry issues, which have no repository. */
   repo: text(),
-  /** Short handle shown in lists: `#123` or `ENG-123`. */
+  /** Short handle shown in lists: `#123`, `ENG-123` or Sentry's short id `BACKEND-3F`. */
   identifier: text().notNull(),
   title: text().notNull(),
   url: text().notNull(),
   body: text(),
   author: text(),
-  /** GitHub: `open` or `draft`. Linear: the workflow state name, e.g. `Todo`. */
+  /** GitHub: `open` or `draft`. Linear: the workflow state name, e.g. `Todo`. Sentry: the substatus (`new`, `escalating`, ...), else the status. */
   state: text().notNull(),
-  /** Linear workflow state type: backlog, unstarted, started, ... Null for GitHub. */
+  /** Linear workflow state type: backlog, unstarted, started, ... Sentry status: `unresolved`. Null for GitHub. */
   stateType: text("state_type"),
+  /** Labels; for Sentry, the issue level (`error`, `fatal`, ...). */
   labels: text({ mode: "json" }).$type<string[]>().notNull().default([]),
   reasons: text({ mode: "json" }).$type<InboxReason[]>().notNull().default([]),
-  /** Linear team key. */
+  /** Linear team key, or Sentry project slug. */
   team: text(),
-  /** Linear priority label (`Urgent`, `High`, ...). */
+  /** Linear priority label (`Urgent`, `High`, ...), or Sentry priority (`high`, ...). */
   priority: text(),
   /** PR head branch, or Linear's suggested branch name. */
   branch: text(),
@@ -122,7 +127,7 @@ export const inboxItems = sqliteTable("inbox_items", {
   reviewDecision: text("review_decision"),
   repoUrl: text("repo_url"),
   defaultBranch: text("default_branch"),
-  /** The item's own timestamps, from the API. */
+  /** The item's own timestamps, from the API; first and last seen for Sentry. */
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   /** When this stay in the inbox began; reset when a gone item comes back. */

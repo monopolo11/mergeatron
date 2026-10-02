@@ -17,6 +17,7 @@ import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { DispatchInput, PromptInput, RuleInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
+import { Sentry } from "./src/sentryInbox.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
 import { runSlackSocket, SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
@@ -32,8 +33,9 @@ const webhookLog = logger("webhook");
  *
  *   platform (HTTP client, WebSocket constructor, child processes) + AppConfig
  *     └─ services: Database → Store, T3, SlackClient, PullRequests, Background, RunEvents, Updater
- *          └─ Poller, SlackSocket
- *               └─ HTTP API, MCP API, supervisor, startup, telemetry
+ *          └─ Sentry
+ *               └─ Poller, SlackSocket
+ *                    └─ HTTP API, MCP API, supervisor, startup, telemetry
  *
  * Shutting down (SIGINT/SIGTERM) closes the scope in reverse: servers stop,
  * background fibers (watchers, polls, the Slack socket) are interrupted, the
@@ -41,12 +43,12 @@ const webhookLog = logger("webhook");
  */
 
 /** Everything a route may need; captured once so handlers run with no requirements of their own. */
-type ApiServices = HandlerServices | AppConfig | Poller | Updater | SlackSocket | PullRequests;
+type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | SlackSocket | PullRequests;
 
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, T3HttpError: 502, T3RpcError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -55,6 +57,7 @@ const api = HttpRouter.use((router) =>
     const store = yield* Store;
     const t3 = yield* T3;
     const poller = yield* Poller;
+    const sentry = yield* Sentry;
     const updater = yield* Updater;
     const slackSocket = yield* SlackSocket;
     const background = yield* Background;
@@ -81,6 +84,7 @@ const api = HttpRouter.use((router) =>
             webhookSecretConfigured: Option.isSome(webhookSecret),
             slack: yield* slackSocket.status,
             mcp: mcpUrl,
+            sentry: Option.getOrNull(Option.map(sentry, (client) => client.instance)),
           });
         }),
       ),
@@ -161,15 +165,18 @@ const api = HttpRouter.use((router) =>
       route(
         Effect.gen(function* () {
           const settings = yield* body(SettingsInput);
+          const filtersChanged = !Bun.deepEquals((yield* store.getSettings()).sentryFilters, settings.sentryFilters);
           yield* store.saveSettings(settings);
           yield* poller.reschedule;
+          // New Sentry filters change what belongs in the inbox: poll now rather than at the next tick.
+          if (filtersChanged) yield* background.fork(poller.pollNow("sentry"));
           return json(settings);
         }),
       ),
     );
 
     /**
-     * Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items.
+     * Persisted inbox items with the latest run on each, plus per-source polling status. `?gone=1` appends departed items that had a run.
      * Only PR runs get a review verdict: an issue run's reply is a work summary, and quoting a "changes requested" review there is not one.
      */
     yield* router.add(
@@ -195,6 +202,18 @@ const api = HttpRouter.use((router) =>
             }),
           };
           return json(response);
+        }),
+      ),
+    );
+
+    /** Sentry projects, environments and tags, for the filter suggestions in Settings. */
+    yield* router.add(
+      "GET",
+      "/api/sentry/options",
+      route(
+        Option.match(sentry, {
+          onNone: () => Effect.succeed(json({ error: "Sentry is off: set SENTRY_AUTH_TOKEN and SENTRY_ORG in .env" }, 404)),
+          onSome: (client) => Effect.map(client.options, json),
         }),
       ),
     );
@@ -442,7 +461,7 @@ const startupLayer = Layer.effectDiscard(
       webhook: `http://localhost:${config.port}/webhooks/github`,
       slack: Option.isSome(config.slack) ? "starting" : "off",
       mcp: Option.isSome(config.slack) ? `http://127.0.0.1:${config.mcpPort}/mcp` : "off (needs Slack)",
-      inbox: Option.isSome(config.linearApiKey) ? "github, linear" : "github",
+      inbox: ["github", Option.isSome(config.linearApiKey) && "linear", Option.isSome(config.sentry) && "sentry"].filter(Boolean).join(", "),
       metrics: `http://localhost:${config.port}/api/metrics`,
     });
   }),
@@ -474,7 +493,7 @@ const servicesLayer = Layer.mergeAll(
   RunEvents.layer,
   Updater.layer,
 ).pipe(Layer.provideMerge(Layer.mergeAll(AppConfig.layer, platformLayer)));
-const appLayer = Layer.mergeAll(Poller.layer, slackSocketLayer).pipe(Layer.provideMerge(servicesLayer));
+const appLayer = Layer.mergeAll(Poller.layer, slackSocketLayer).pipe(Layer.provideMerge(Sentry.layer), Layer.provideMerge(servicesLayer));
 
 const mainLayer = Layer.mergeAll(httpLayer, mcpLayer, supervisorLayer, startupLayer, telemetryLayer).pipe(Layer.provide(appLayer), Layer.provide(loggerLayer));
 

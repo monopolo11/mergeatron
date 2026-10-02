@@ -226,28 +226,59 @@ prompt; rules on the inbox events do the same automatically.
 - **Linear** with a personal API key in `.env` as `LINEAR_API_KEY`: issues
   assigned to or created by you that are not done, plus issues whose description
   or comments mention you (from your notifications). Without the key Linear is off.
+- **Sentry**, sentry.io or self-hosted, with `SENTRY_AUTH_TOKEN` and `SENTRY_ORG`
+  in `.env` (plus `SENTRY_URL` for a self-hosted instance or a region such as
+  `https://de.sentry.io`): unresolved issues seen in the last 14 days that pass
+  the filters in **Settings → Sentry**, newest first, up to 100. The token needs
+  `event:read`, `org:read` and `project:read`. Without the token and org Sentry is off.
 
 Each item carries its `reasons` (`review_requested`, `assigned`, `mentioned`,
-`authored`), labels, state (`open`/`draft`, or the Linear state name and type),
-Linear team and priority, and for PRs the head branch and commit. The inbox shows
+`authored`, `watching`), labels, state (`open`/`draft`, or the Linear state name and type),
+Linear team and priority, and for PRs the head branch and commit. A Sentry
+issue is `watching`, plus `assigned` when it is assigned to the token's user;
+its label is its level (`error`, `fatal`, ...), its state the substatus (`new`,
+`escalating`, `regressed`, `ongoing`) with `unresolved` as the state type, its
+team the Sentry project slug, and `{{issue_body}}` holds the exception, culprit
+and event counts. The inbox shows
 the latest run on each item from any trigger. **Settings → Polling** turns each
 source on or off and sets its interval in minutes; the counts in the inbox bar
 poll on click.
 
+### Sentry filters
+
+**Settings → Sentry** decides which Sentry issues reach the inbox at all; an
+empty filter lets everything through.
+
+- **Projects**: project slugs, usually one per service. Empty covers every
+  project the token can see.
+- **Environments**: any of the listed.
+- **Tags**: Sentry search terms, typically `key:value` such as
+  `service:checkout`. Values of one key match any of them, different keys must
+  all match: `service:checkout`, `service:billing` and `region:us` search
+  `service:[checkout,billing] region:us`. Any other search term works too
+  (`level:fatal`, `!release:beta`, free text).
+
+The fields suggest the instance's projects, their environments and the top
+values of tags with few values. The search the next poll sends is shown under
+the fields, and saving polls Sentry right away, so issues outside the new
+filters leave the inbox at once.
+
 Items are stored in SQLite (`inbox_items`), so the inbox is full the moment
 the service starts and every poll is a diff: new items get a first-seen time
 ("In inbox" column), items the source stops returning (closed, merged,
-unassigned, done) are marked gone and kept for 30 days under the **left**
-toggle, and an item that comes back starts a new stay. The same data is at
-`GET /api/inbox` (`?gone=1` appends departed items); `POST /api/inbox/poll`
+unassigned, resolved, done) are marked gone and kept for 30 days, and an item
+that comes back starts a new stay. The **left** toggle lists only the departed
+items something ran on (a dispatch or a rule), so a source that churns, such as
+Sentry, does not bury them. The same data is at `GET /api/inbox` (`?gone=1`
+appends those departed items); `POST /api/inbox/poll`
 with `{"source"}` polls now.
 
 ### Dispatch
 
 **Dispatch** on a row, or **Dispatch selected** for several, opens the composer:
 click presets to stack them (the stacked bodies become the message; edit it
-freely), pick the T3 project (auto by git remote, or explicit; Linear issues
-have no repository, so pick one), workspace, model and how many threads to
+freely), pick the T3 project (auto by git remote, or explicit; Linear and
+Sentry issues have no repository, so pick one), workspace, model and how many threads to
 run at a time. One thread starts per item; the message is a template the server
 renders per item with the same variables webhook deliveries get (`pr_url`,
 `issue_url`, …) plus `labels`, `reasons`, `state`, `state_type`, `team`,
@@ -261,10 +292,11 @@ The run log shows dispatches under the preset names with source `manual`.
 ### Automations
 
 An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub
-issue** or **Inbox: Linear issue**. A rule polls one source: picking a Linear
-inbox event drops the GitHub ones and the other way round. On top of the
+issue**, **Inbox: Linear issue** or **Inbox: Sentry issue**. A rule polls one
+source: picking an inbox event of one source drops the others'. On top of the
 repository list the editor gets **Reasons**, **States**, **Labels** (any of the
-listed, or switch to all) and, for Linear, **Teams** instead of repositories.
+listed, or switch to all) and, for Linear, **Teams** instead of repositories
+(for Sentry, **Projects**, within what the Sentry filters let in).
 Each is a token field that suggests values seen in the inbox with counts; type
 to add one not seen yet. Labels also come from the source itself: after a poll,
 labels older than an hour are synced from every GitHub repository with inbox
@@ -274,6 +306,8 @@ editor suggests those within the rule's repositories or teams.
 Inbox: GitHub PR, repo `acme/widgets`, reason `review requested`. "Implement
 Linear issues in Todo assigned to me with label ready-for-dev" is Inbox: Linear
 issue, team `ENG`, reason `assigned to me`, state `Todo`, label `ready for dev`,
+with the project set. "Investigate escalating fatal errors in checkout" is
+Inbox: Sentry issue, project `checkout-api`, state `escalating`, label `fatal`,
 with the project set. Label and state filters work on webhook rules too, since
 PR and issue payloads now carry `labels` and `state`.
 
@@ -322,8 +356,8 @@ changes cannot be updated from the UI. `GET /api/update` returns the same check.
 ## Development
 
 The service is written with [Effect](https://effect.website) v4. Every
-dependency (database, T3 client, Slack, the `gh` CLI, the inbox poller, the
-updater) is a `Context.Service` class with a `layer`, and `index.ts` composes
+dependency (database, T3 client, Slack, the `gh` CLI, the Sentry client, the
+inbox poller, the updater) is a `Context.Service` class with a `layer`, and `index.ts` composes
 them into one layer graph that `BunRuntime.runMain` launches. Shutting down
 (`SIGINT`/`SIGTERM`) closes that graph in reverse: the HTTP servers stop,
 background fibers (completion watchers, inbox polls, the Slack socket) are

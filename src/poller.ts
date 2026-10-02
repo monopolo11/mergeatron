@@ -1,11 +1,13 @@
 import { Clock, Context, Duration, Effect, FiberMap, Layer, Metric, Option, Redacted, Semaphore } from "effect";
 import { Background } from "./background.ts";
 import { AppConfig } from "./config.ts";
+import { errorMessage } from "./errors.ts";
 import { GitHubInbox } from "./githubInbox.ts";
 import { runRules, type HandlerServices } from "./handler.ts";
 import { automationsFor, itemContext, itemDeliveryId, itemEvent, type InboxItem, type InboxLabel, type LabelsResponse, type PolledItem } from "./inbox.ts";
 import type { InboxSourceClient } from "./inboxSource.ts";
 import { LinearInbox } from "./linearInbox.ts";
+import { Sentry } from "./sentryInbox.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { INBOX_SOURCES, type InboxSource } from "./shared.ts";
@@ -21,7 +23,7 @@ const polls = Metric.counter("orchestrator_polls_total", { incremental: true, de
 const inboxSize = Metric.gauge("orchestrator_inbox_items", { description: "Items the last poll of a source returned" });
 
 export type PollStatus = {
-  /** The source has what it needs: `gh` for GitHub, `LINEAR_API_KEY` for Linear. */
+  /** The source has what it needs: `gh` for GitHub, `LINEAR_API_KEY` for Linear, `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` for Sentry. */
   configured: boolean;
   enabled: boolean;
   minutes: number;
@@ -87,7 +89,7 @@ export const makePoller = (sources: Record<InboxSource, InboxSourceClient | null
 
     const list: PollerShape["list"] = (options = {}) => store.listInbox(options);
 
-    /** Repositories GitHub labels are synced for: those of retained inbox items and of rule filters, lowercased. */
+    /** Repositories GitHub labels are synced for: those of inbox items (active, or left after a run) and of rule filters, lowercased. */
     const labelRepos = Effect.gen(function* () {
       const items = yield* list({ gone: true });
       const rules = yield* store.listRules();
@@ -140,17 +142,18 @@ export const makePoller = (sources: Record<InboxSource, InboxSourceClient | null
         const current = state(source);
         const client = sources[source];
         if (!client) return { ...current };
+        const failed = (message: string) =>
+          Effect.gen(function* () {
+            current.lastError = message;
+            current.lastPolledAt = new Date(yield* now).toISOString();
+            yield* Metric.update(Metric.withAttributes(polls, { source, result: "failed" }), 1);
+            yield* log.warn("poll failed", { source, error: message });
+          });
         const attempt = Effect.gen(function* () {
           current.polling = true;
           const fetched = yield* Effect.result(client.fetch());
           const polledAt = new Date(yield* now).toISOString();
-          if (fetched._tag === "Failure") {
-            current.lastError = fetched.failure.message;
-            current.lastPolledAt = polledAt;
-            yield* Metric.update(Metric.withAttributes(polls, { source, result: "failed" }), 1);
-            yield* log.warn("poll failed", { source, error: current.lastError });
-            return;
-          }
+          if (fetched._tag === "Failure") return yield* failed(fetched.failure.message);
           const { login, items } = fetched.success;
           const synced = yield* store.syncInbox(source, items);
           yield* store.pruneInbox();
@@ -168,6 +171,8 @@ export const makePoller = (sources: Record<InboxSource, InboxSourceClient | null
             started: started.length || undefined,
           });
         }).pipe(
+          // A defect (an item the store rejects, a bug in a source) fails this poll like an API error would; left alone it would end the source's loop without a word.
+          Effect.catchDefect((defect) => failed(errorMessage(defect))),
           Effect.ensuring(Effect.sync(() => (current.polling = false))),
           Effect.withSpan("poller.poll", { attributes: { source } }),
         );
@@ -239,14 +244,15 @@ export class Poller extends Context.Service<Poller, PollerShape>()("Poller") {
   /** A poller over the given sources; tests pass fakes. */
   static readonly layerWith = (sources: Record<InboxSource, InboxSourceClient | null>) => Layer.effect(this, makePoller(sources));
 
-  /** GitHub through `gh`, and Linear when `LINEAR_API_KEY` is set. */
+  /** GitHub through `gh`, Linear when `LINEAR_API_KEY` is set, and Sentry when it is configured (see the Sentry service). */
   static readonly layer = Layer.effect(
     this,
     Effect.gen(function* () {
       const config = yield* AppConfig;
       const github = yield* GitHubInbox.live;
       const linear = Option.isSome(config.linearApiKey) ? yield* LinearInbox.live(Redacted.value(config.linearApiKey.value)) : null;
-      return yield* makePoller({ github, linear });
+      const sentry = Option.getOrNull(yield* Sentry);
+      return yield* makePoller({ github, linear, sentry });
     }),
   );
 }

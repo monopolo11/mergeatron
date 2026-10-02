@@ -7,7 +7,7 @@ export class InboxSourceError extends Data.TaggedError("InboxSourceError")<{ rea
 
 export type InboxFetch = { login: string | null; items: PolledItem[] };
 
-/** What a source needs to provide; see GitHubInbox and LinearInbox. */
+/** What a source needs to provide; see GitHubInbox, LinearInbox and SentryInbox. */
 export type InboxSourceClient = {
   readonly fetch: () => Effect.Effect<InboxFetch, InboxSourceError>;
   /** Labels its items can carry. GitHub labels live on repositories, so it gets the `owner/name`s to cover. */

@@ -107,7 +107,7 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
             </Field>
 
             <div className="grid gap-x-4 gap-y-3 md:grid-cols-2">
-              <Field label="T3 project" hint={needsProject ? "Linear issues have no repository: pick a project." : undefined}>
+              <Field label="T3 project" hint={needsProject ? "Linear and Sentry issues have no repository: pick a project." : undefined}>
                 <Select value={projectId ?? AUTO_PROJECT} onValueChange={(v) => setProjectId(v === AUTO_PROJECT ? null : v)}>
                   <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>

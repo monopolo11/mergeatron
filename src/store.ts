@@ -5,10 +5,19 @@ import { Database, type AppDatabase } from "./db/index.ts";
 import { inboxItems, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import { DEFAULT_SETTINGS, type Prompt, type PromptInput, type ReviewRequest, type Rule, type RuleInput, type Run, type RunAction, type Settings } from "./rules.ts";
-import { DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type RunSource } from "./shared.ts";
+import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type RunSource } from "./shared.ts";
 
 /** How long items that left the inbox are kept, so a reopened PR or a closed issue still has its history. */
 const INBOX_RETENTION_DAYS = 30;
+
+/** URLs of every PR and issue a run was for, from any trigger: a dispatch, a rule, a webhook or Slack. */
+const RUN_URLS = sql`(select json_extract(${runs.context}, '$.pr_url') from ${runs} union select json_extract(${runs.context}, '$.issue_url') from ${runs})`;
+/**
+ * Departed items the inbox lists under "left": those something ran on. The
+ * others stay stored until retention ends, so one that comes back still starts
+ * a new stay, but a source that churns (Sentry) does not flood the list.
+ */
+const LEFT = and(isNotNull(inboxItems.goneAt), inArray(inboxItems.url, RUN_URLS));
 
 /** Run counts split by status, for one grouping key. */
 export type RunCounts = { total: number; queued: number; started: number; done: number; skipped: number; failed: number };
@@ -58,7 +67,8 @@ export function makeStore(db: AppDatabase) {
     const row = db.select().from(settings).where(eq(settings.id, 1)).get();
     if (!row) return DEFAULT_SETTINGS;
     const { id, ...stored } = row;
-    return stored;
+    // A source added after the row was saved polls on its defaults.
+    return { ...stored, polling: { ...DEFAULT_POLLING, ...stored.polling } };
   };
   const listPrompts = (): Prompt[] => db.select().from(prompts).orderBy(prompts.createdAt).all();
   const createPrompt = (input: PromptInput): Prompt => {
@@ -120,18 +130,18 @@ export function makeStore(db: AppDatabase) {
         }),
       ),
 
-    /** Active items by latest activity; with `gone`, the departed ones follow, newest departure first. */
+    /** Active items by latest activity; with `gone`, the departed ones something ran on follow (see LEFT), newest departure first. */
     listInbox: (options: { gone?: boolean } = {}) =>
       Effect.sync((): InboxItem[] => {
         const active = db.select().from(inboxItems).where(isNull(inboxItems.goneAt)).orderBy(desc(inboxItems.updatedAt)).all();
         if (!options.gone) return active;
-        const gone = db.select().from(inboxItems).where(isNotNull(inboxItems.goneAt)).orderBy(desc(inboxItems.goneAt)).all();
+        const gone = db.select().from(inboxItems).where(LEFT).orderBy(desc(inboxItems.goneAt)).all();
         return [...active, ...gone];
       }),
 
     getInboxItem: (key: string) => Effect.sync((): InboxItem | null => db.select().from(inboxItems).where(eq(inboxItems.key, key)).get() ?? null),
 
-    countGoneInbox: () => Effect.sync(() => db.select({ n: count() }).from(inboxItems).where(isNotNull(inboxItems.goneAt)).get()?.n ?? 0),
+    countGoneInbox: () => Effect.sync(() => db.select({ n: count() }).from(inboxItems).where(LEFT).get()?.n ?? 0),
 
     /** Drops items gone for longer than the retention window. Returns how many. */
     pruneInbox: (now = Date.now()) =>
@@ -256,7 +266,7 @@ export function makeStore(db: AppDatabase) {
             .get() ?? null,
       ),
 
-    /** The run still working on (or queued for) this issue, GitHub or Linear. One thread per issue at a time. */
+    /** The run still working on (or queued for) this issue, from any source. One thread per issue at a time. */
     activeRunForIssue: (issueUrl: string, statuses: Run["status"][] = ["started", "queued"]) =>
       Effect.sync(
         (): Run | null =>

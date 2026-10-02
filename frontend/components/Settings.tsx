@@ -20,6 +20,7 @@ import { Dot, Empty, ExternalLink, Field, Heading } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
 import { WEBHOOK_ONLY_VARS } from "@/components/RuleEditor";
 import { TemplateEditor } from "@/components/TemplateEditor";
+import { TokenInput } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { ShellContext, type Shell } from "@/lib/shell";
@@ -27,17 +28,21 @@ import { saveLabel, useAutosave } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import type { InboxResponse } from "../../src/inbox.ts";
 import type { Prompt, PromptInput, Settings } from "../../src/rules.ts";
+import type { SentryOptions } from "../../src/sentryInbox.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_PROMPTS,
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
   HANDOFF_TEMPLATE_VARS,
+  INBOX_SOURCE_SETUP,
   INBOX_SOURCES,
   REVIEW_MESSAGE_VARS,
   RUNTIME_MODES,
   TEMPLATE_VARS,
+  sentryQuery,
   type InboxSource,
+  type SentryFilters,
 } from "../../src/shared.ts";
 import type { UpdateResult } from "../../src/update.ts";
 
@@ -45,6 +50,7 @@ const SECTIONS = [
   { id: "connection", label: "Connection" },
   { id: "defaults", label: "Defaults" },
   { id: "polling", label: "Polling" },
+  { id: "sentry", label: "Sentry" },
   { id: "presets", label: "Dispatch presets" },
   { id: "reviews", label: "Reviews" },
   { id: "slack", label: "Slack and MCP" },
@@ -130,6 +136,8 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
           )}
 
           {section.id === "polling" && <Polling draft={draft} patch={patch} />}
+
+          {section.id === "sentry" && <Sentry shell={shell} filters={draft.sentryFilters} onChange={(sentryFilters) => patch({ sentryFilters })} />}
 
           {section.id === "presets" && <Presets />}
 
@@ -349,6 +357,7 @@ async function waitForServer(): Promise<void> {
 const SOURCE_NOTES: Record<InboxSource, string> = {
   github: "Through the gh CLI: review requested, assigned to you, mentioning you, authored by you.",
   linear: "Needs LINEAR_API_KEY in .env: assigned to you, created by you, mentioning you.",
+  sentry: "Needs SENTRY_AUTH_TOKEN and SENTRY_ORG in .env: unresolved issues passing the filters under Sentry.",
 };
 
 /** One row per inbox source: on/off, interval, live state, poll now. */
@@ -372,7 +381,7 @@ function Polling({ draft, patch }: { draft: Settings; patch: (partial: Partial<S
         const live = !status
           ? "…"
           : !status.configured
-            ? source === "linear" ? "LINEAR_API_KEY not set in .env" : "gh CLI not found"
+            ? INBOX_SOURCE_SETUP[source]
             : [status.login && `as ${status.login}`, `${status.items} items`, status.lastPolledAt ? `polled ${timeAgo(status.lastPolledAt)}` : "not polled yet", status.nextAt && status.enabled && `next ${until(status.nextAt)}`]
                 .filter(Boolean)
                 .join(" · ");
@@ -394,6 +403,65 @@ function Polling({ draft, patch }: { draft: Settings; patch: (partial: Partial<S
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * Which Sentry issues reach the inbox. Suggestions come from the instance;
+ * the search line is what the next poll sends. Saving polls Sentry right away.
+ */
+function Sentry({ shell, filters, onChange }: { shell: Shell; filters: SentryFilters; onChange: (filters: SentryFilters) => void }) {
+  const config = shell.status?.sentry ?? null;
+  const options = useQuery({ queryKey: ["sentry-options"], queryFn: () => api<SentryOptions>("/api/sentry/options"), enabled: config !== null, staleTime: 5 * 60_000, retry: false });
+  const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: config !== null });
+  const poll = inbox.data?.polling.sentry ?? null;
+  const patch = (partial: Partial<SentryFilters>) => onChange({ ...filters, ...partial });
+  const suggest = (values: string[] | undefined) => (values ?? []).map((value) => ({ value }));
+  const scope = [filters.environments.length > 0 && `environment ${filters.environments.join(", ")}`, filters.projects.length > 0 && `project ${filters.projects.join(", ")}`].filter(Boolean);
+
+  return (
+    <div className="grid max-w-3xl gap-4">
+      <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-5 gap-y-2 text-xs">
+        <dt className="text-muted-foreground">Instance</dt>
+        <dd className="min-w-0">
+          <Dot tone={config ? "ok" : "idle"} />
+          {config ? (
+            <>
+              <code className={mono}>{config.url}</code> · org <code className={mono}>{config.org}</code>
+            </>
+          ) : shell.status ? (
+            `off · ${INBOX_SOURCE_SETUP.sentry}, plus SENTRY_URL for self-hosted`
+          ) : (
+            "…"
+          )}
+        </dd>
+        {config && (
+          <>
+            <dt className="text-muted-foreground">Inbox</dt>
+            <dd className={cn(poll?.lastError && "text-destructive")}>
+              {!poll ? "…" : poll.lastError ? `failed: ${poll.lastError}` : `${poll.items} issues · ${poll.polling ? "polling…" : poll.lastPolledAt ? `polled ${timeAgo(poll.lastPolledAt)}` : "not polled yet"}`}
+            </dd>
+          </>
+        )}
+      </dl>
+
+      <Field label="Projects" hint="Project slugs, usually one per service. Empty covers every project.">
+        <TokenInput value={filters.projects} onChange={(projects) => patch({ projects })} options={suggest(options.data?.projects)} placeholder="checkout-api" />
+      </Field>
+      <Field label="Environments" hint="Any of the listed. Empty covers every environment.">
+        <TokenInput value={filters.environments} onChange={(environments) => patch({ environments })} options={suggest(options.data?.environments)} placeholder="production" />
+      </Field>
+      <Field label="Tags" hint="key:value. Values of one key match any; different keys must all match. Any Sentry search term works, like level:fatal or !release:beta.">
+        <TokenInput value={filters.tags} onChange={(tags) => patch({ tags })} options={suggest(options.data?.tags)} placeholder="service:checkout" />
+      </Field>
+      <Field label="Search" hint="Unresolved issues seen in the last 14 days, newest first, up to 100.">
+        <code className={cn("break-words", mono)}>
+          {sentryQuery(filters.tags)}
+          {scope.length > 0 && <span className="text-muted-foreground"> · {scope.join(" · ")}</span>}
+        </code>
+      </Field>
+      {options.error && <p className="text-xs text-destructive">Suggestions unavailable: {options.error.message}</p>}
     </div>
   );
 }
