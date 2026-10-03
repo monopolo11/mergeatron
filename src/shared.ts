@@ -9,7 +9,7 @@ export const SERVICE_LABEL = "com.t3.review-orchestrator";
 export const WORKSPACE_MODES = ["worktree", "local"] as const;
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
 
-/** T3 Code runtime modes, from packages/contracts/src/orchestration.ts. */
+/** T3 Code runtime modes, from packages/contracts/src/providerPolicy.ts. */
 export const RUNTIME_MODES = [
   "approval-required",
   "auto-accept-edits",

@@ -1,69 +1,65 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { QUIET_MS, changesRequestedStreak, openTasks, pausedReview, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
+import { QUIET_MS, changesRequestedStreak, pausedReview, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackApiError, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
-import type { T3ThreadTurn } from "./t3.ts";
+import type { T3Thread } from "./t3.ts";
 import { failureOf, runWith, testLayer } from "./testing.ts";
 
 const T0 = Date.parse("2026-09-21T22:56:00.000Z");
 const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
 
-const task = (kind: string, taskId: string, offsetMs: number, status?: string): T3ThreadTurn["activities"][number] => ({
-  kind,
-  turnId: null,
-  createdAt: at(offsetMs),
-  payload: status ? { taskId, status } : { taskId },
+type Run = T3Thread["runs"][number];
+
+const run = (ordinal: number, status: Run["status"], completedOffsetMs: number | null = 0): Run => ({
+  id: `run${ordinal}`,
+  ordinal,
+  status,
+  startedAt: at(-60_000),
+  completedAt: completedOffsetMs === null ? null : at(completedOffsetMs),
 });
 
-/** A thread whose first turn ended "standing by" while two subagents run. */
-function thread(overrides: Partial<T3ThreadTurn> = {}): T3ThreadTurn {
+const reply = (id: string, runId: string, text: string, offsetMs = 0): T3Thread["messages"][number] => ({
+  id,
+  runId,
+  role: "assistant",
+  text,
+  updatedAt: at(offsetMs),
+});
+
+/** A thread whose first run ended "standing by" while a subagent runs. */
+function thread(overrides: Partial<T3Thread> = {}): T3Thread {
   return {
-    latestTurn: { turnId: "t1", state: "completed", completedAt: at(0), assistantMessageId: "a1" },
+    runs: [run(1, "completed")],
     messages: [
-      { id: "u1", role: "user", text: "review it", turnId: null },
-      { id: "a1", role: "assistant", text: "Standing by for their reports.", turnId: "t1" },
+      { id: "u1", runId: "run1", role: "user", text: "review it", updatedAt: at(-60_000) },
+      reply("a1", "run1", "Looking at the diff.", -30_000),
+      reply("a2", "run1", "Standing by for their reports."),
+      reply("a3", "run1", "  "),
     ],
-    activities: [task("task.started", "agentA", -30_000), task("task.started", "agentB", -20_000)],
-    session: { status: "ready", activeTurnId: null, lastError: null },
+    turnItems: [],
+    subagents: [{ status: "running", updatedAt: at(-20_000) }],
+    providerThreads: [{ pendingBackgroundTasks: [], updatedAt: at(0) }],
     ...overrides,
   };
 }
 
-describe("openTasks", () => {
-  test("a task is open from started/progress until completed", () => {
-    const t = thread({
-      activities: [
-        task("task.started", "a", 0),
-        task("task.progress", "a", 1_000),
-        task("task.progress", "b", 2_000),
-        task("task.updated", "c", 3_000, "completed"),
-        task("task.started", "c", 2_500),
-        task("task.completed", "a", 4_000, "failed"),
-      ],
-    });
-    expect([...openTasks(t)]).toEqual(["b"]);
-  });
-});
-
 describe("threadOutcome", () => {
-  test("waits while the turn runs", () => {
-    const t = thread({ latestTurn: { turnId: "t1", state: "running", completedAt: null, assistantMessageId: null } });
-    expect(threadOutcome(t, T0 + QUIET_MS * 10)).toBeNull();
+  test("waits while a run is live, or before the first run starts", () => {
+    expect(threadOutcome(thread({ runs: [run(1, "running", null)], subagents: [] }), T0 + QUIET_MS * 10)).toBeNull();
+    expect(threadOutcome(thread({ runs: [], subagents: [] }), T0 + QUIET_MS * 10)).toBeNull();
   });
 
-  test("waits while background tasks are open, however long the thread is quiet", () => {
-    expect(threadOutcome(thread(), T0 + 30 * 60_000)).toBeNull();
+  test("waits while background work is pending, however long the thread is quiet", () => {
+    const later = T0 + 30 * 60_000;
+    expect(threadOutcome(thread(), later)).toBeNull();
+    expect(threadOutcome(thread({ subagents: [{ status: "completed", completionDelivery: { state: "pending" }, updatedAt: at(0) }] }), later)).toBeNull();
+    expect(threadOutcome(thread({ subagents: [], providerThreads: [{ pendingBackgroundTasks: [{ taskId: "b1" }], updatedAt: at(0) }] }), later)).toBeNull();
   });
 
-  test("waits for the quiet window after the last task reports, then settles on the latest turn", () => {
-    const done = thread({
-      activities: [
-        task("task.started", "agentA", -30_000),
-        task("task.completed", "agentA", 5_000, "completed"),
-      ],
-    });
+  test("waits for the quiet window after the last task reports, then settles on the last non-empty reply", () => {
+    const done = thread({ subagents: [{ status: "completed", completionDelivery: { state: "delivered" }, updatedAt: at(5_000) }] });
     expect(threadOutcome(done, T0 + 5_000 + QUIET_MS - 1)).toBeNull();
     expect(threadOutcome(done, T0 + 5_000 + QUIET_MS)).toEqual({
       status: "done",
@@ -72,25 +68,26 @@ describe("threadOutcome", () => {
     });
   });
 
-  test("the verdict is the final message of the turn that read the task results", () => {
+  test("the verdict is the reply of the latest run, ignoring rolled back ones", () => {
     const verdict = thread({
-      latestTurn: { turnId: "t2", state: "completed", completedAt: at(600_000), assistantMessageId: "a2" },
-      messages: [{ id: "a2", role: "assistant", text: "Review published: APPROVED", turnId: "t2" }],
-      activities: [task("task.started", "agentA", -30_000), task("task.completed", "agentA", 590_000, "completed")],
+      runs: [run(1, "completed"), run(2, "completed", 600_000), run(3, "rolled_back", 610_000)],
+      messages: [reply("a2", "run1", "Standing by."), reply("b1", "run2", "Review published: APPROVED", 600_000)],
+      subagents: [{ status: "completed", updatedAt: at(590_000) }],
     });
     expect(threadOutcome(verdict, T0 + 600_000 + QUIET_MS)?.result).toBe("Review published: APPROVED");
   });
 
-  test("errors, interruptions and a stopped session settle at once, open tasks or not", () => {
-    const errored = thread({
-      latestTurn: { turnId: "t1", state: "error", completedAt: at(0), assistantMessageId: null },
-      session: { status: "ready", activeTurnId: null, lastError: "provider crashed" },
+  test("failures and interruptions settle at once, background work or not", () => {
+    const failed = thread({
+      runs: [run(1, "failed")],
+      turnItems: [
+        { runId: "run1", type: "error", ordinal: 3, failure: { message: "provider crashed" } },
+        { runId: "run1", type: "error", ordinal: 1, failure: { message: "retrying" } },
+      ],
     });
-    expect(threadOutcome(errored, T0)).toMatchObject({ status: "failed", detail: "provider crashed" });
-    const interrupted = thread({ latestTurn: { turnId: "t1", state: "interrupted", completedAt: at(0), assistantMessageId: "a1" } });
-    expect(threadOutcome(interrupted, T0)?.detail).toBe("turn interrupted");
-    const stopped = thread({ session: { status: "stopped", activeTurnId: null, lastError: null } });
-    expect(threadOutcome(stopped, T0)?.status).toBe("done");
+    expect(threadOutcome(failed, T0)).toMatchObject({ status: "failed", detail: "provider crashed" });
+    expect(threadOutcome(thread({ runs: [run(1, "failed")] }), T0)?.detail).toBe("turn failed");
+    expect(threadOutcome(thread({ runs: [run(1, "interrupted")] }), T0)?.detail).toBe("turn interrupted");
   });
 });
 

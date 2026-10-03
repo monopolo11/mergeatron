@@ -5,7 +5,7 @@ import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
-import { T3, type T3ThreadTurn } from "./t3.ts";
+import { T3, type T3RunStatus, type T3Thread } from "./t3.ts";
 import { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
 
 export { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
@@ -18,12 +18,12 @@ export type CompletionServices = Store | T3 | SlackClient | Background | RunEven
 const POLL = Duration.seconds(5);
 /** A review that has run this long is not going to report back; fail it and stop polling. */
 const GIVE_UP = Duration.hours(3);
-/** Time allowed for the turn to appear after the thread was created. */
-const TURN_APPEARS_MS = 2 * 60_000;
+/** Time allowed for the first run to appear after the thread was created. */
+const RUN_APPEARS_MS = 2 * 60_000;
 /**
- * After the last background task reports, T3 takes a few seconds to start the
- * turn that reads its result. Wait this long with no new activity before
- * calling a completed turn the end of the thread.
+ * After the last background task reports, T3 may take a few seconds to start
+ * the run that reads its result. Wait this long with no new activity before
+ * calling a completed run the end of the thread.
  */
 export const QUIET_MS = 60_000;
 
@@ -33,62 +33,59 @@ const threadDuration = Metric.timer("orchestrator_thread_duration", { descriptio
 
 export type TurnOutcome = { status: "done" | "failed"; detail: string; result: string | null };
 
-/** Maps a settled turn to what the run log records. Null while the turn is still running. */
-export function turnOutcome(thread: T3ThreadTurn): TurnOutcome | null {
-  const turn = thread.latestTurn;
-  if (!turn || turn.state === "running") return null;
-  const final = thread.messages.find((m) => m.id === turn.assistantMessageId)?.text
-    ?? thread.messages.filter((m) => m.role === "assistant" && m.turnId === turn.turnId).at(-1)?.text
-    ?? null;
-  switch (turn.state) {
-    case "completed":
-      return { status: "done", detail: "turn completed", result: final };
-    case "interrupted":
-      return { status: "done", detail: "turn interrupted", result: final };
-    case "error":
-      return { status: "failed", detail: thread.session?.lastError ?? "turn failed", result: final };
+type T3Run = T3Thread["runs"][number];
+
+const RUN_FINISHED = new Set<T3RunStatus>(["completed", "interrupted", "failed", "cancelled", "rolled_back"]);
+const WORK_ACTIVE = new Set(["pending", "running", "waiting"]);
+
+/** Maps a finished run to what the run log records: its last non-empty reply, and for a failure the reason. */
+function runOutcome(thread: T3Thread, run: T3Run): TurnOutcome {
+  const result = thread.messages
+    .filter((message) => message.runId === run.id && message.role === "assistant" && message.text.trim() !== "")
+    .toSorted((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+    .at(-1)?.text ?? null;
+  if (run.status === "failed") {
+    const error = thread.turnItems
+      .filter((item) => item.runId === run.id && item.type === "error")
+      .toSorted((a, b) => a.ordinal - b.ordinal)
+      .at(-1);
+    return { status: "failed", detail: error?.failure?.message ?? "turn failed", result };
   }
+  return { status: "done", detail: `turn ${run.status === "completed" ? "completed" : "interrupted"}`, result };
 }
 
-/** Task activities whose status closes the task; `task.completed` always does. */
-const TASK_TERMINAL_STATUS = new Set(["completed", "failed", "stopped"]);
-
 /**
- * Ids of background tasks (subagents, background shells) that have started or
- * reported progress but not finished. Activities are keyed by `taskId`, not by
- * turn, because a task started in one turn is read by the next.
+ * True while background work will wake the thread again: a live subagent, a
+ * finished one whose result T3 has not delivered yet, or provider-owned work
+ * such as a background shell. Mirrors `delegatedTaskProgress` in T3's
+ * apps/server/src/orchestration-v2/SubagentProjection.ts.
  */
-export function openTasks(thread: T3ThreadTurn): Set<string> {
-  const open = new Set<string>();
-  const byTime = thread.activities.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
-  for (const activity of byTime) {
-    if (!activity.kind.startsWith("task.")) continue;
-    const payload = activity.payload;
-    if (typeof payload !== "object" || payload === null) continue;
-    const { taskId, status } = payload as { taskId?: unknown; status?: unknown };
-    if (typeof taskId !== "string") continue;
-    const terminal = activity.kind === "task.completed" || (typeof status === "string" && TASK_TERMINAL_STATUS.has(status));
-    if (terminal) open.delete(taskId);
-    else open.add(taskId);
-  }
-  return open;
+function hasBackgroundWork(thread: T3Thread): boolean {
+  return (
+    thread.subagents.some(
+      (task) => WORK_ACTIVE.has(task.status) || task.completionDelivery?.state === "pending" || task.completionDelivery?.state === "claimed",
+    ) || thread.providerThreads.some((provider) => (provider.pendingBackgroundTasks?.length ?? 0) > 0)
+  );
 }
 
 /**
  * What the run log records once the thread is done, or null while the agent is
- * still working. A completed turn is not the end when background tasks are
- * still running or the thread was active within `QUIET_MS`: T3 will start a
- * new turn to read their results. Errors, interruptions and a stopped session
- * settle at once since nothing more can happen.
+ * still working. The result is the latest run's (rolled back runs do not
+ * count). A completed run is not the end while background work is pending or
+ * the thread was active within `QUIET_MS`: T3 will start a new run to read
+ * its results. Failures and interruptions settle at once.
  */
-export function threadOutcome(thread: T3ThreadTurn, now = Date.now()): TurnOutcome | null {
-  const outcome = turnOutcome(thread);
-  if (!outcome) return null;
-  if (thread.latestTurn?.state !== "completed" || thread.session?.status === "stopped") return outcome;
-  if (openTasks(thread).size > 0) return null;
+export function threadOutcome(thread: T3Thread, now = Date.now()): TurnOutcome | null {
+  const runs = thread.runs.filter((run) => run.status !== "rolled_back");
+  if (runs.some((run) => !RUN_FINISHED.has(run.status))) return null;
+  const run = runs.filter((run) => run.startedAt !== null || run.ordinal === 1).toSorted((a, b) => a.ordinal - b.ordinal).at(-1);
+  if (!run) return null;
+  const outcome = runOutcome(thread, run);
+  if (run.status !== "completed") return outcome;
+  if (hasBackgroundWork(thread)) return null;
   const lastActivity = Math.max(
-    Date.parse(thread.latestTurn.completedAt ?? "") || 0,
-    ...thread.activities.map((activity) => Date.parse(activity.createdAt) || 0),
+    Date.parse(run.completedAt ?? "") || 0,
+    ...[...thread.subagents, ...thread.providerThreads].map((work) => Date.parse(work.updatedAt) || 0),
   );
   return now - lastActivity >= QUIET_MS ? outcome : null;
 }
@@ -127,7 +124,7 @@ const watcher = (runId: string, threadId: string, startedAt: number) =>
       }
       const outcome = threadOutcome(snapshot.success, now);
       if (outcome) return Option.some(outcome);
-      if (!snapshot.success.latestTurn && now - startedAt > TURN_APPEARS_MS) return Option.some(failed("thread never started a turn"));
+      if (snapshot.success.runs.length === 0 && now - startedAt > RUN_APPEARS_MS) return Option.some(failed("thread never started a turn"));
       return Option.none<TurnOutcome>();
     });
 

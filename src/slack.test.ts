@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Effect, Fiber, SubscriptionRef } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { createHash } from "node:crypto";
-import { turnOutcome } from "./completion.ts";
 import { cleanSlackText, extractSlackContext, runSlackSocket, slackDelivery, slackEvent, slackOrigin, socketMessage, toMrkdwn, type SlackEvent } from "./slack.ts";
 
 const mention = {
@@ -91,35 +90,6 @@ describe("slackDelivery", () => {
 describe("toMrkdwn", () => {
   test("converts headers, bold, links and bullets", () => {
     expect(toMrkdwn("## Findings\n\n- **src/a.ts:3** see [PR](https://x.y/p)")).toBe("*Findings*\n\n• *src/a.ts:3* see <https://x.y/p|PR>");
-  });
-});
-
-describe("turnOutcome", () => {
-  const thread = {
-    latestTurn: { turnId: "t1", state: "completed" as const, completedAt: "2026-09-21T00:00:00.000Z", assistantMessageId: "a2" },
-    messages: [
-      { id: "u1", role: "user" as const, text: "review", turnId: null },
-      { id: "a1", role: "assistant" as const, text: "looking", turnId: "t1" },
-      { id: "a2", role: "assistant" as const, text: "done: 2 findings", turnId: "t1" },
-    ],
-    activities: [],
-    session: { status: "ready", activeTurnId: null, lastError: null },
-  };
-
-  test("returns null while running or before the turn exists", () => {
-    expect(turnOutcome({ ...thread, latestTurn: { ...thread.latestTurn, state: "running" } })).toBeNull();
-    expect(turnOutcome({ ...thread, latestTurn: null })).toBeNull();
-  });
-
-  test("uses the turn's final assistant message", () => {
-    expect(turnOutcome(thread)).toEqual({ status: "done", detail: "turn completed", result: "done: 2 findings" });
-  });
-
-  test("falls back to the last assistant message of the turn, and reports errors", () => {
-    const noPointer = { ...thread, latestTurn: { ...thread.latestTurn, assistantMessageId: null } };
-    expect(turnOutcome(noPointer)?.result).toBe("done: 2 findings");
-    const errored = { ...thread, latestTurn: { ...thread.latestTurn, state: "error" as const }, session: { ...thread.session, lastError: "provider down" } };
-    expect(turnOutcome(errored)).toMatchObject({ status: "failed", detail: "provider down" });
   });
 });
 

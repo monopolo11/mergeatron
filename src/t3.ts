@@ -12,13 +12,14 @@ import type { RuntimeMode } from "./shared.ts";
 const log = logger("t3");
 
 /**
- * Minimal client for a T3 Code environment.
+ * Minimal client for a T3 Code environment speaking orchestration protocol 2
+ * (T3 0.0.46 and later).
  *
- * Reads go over HTTP (`packages/contracts/src/environmentHttp.ts`). Commands go
- * over the WebSocket RPC (`orchestration.dispatchCommand`) because only that
- * path runs the thread bootstrap: T3 fetches the base branch, creates the
- * worktree, runs the project's setup script, then starts the turn. The token
- * needs the `orchestration:operate` scope.
+ * Reads go over HTTP (`packages/contracts/src/environmentHttp.ts`). Writes go
+ * over the WebSocket RPC (`packages/contracts/src/orchestrationV2.ts`):
+ * `orchestration.launchThread` creates the thread, fetches the base branch,
+ * creates the worktree, runs the project's setup script and sends the first
+ * message. The token needs the `orchestration:operate` scope.
  */
 
 export type T3Project = {
@@ -69,24 +70,34 @@ export type T3Environment = {
   serverVersion: string;
 };
 
+/** `OrchestrationV2RunStatus`: every message the agent answers is one run. */
+export type T3RunStatus =
+  | "preparing"
+  | "queued"
+  | "starting"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "interrupted"
+  | "failed"
+  | "cancelled"
+  | "rolled_back";
+
 /**
- * The slice of a thread snapshot needed to tell when the agent is done and
- * what it said. `activities` carry background tasks (subagents, background
- * shells) that outlive the turn that started them: T3 begins a new turn when
- * they report back, so a completed turn alone does not mean the thread is done.
+ * The slice of a thread projection needed to tell when the agent is done and
+ * what it said. Background work (subagents, background shells) can outlive
+ * the run that started it: it shows as live `subagents` or provider
+ * `pendingBackgroundTasks`, and T3 starts a new run when it reports back, so
+ * a completed run alone does not mean the thread is done.
  */
-export type T3ThreadTurn = {
-  latestTurn: {
-    turnId: string;
-    state: "running" | "interrupted" | "completed" | "error";
-    completedAt: string | null;
-    assistantMessageId: string | null;
-  } | null;
-  messages: Array<{ id: string; role: "user" | "assistant" | "system"; text: string; turnId: string | null }>;
-  /** T3 keeps the last 500 entries plus a few pinned kinds. */
-  activities: Array<{ kind: string; turnId: string | null; createdAt: string; payload: unknown }>;
-  /** `stopped` means the provider process exited: nothing more will happen. */
-  session: { status: string; activeTurnId: string | null; lastError: string | null } | null;
+export type T3Thread = {
+  runs: Array<{ id: string; ordinal: number; status: T3RunStatus; startedAt: string | null; completedAt: string | null }>;
+  /** A recent window (bounded snapshot) that always holds the latest run's messages. */
+  messages: Array<{ id: string; runId: string | null; role: "user" | "assistant" | "system"; text: string; updatedAt: string }>;
+  /** Same window as `messages`; a failed run records its reason as an `error` item. */
+  turnItems: Array<{ runId: string | null; type: string; ordinal: number; failure?: { message: string } }>;
+  subagents: Array<{ status: string; completionDelivery?: { state: string }; updatedAt: string }>;
+  providerThreads: Array<{ pendingBackgroundTasks?: unknown[]; updatedAt: string }>;
 };
 
 export type StartThreadInput = {
@@ -97,7 +108,7 @@ export type StartThreadInput = {
   runtimeMode: RuntimeMode;
   /** Branch the thread starts from (PR head, or the default branch). */
   baseBranch: string | null;
-  /** Ask T3 to create a worktree from `origin/<baseBranch>`; otherwise run in the checkout. */
+  /** Ask T3 to create a worktree from `origin/<baseBranch>` (T3 names its branch); otherwise run in the checkout. */
   worktree: boolean;
   pullRequest: { repository: string; number: number; url: string } | null;
 };
@@ -123,6 +134,8 @@ export type T3Error = T3HttpError | T3RpcError;
 const DISPATCH_TIMEOUT = "10 minutes";
 const PROVIDERS_CACHE = "30 seconds";
 const DEFAULT_ORIGIN = "http://127.0.0.1:3773";
+/** T3 answers 426 on the socket and 400 on orchestration reads without it (`packages/contracts/src/environment.ts`). */
+const PROTOCOL = "2";
 
 export type T3Shape = {
   readonly origin: string;
@@ -131,8 +144,8 @@ export type T3Shape = {
   readonly projects: () => Effect.Effect<T3Project[], T3HttpError>;
   /** Provider instances with their model lists, from `server.getConfig`. Cached briefly: the config payload is large. */
   readonly providers: () => Effect.Effect<T3Provider[], T3Error>;
-  /** Latest turn of a thread with only that turn's messages (`turnLimit=1`). */
-  readonly thread: (threadId: string) => Effect.Effect<T3ThreadTurn, T3HttpError>;
+  /** Runs and background work of a thread, with only its recent messages (bounded snapshot). */
+  readonly thread: (threadId: string) => Effect.Effect<T3Thread, T3HttpError>;
   /** Creates the thread (and worktree, when asked), sends the prompt, links the PR. */
   readonly startThread: (input: StartThreadInput) => Effect.Effect<StartedThread, T3Error>;
 };
@@ -146,7 +159,10 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
   const request = <T>(method: "GET" | "POST", path: string, options: { authenticated?: boolean } = {}): Effect.Effect<T, T3HttpError> =>
     Effect.gen(function* () {
       const response = yield* client.execute(
-        HttpClientRequest.make(method)(`${origin}${path}`).pipe(options.authenticated === false ? identity : HttpClientRequest.bearerToken(token)),
+        HttpClientRequest.make(method)(`${origin}${path}`).pipe(
+          HttpClientRequest.setHeader("x-t3-orchestration-protocol", PROTOCOL),
+          options.authenticated === false ? identity : HttpClientRequest.bearerToken(token),
+        ),
       );
       if (response.status < 200 || response.status >= 300) {
         const body = yield* response.text;
@@ -157,7 +173,7 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
 
   /**
    * One RPC request per socket. The socket stays open until the server
-   * replies: closing early would cancel an in-flight worktree bootstrap.
+   * replies: closing early would cancel the request.
    */
   const rpc = <T>(tag: string, payload: Record<string, unknown>): Effect.Effect<T, T3Error> =>
     Effect.gen(function* () {
@@ -165,6 +181,7 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
       const url = new URL("/ws", origin);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("wsTicket", ticket);
+      url.searchParams.set("orchestrationProtocol", PROTOCOL);
       const what = tag === "orchestration.dispatchCommand" ? `dispatch ${String(payload.type)}` : tag;
       const fail = (message: string) => new T3RpcError({ message: `T3 ${what} failed: ${message}` });
 
@@ -226,53 +243,27 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
 
   const dispatch = (command: Record<string, unknown>) => rpc<{ sequence: number }>("orchestration.dispatchCommand", command);
 
+  /**
+   * Returns once T3 accepted the launch; the worktree and setup script are
+   * prepared in the background, and a failure there fails the thread's run.
+   */
   const startThread = Effect.fn("t3.startThread")(function* (input: StartThreadInput) {
-    const threadId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
-    const prepareWorktree = input.worktree && input.baseBranch !== null;
-    yield* Effect.annotateCurrentSpan({ project: input.project.id, thread: threadId, worktree: prepareWorktree });
+    const worktree = input.worktree && input.baseBranch !== null;
+    yield* Effect.annotateCurrentSpan({ project: input.project.id, worktree });
 
-    yield* dispatch({
-      type: "thread.turn.start",
+    const { threadId } = yield* rpc<{ threadId: string }>("orchestration.launchThread", {
       commandId: crypto.randomUUID(),
-      threadId,
-      message: {
-        messageId: crypto.randomUUID(),
-        role: "user",
-        text: input.prompt,
-        attachments: [],
-      },
+      projectId: input.project.id,
+      title: input.title,
       modelSelection: input.modelSelection,
-      titleSeed: input.title,
       runtimeMode: input.runtimeMode,
       interactionMode: "default",
-      bootstrap: {
-        createThread: {
-          projectId: input.project.id,
-          title: input.title,
-          modelSelection: input.modelSelection,
-          runtimeMode: input.runtimeMode,
-          interactionMode: "default",
-          branch: input.baseBranch,
-          worktreePath: null,
-          createdAt,
-        },
-        ...(prepareWorktree
-          ? {
-              prepareWorktree: {
-                projectCwd: input.project.workspaceRoot,
-                baseBranch: input.baseBranch,
-                // Same temporary branch shape T3's own composer uses.
-                branch: `t3code/${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`,
-                startFromOrigin: true,
-                requireWorktree: true,
-              },
-              runSetupScript: true,
-            }
-          : {}),
-      },
-      createdAt,
+      workspaceStrategy: worktree
+        ? { type: "worktree", baseRef: input.baseBranch, startFromOrigin: true }
+        : { type: "root", ...(input.baseBranch ? { branch: input.baseBranch } : {}) },
+      initialMessage: { text: input.prompt, attachments: [] },
     });
+    yield* Effect.annotateCurrentSpan({ thread: threadId });
 
     if (input.pullRequest) {
       // Best effort: the thread is already running, a failed link is only cosmetic.
@@ -296,12 +287,15 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
     origin,
     environment,
     projects: () =>
-      Effect.map(request<{ projects: T3Project[] }>("GET", "/api/orchestration/snapshot"), (snapshot) =>
+      Effect.map(request<{ projects: T3Project[] }>("GET", "/api/projects"), (snapshot) =>
         snapshot.projects.filter((project) => project.deletedAt === null),
       ),
     providers: () => providers,
     thread: (threadId) =>
-      Effect.map(request<{ thread: T3ThreadTurn }>("GET", `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`), (snapshot) => snapshot.thread),
+      Effect.map(
+        request<{ projection: T3Thread }>("GET", `/api/orchestration/threads/${encodeURIComponent(threadId)}/bounded`),
+        (snapshot) => snapshot.projection,
+      ),
     startThread,
   };
   return shape;

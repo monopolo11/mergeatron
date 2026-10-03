@@ -9,13 +9,15 @@ Slack triggers posts the agent's reply back into the Slack thread.
 
 ## How it talks to T3 Code
 
-The service sends one `thread.turn.start` command over T3 Code's WebSocket RPC
-(`orchestration.dispatchCommand`, see `packages/contracts/src/rpc.ts`) with the
-same bootstrap the composer uses: T3 creates the thread, fetches the base branch,
-creates the worktree, runs the project's setup script and starts the turn. The
-service then links the PR to the thread. Auth is a scoped bearer token issued by
-the `t3` CLI against the same `~/.t3/userdata` database the desktop app uses;
-reads (projects, environment descriptor) go over HTTP with the same token.
+The service speaks T3's orchestration protocol 2 (T3 Code 0.0.46 and later). It
+launches each thread with one `orchestration.launchThread` call over the
+WebSocket RPC (see `packages/contracts/src/orchestrationV2.ts`): T3 creates the
+thread, fetches the base branch, creates the worktree, runs the project's setup
+script and sends the prompt. The service then links the PR to the thread and
+polls the thread's bounded snapshot until its runs and background work settle.
+Auth is a scoped bearer token issued by the `t3` CLI against the same
+`~/.t3/userdata` database the desktop app uses; reads (projects, threads,
+environment descriptor) go over HTTP with the same token.
 
 ## Setup
 
