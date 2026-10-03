@@ -67,6 +67,14 @@ describe("extractSlackContext", () => {
     expect(extractSlackContext({ type: "app_mention", channel: "C1", ts: "2.0", text: "<@UBOT> hi" }).event).toBe("slack.app_mention");
   });
 
+  test("later rounds ('third pass', '4th pass') are keyed slack.second_pass too", () => {
+    for (const phrase of ["third pass", "Fourth-pass", "4th pass", "10th pass", "next pass", "another pass"]) {
+      const ctx = extractSlackContext({ type: "app_mention", channel: "C1", ts: "2.0", thread_ts: "1.0", text: `<@UBOT> ${phrase}` });
+      expect(ctx.event).toBe("slack.second_pass");
+    }
+    expect(extractSlackContext({ type: "app_mention", channel: "C1", ts: "2.0", text: "<@UBOT> first pass" }).event).toBe("slack.app_mention");
+  });
+
   test("leaves repo empty when the message has no PR link", () => {
     const ctx = extractSlackContext({ type: "message", channel: "C1", ts: "1", text: "hello" });
     expect(ctx.repo).toBe("");

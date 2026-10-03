@@ -193,7 +193,7 @@ export function RuleEditor({
                 : draft.events.includes("slack.message")
                   ? "slack.message fires only for channel messages that link a GitHub PR."
                   : draft.events.includes("slack.second_pass")
-                    ? "slack.second_pass fires when the bot is mentioned with 'second pass' inside a review thread. Use {{previous_result}} to hand the agent the first review."
+                    ? "slack.second_pass fires when the bot is mentioned with 'second pass' (or third, fourth...) inside a review thread. Use {{previous_result}} to hand the agent the previous review."
                     : "Any selected event starts this rule."
             }
           >

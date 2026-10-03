@@ -154,7 +154,7 @@ export const SUGGESTED_EVENTS = [
   { key: "issues.labeled", label: "Issue: labeled" },
   { key: "slack.app_mention", label: "Slack: bot mentioned" },
   { key: "slack.message", label: "Slack: PR link posted in channel" },
-  { key: "slack.second_pass", label: "Slack: 'second pass' mention in a review thread" },
+  { key: "slack.second_pass", label: "Slack: 'second/third/next/another pass' mention in a review thread" },
   { key: "inbox.github.pull_request", label: "Inbox: GitHub PR" },
   { key: "inbox.github.issue", label: "Inbox: GitHub issue" },
   { key: "inbox.linear.issue", label: "Inbox: Linear issue" },

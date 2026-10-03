@@ -94,7 +94,7 @@ service fetches the head branch with the `gh` CLI so the worktree starts at the 
 head. Without `gh` or access to the repository the thread runs in the local
 checkout instead, so add `gh pr checkout {{pr_number}}` to the prompt as a fallback.
 
-Mentioning the bot with "second pass" inside a review's Slack thread
+Mentioning the bot with "second pass" (or "third pass", "4th pass", "next pass", "another pass"...) inside a review's Slack thread
 (`@T3 Review second pass`) re-reviews that PR in a new T3 thread. The PR comes
 from the message the thread hangs under (or a PR link in the mention). It fires
 rules with event `slack.second_pass`, whose prompt can use `{{previous_result}}`

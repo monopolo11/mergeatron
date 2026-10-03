@@ -72,15 +72,19 @@ export function pullRequestInText(text: string): { repo: string; number: string;
   return match ? { repo: match[1]!, number: match[2]!, url: match[0] } : null;
 }
 
-/** Rule key for a mention asking for another review inside an existing review thread. */
+/**
+ * Rule key for a mention asking for another review inside an existing review
+ * thread. Every later round ("second pass", "third pass", "4th pass", "next
+ * pass", "another pass"...) uses it, so one rule serves them all.
+ */
 export const SECOND_PASS_EVENT = "slack.second_pass";
-const SECOND_PASS = /\bsecond[- ]pass\b/i;
+const LATER_PASS = /\b(?:next|another|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|(?:[2-9]|10)(?:nd|rd|th))[- ]pass\b/i;
 
 /**
  * Template variables for a Slack message. The first GitHub PR link in the text
  * sets `repo`, `pr_number` and `pr_url`; `pr_head` and friends come later from
  * GitHub (see pulls.ts) because Slack only knows the URL. A mention saying
- * "second pass" is keyed `slack.second_pass`; its PR is resolved from the
+ * "second pass" (or third, next, another...) is keyed `slack.second_pass`; its PR is resolved from the
  * thread it was posted in (see secondPass.ts).
  */
 export function extractSlackContext(event: SlackEvent): WebhookContext {
@@ -88,7 +92,7 @@ export function extractSlackContext(event: SlackEvent): WebhookContext {
   const pr = pullRequestInText(text);
   const ctx: WebhookContext = {
     repo: pr?.repo ?? "",
-    event: event.type === "app_mention" && SECOND_PASS.test(text) ? SECOND_PASS_EVENT : `slack.${event.type}`,
+    event: event.type === "app_mention" && LATER_PASS.test(text) ? SECOND_PASS_EVENT : `slack.${event.type}`,
     slack_channel: event.channel,
     slack_ts: event.ts,
     slack_text: text,
