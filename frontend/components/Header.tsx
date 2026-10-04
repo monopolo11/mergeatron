@@ -9,13 +9,14 @@ import type { UpdateStatus } from "../../src/update.ts";
 const NAV = [
   { to: "/", label: "Rules" },
   { to: "/inbox", label: "Inbox" },
+  { to: "/runs", label: "Runs" },
   { to: "/reviews", label: "Reviews" },
   { to: "/analytics", label: "Analytics" },
   { to: "/settings", label: "Settings" },
 ] as const;
 
 /**
- * Wordmark, navigation, connection health and the run panel toggle. Health is
+ * Wordmark, navigation, connection health and the live run panel toggle. Health is
  * a dot and a word per connection; the word only says more when something
  * needs attention. Details and actions live in Settings.
  */
@@ -28,10 +29,11 @@ export function Header({
 }: {
   status: Status | null;
   update: UpdateStatus | null;
-  /** Threads running right now, shown on the Runs toggle. */
+  /** Threads running right now, shown on the Live toggle. */
   running: number;
   runsOpen: boolean;
-  onToggleRuns: () => void;
+  /** Absent where the panel does not show (the Runs page), which hides the toggle. */
+  onToggleRuns?: () => void;
 }) {
   return (
     <header className="flex h-10 min-w-0 items-center gap-4 overflow-hidden border-b px-3">
@@ -63,10 +65,12 @@ export function Header({
           </Link>
         )}
       </div>
-      <Button size="xs" variant="ghost" aria-pressed={runsOpen} className={cn("hidden lg:inline-flex", runsOpen && "bg-muted")} onClick={onToggleRuns}>
-        Runs
-        {running > 0 && <span className="font-mono text-active">{running}</span>}
-      </Button>
+      {onToggleRuns && (
+        <Button size="xs" variant="ghost" aria-pressed={runsOpen} className={cn("hidden lg:inline-flex", runsOpen && "bg-muted")} onClick={onToggleRuns}>
+          Live
+          {running > 0 && <span className="font-mono text-active">{running}</span>}
+        </Button>
+      )}
     </header>
   );
 }

@@ -9,6 +9,8 @@ import {
   EMPTY_FILTERS,
   EMPTY_SENTRY_FILTERS,
   INBOX_REASONS,
+  PROMPT_VERSION_OWNERS,
+  RUN_SOURCES,
   RUNTIME_MODES,
   WORKSPACE_MODES,
   inboxSource,
@@ -151,6 +153,30 @@ export const DispatchInput = Schema.Struct({
 });
 export type DispatchInput = typeof DispatchInput.Type;
 
+const intFromString = Schema.FiniteFromString.check(Schema.isInt());
+
+/**
+ * Search params of the runs page's list (`GET /api/runs/history`): the
+ * RunFilter fields, with the prompt split into owner, id and optional version.
+ */
+export const RunQuery = Schema.Struct({
+  ruleId: Schema.optional(nonEmpty),
+  source: Schema.optional(Schema.Literals(RUN_SOURCES)),
+  model: Schema.optional(nonEmpty),
+  promptOwner: Schema.optional(Schema.Literals(PROMPT_VERSION_OWNERS)),
+  promptId: Schema.optional(nonEmpty),
+  promptVersion: Schema.optional(intFromString.check(Schema.isGreaterThanOrEqualTo(1))),
+  since: Schema.optional(nonEmpty),
+  limit: Schema.optional(intFromString.check(Schema.isBetween({ minimum: 1, maximum: 500 }))),
+});
+
+/** A rating from the runs page: a 0 to 10 score, written feedback, or both. Rating again replaces it. */
+export const RunRatingInput = Schema.Struct({
+  rating: Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10 }))).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  feedback: cleanedOrNull((text) => text),
+}).check(Schema.makeFilter((input) => (input.rating !== null || input.feedback !== null ? undefined : "Give a score, feedback or both.")));
+export type RunRatingInput = typeof RunRatingInput.Type;
+
 export const DEFAULT_SETTINGS: Settings = {
   model: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
   runtimeMode: "full-access",
@@ -175,4 +201,5 @@ export type RowChecks = [
   Extends<SettingsInput["polling"], PollingSettings>,
   Extends<RuleInput["filters"], RuleFilters>,
   Extends<SettingsInput["sentryFilters"], SentryFilters>,
+  Extends<RunRatingInput, Pick<Run, "rating" | "feedback">>,
 ];

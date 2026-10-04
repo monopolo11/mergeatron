@@ -18,15 +18,21 @@ export class RunNotFoundError extends Data.TaggedError("RunNotFoundError")<{ rea
 /** A run with the prompt versions its first message is made of (see `runPrompts`). */
 type RunWithPrompts = Run & { promptRefs: PromptRef[] };
 
+/**
+ * The PR or issue a run is about, from its context. `ref` is `#12` for PRs
+ * and GitHub issues, the tracker's key (`FOU-12`) for Linear and Sentry.
+ */
+type RunSubject = { title: string | null; url: string | null; ref: string | null };
+
 /** A run without its large fields (context, reply), for lists. */
-export type RunSummary = Omit<RunWithPrompts, "context" | "result"> & { title: string | null; url: string | null };
+export type RunSummary = Omit<RunWithPrompts, "context" | "result"> & RunSubject;
 
 /**
  * One run in full: what it was set to start with (its rule's settings, see
  * RunAction) and its first message, rendered again from its prompt versions
  * and context. Null for handoffs and connection tests, which have neither.
  */
-export type RunDetail = RunWithPrompts & { action: RunAction | null; prompt: string | null };
+export type RunDetail = RunWithPrompts & RunSubject & { action: RunAction | null; prompt: string | null };
 
 const withPromptRefs = (runs: Run[]) =>
   Effect.gen(function* () {
@@ -34,11 +40,16 @@ const withPromptRefs = (runs: Run[]) =>
     return runs.map((run): RunWithPrompts => ({ ...run, promptRefs: refs.get(run.id) ?? [] }));
   });
 
-const summarize = ({ context, result, ...run }: RunWithPrompts): RunSummary => ({
-  ...run,
-  title: context?.pr_title ?? context?.issue_title ?? null,
-  url: context?.pr_url ?? context?.issue_url ?? null,
-});
+const subject = (context: Run["context"]): RunSubject => {
+  const number = context?.pr_number ?? context?.issue_number;
+  return {
+    title: context?.pr_title ?? context?.issue_title ?? null,
+    url: context?.pr_url ?? context?.issue_url ?? null,
+    ref: context?.issue_identifier ?? (number ? `#${number}` : null),
+  };
+};
+
+const summarize = ({ context, result, ...run }: RunWithPrompts): RunSummary => ({ ...run, ...subject(context) });
 
 export const listRuns = Effect.fn("runs.list")(function* (filter: RunFilter) {
   return (yield* withPromptRefs(yield* (yield* Store).listRuns(filter))).map(summarize);
@@ -52,6 +63,7 @@ export const getRun = Effect.fn("runs.get")(function* (id: string) {
   const bodies = withPrompts!.promptRefs.length > 0 ? yield* store.promptBodies(withPrompts!.promptRefs) : null;
   const detail: RunDetail = {
     ...withPrompts!,
+    ...subject(run.context),
     action: yield* store.getRunAction(id),
     prompt: bodies && run.context ? renderTemplate(joinPrompts(bodies), run.context) : null,
   };

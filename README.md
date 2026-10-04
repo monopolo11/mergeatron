@@ -44,7 +44,7 @@ cp .env.example .env
 
    The UI is at http://localhost:8787. **Rules** lists your rules on the left with the
    selected rule's editor beside it (changes save with **Save**, see [Prompt versions](#prompt-versions)). The live run log sits on the
-   right of every page; **Runs** in the top bar hides it. The webhook endpoint
+   right of every page but **Runs**; **Live** in the top bar hides it. The webhook endpoint
    is `POST /webhooks/github`. **Settings** is its own page with six sections, one shown at a time:
    **Connection** (what the service talks to, a **Test thread** button that starts a
    one-message thread in a project to confirm the token, RPC and provider work
@@ -352,6 +352,25 @@ queued review holds its PR's one-at-a-time lock like a running one, and is
 skipped if the PR got a thread from elsewhere before its turn. Dispatches from
 the inbox share one limit set in the dialog. Slack-triggered reviews react ⏳
 while queued, then 👀 when they start.
+
+## Runs
+
+**Runs** lists every run newest first with its target, rule, model, prompt
+version, status, how long its thread worked and its score. The selects filter
+by rule, source, model, prompt (one version, or all versions of a preset or
+rule prompt) and time; the counts toggle status and unrated. Filters live in
+the URL, so a filtered view can be linked. The toolbar sums up the listed runs:
+how many are scored, their average score and average work time, so filtering
+by one prompt version and then another compares them.
+
+Picking a run opens it beside the table: trigger, model, prompt versions (the
+rendered message on **show**), timing, the reply, and a 0 to 10 score with
+written feedback. Either one alone saves; rating again replaces it. **Next
+unrated** (or ⌘⏎ in the feedback box, which saves first) moves to the next
+finished run without a rating. Ratings feed the MCP `run_analytics` tool. The
+API is `GET /api/runs/history` (the filters as `ruleId`, `source`, `model`,
+`promptOwner`, `promptId`, `promptVersion`, `since`, `limit`), `GET /api/runs/:id`
+and `PUT /api/runs/:id/rating` with `{ rating, feedback }`.
 
 ## Analytics
 

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useNavigate } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useNavigate, useRouterState } from "@tanstack/react-router";
 import { use, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -11,6 +11,7 @@ import { Reviews, STATUS_FILTERS } from "@/components/Reviews";
 import { RuleEditor } from "@/components/RuleEditor";
 import { RulesList } from "@/components/RulesList";
 import { RunLog } from "@/components/RunLog";
+import { Runs, validateRunsSearch } from "@/components/Runs";
 import { SettingsPage } from "@/components/Settings";
 import { Button } from "@/components/ui/button";
 import { api, type Status } from "@/lib/api";
@@ -49,7 +50,7 @@ const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
 /** Remembers whether the run panel is open across reloads. */
 const RUNS_PANEL_KEY = "t3-review.runs-panel";
 
-/** App shell: top bar, the active route, and the run log beside it on every page. */
+/** App shell: top bar, the active route, and the live run log beside it on every page but Runs. */
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [projects, setProjects] = useState<T3Project[]>([]);
@@ -62,6 +63,9 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [runsOpen, setRunsOpen] = useState(() => localStorage.getItem(RUNS_PANEL_KEY) !== "closed");
   const navigate = useNavigate();
+  // The Runs page lists the same runs, so the live panel and its toggle step aside there.
+  const onRunsPage = useRouterState({ select: (state) => state.location.pathname === "/runs" });
+  const liveOpen = runsOpen && !onRunsPage;
 
   const toggleRuns = () => {
     const next = !runsOpen;
@@ -140,13 +144,13 @@ function App() {
   return (
     <ShellContext value={{ status, projects, providers, settings, saveSettings, update, updateError, recheckUpdate, rules, selected, selectRule, runs, webhookUrl, createRule, saveRule, toggleRule, deleteRule, refreshRuns }}>
       <div className="grid h-screen grid-rows-[40px_1fr] overflow-hidden">
-        <Header status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={toggleRuns} />
+        <Header status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={onRunsPage ? undefined : toggleRuns} />
 
-        <div className={cn("grid overflow-hidden", runsOpen && "lg:grid-cols-[1fr_340px]")}>
+        <div className={cn("grid overflow-hidden", liveOpen && "lg:grid-cols-[1fr_340px]")}>
           <main className="min-w-0 overflow-auto">
             <Outlet />
           </main>
-          {runsOpen && (
+          {liveOpen && (
             <aside className="hidden overflow-auto border-l lg:block">
               <RunLog runs={runs} rules={rules ?? []} webhookUrl={webhookUrl} />
             </aside>
@@ -187,6 +191,7 @@ const rootRoute = createRootRoute({ component: App });
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: RulesMain }),
   createRoute({ getParentRoute: () => rootRoute, path: "/inbox", component: Inbox }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/runs", validateSearch: validateRunsSearch, component: Runs }),
   createRoute({
     getParentRoute: () => rootRoute,
     path: "/reviews",

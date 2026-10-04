@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Empty, ExternalLink, RunStatus } from "@/components/Field";
 import { Toolbar } from "@/components/Toolbar";
@@ -8,7 +9,7 @@ import type { Rule, Run } from "../../src/rules.ts";
 
 const ALL = "__all__";
 
-/** Live list of deliveries that matched a rule, newest first. Settled runs show the thread's final reply. */
+/** Live list of deliveries that matched a rule, newest first. Settled runs show the thread's final reply; a rule name opens the run on the Runs page. */
 export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]; webhookUrl: string }) {
   const [filter, setFilter] = useState(ALL);
   const visible = filter === ALL ? runs : runs.filter((run) => run.ruleId === filter);
@@ -16,7 +17,7 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
 
   return (
     <div className="flex h-full flex-col">
-      <Toolbar title="Runs">
+      <Toolbar title="Live">
         <Select value={filter} onValueChange={setFilter}>
           <SelectTrigger size="sm" className="ml-auto h-6 border-0 bg-transparent px-1 text-xs shadow-none dark:bg-transparent"><SelectValue /></SelectTrigger>
           <SelectContent align="end">
@@ -39,7 +40,7 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
             return (
               <li key={run.id} className="grid grid-cols-[minmax(0,1fr)] gap-0.5 border-b px-3 py-2">
                 <div className="flex items-baseline gap-2">
-                  <span className="truncate font-medium text-foreground">{ruleNames.get(run.ruleId) ?? run.ruleName}</span>
+                  <Link to="/runs" search={{ run: run.id }} className="link truncate font-medium text-foreground">{ruleNames.get(run.ruleId) ?? run.ruleName}</Link>
                   <span className="ml-auto"><RunStatus run={run} /></span>
                 </div>
                 <div className="text-muted-foreground">

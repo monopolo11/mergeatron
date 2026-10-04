@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Result, Schema } from "effect";
-import { RuleInput, SettingsInput } from "./rules.ts";
+import { RuleInput, RunQuery, RunRatingInput, SettingsInput } from "./rules.ts";
 import { DEFAULT_SETTINGS } from "./rules.ts";
 
 describe("RuleInput", () => {
@@ -39,5 +39,31 @@ describe("SettingsInput", () => {
   test("clears emptied names and strips the @ from the GitHub login and Slack user", () => {
     const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, githubLogin: " @Bernardo ", reviewChannel: "  ", slackUserId: "<@U0BERNARDO|bernardo>" });
     expect(Result.isSuccess(settings) && settings.success).toMatchObject({ githubLogin: "Bernardo", reviewChannel: null, slackUserId: "U0BERNARDO" });
+  });
+});
+
+describe("RunRatingInput", () => {
+  const decode = Schema.decodeUnknownResult(RunRatingInput);
+
+  test("takes a score without feedback, and feedback without a score", () => {
+    const scored = decode({ rating: 7 });
+    expect(Result.isSuccess(scored) && scored.success).toEqual({ rating: 7, feedback: null });
+    const written = decode({ feedback: " missed the DST bug " });
+    expect(Result.isSuccess(written) && written.success).toEqual({ rating: null, feedback: "missed the DST bug" });
+  });
+
+  test("needs one of them, and a score from 0 to 10", () => {
+    const blank = decode({ rating: null, feedback: "  " });
+    expect(Result.isFailure(blank) && blank.failure.message).toContain("Give a score, feedback or both.");
+    expect(Result.isFailure(decode({ rating: 11 }))).toBe(true);
+    expect(Result.isFailure(decode({ rating: 7.5 }))).toBe(true);
+  });
+});
+
+describe("RunQuery", () => {
+  test("decodes numbers from search params", () => {
+    const query = Schema.decodeUnknownResult(RunQuery)({ promptOwner: "preset", promptId: "p1", promptVersion: "4", limit: "500" });
+    expect(Result.isSuccess(query) && query.success).toEqual({ promptOwner: "preset", promptId: "p1", promptVersion: 4, limit: 500 });
+    expect(Result.isFailure(Schema.decodeUnknownResult(RunQuery)({ limit: "501" }))).toBe(true);
   });
 });

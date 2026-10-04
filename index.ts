@@ -16,7 +16,8 @@ import { makeMcpHandler } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
-import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
+import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, RunQuery, RunRatingInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
+import { getRun, listRuns, rateRun } from "./src/runHistory.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
@@ -49,7 +50,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -66,7 +67,7 @@ const api = HttpRouter.use((router) =>
     const mcpUrl = Option.isSome(config.slack) ? `http://127.0.0.1:${config.mcpPort}/mcp` : null;
 
     /** Runs a route with the services and turns typed failures into JSON error responses. */
-    const route = <E extends { readonly _tag: string; readonly message: string }>(effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, ApiServices | HttpServerRequest.HttpServerRequest | HttpRouter.RouteContext>) =>
+    const route = <E extends { readonly _tag: string; readonly message: string }>(effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, ApiServices | HttpServerRequest.HttpServerRequest | HttpServerRequest.ParsedSearchParams | HttpRouter.RouteContext>) =>
       effect.pipe(
         Effect.catch((error) => Effect.succeed(json({ error: error.message }, STATUS[error._tag] ?? 500))),
         Effect.provide(services),
@@ -365,6 +366,29 @@ const api = HttpRouter.use((router) =>
     }
 
     yield* router.add("GET", "/api/runs", route(Effect.map(store.listRuns(), json)));
+    /** The runs page: summaries matching its filters, one run in full, and rating a run (see src/runHistory.ts). */
+    yield* router.add(
+      "GET",
+      "/api/runs/history",
+      route(
+        Effect.gen(function* () {
+          const { promptOwner, promptId, promptVersion, ...filter } = yield* HttpServerRequest.schemaSearchParams(RunQuery);
+          const prompt = promptOwner && promptId ? { owner: promptOwner, id: promptId, version: promptVersion } : undefined;
+          return json(yield* listRuns({ ...filter, prompt }));
+        }),
+      ),
+    );
+    yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
+    yield* router.add(
+      "PUT",
+      "/api/runs/:id/rating",
+      route(
+        Effect.gen(function* () {
+          const id = yield* param("id");
+          return json(yield* rateRun(id, yield* body(RunRatingInput)));
+        }),
+      ),
+    );
     yield* router.add("GET", "/api/analytics", route(Effect.map(store.analytics(), json)));
     yield* router.add("GET", "/api/pulls", route(Effect.map(store.pullRequests(), json)));
 
@@ -421,7 +445,7 @@ const httpLayer = Layer.unwrap(
           development: config.development,
           // Fetching over SSH plus bun install (POST /api/update) outlasts Bun's 10s default.
           idleTimeout: 120,
-          routes: { "/": index, "/inbox": index, "/reviews": index, "/analytics": index, "/settings": index },
+          routes: { "/": index, "/inbox": index, "/runs": index, "/reviews": index, "/analytics": index, "/settings": index },
         }),
       ),
     ),
