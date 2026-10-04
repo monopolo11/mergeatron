@@ -98,12 +98,13 @@ export function threadOutcome(thread: T3Thread, now = Date.now()): TurnOutcome |
  * `GIVE_UP` is abandoned: either way the run fails and polling stops,
  * which also releases the PR for a new review.
  */
-export const watchCompletion = (run: Pick<Run, "id" | "threadId" | "createdAt">): Effect.Effect<void, never, CompletionServices> =>
+export const watchCompletion = (run: Pick<Run, "id" | "threadId" | "createdAt" | "startedAt">): Effect.Effect<void, never, CompletionServices> =>
   Effect.gen(function* () {
     if (!run.threadId) return;
     const background = yield* Background;
     yield* log.info("watching thread", { run: run.id, thread: run.threadId });
-    yield* background.watch(run.id, watcher(run.id, run.threadId, Date.parse(run.createdAt)));
+    // Runs from before `startedAt` was recorded fall back to when they were created.
+    yield* background.watch(run.id, watcher(run.id, run.threadId, Date.parse(run.startedAt ?? run.createdAt)));
   });
 
 const watcher = (runId: string, threadId: string, startedAt: number) =>

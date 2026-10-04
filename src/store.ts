@@ -1,12 +1,13 @@
-import { and, count, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, rules, runActions, runPrompts, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
   type Prompt,
+  type PromptRef,
   type PromptInput,
   type PromptVersion,
   type ReviewRequest,
@@ -17,7 +18,7 @@ import {
   type RunAction,
   type Settings,
 } from "./rules.ts";
-import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type PromptOwner, type PromptVersionSource, type RunSource } from "./shared.ts";
+import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type PromptOwner, type PromptVersionOwner, type PromptVersionSource, type RunSource } from "./shared.ts";
 
 /** How long items that left the inbox are kept, so a reopened PR or a closed issue still has its history. */
 const INBOX_RETENTION_DAYS = 30;
@@ -34,11 +35,40 @@ const LEFT = and(isNotNull(inboxItems.goneAt), inArray(inboxItems.url, RUN_URLS)
 /** Run counts split by status, for one grouping key. */
 export type RunCounts = { total: number; queued: number; started: number; done: number; skipped: number; failed: number };
 
+/**
+ * Run counts plus how many were rated, their mean rating (0 to 10) and the
+ * mean time threads worked; null when no run had one.
+ */
+export type RunStats = RunCounts & { rated: number; avgRating: number | null; avgElapsedMs: number | null };
+
 export type Analytics = {
   all: RunCounts;
   /** Connection tests carry no author and are left out of this list. */
   byAuthor: (RunCounts & { author: string })[];
   bySource: (RunCounts & { source: RunSource })[];
+  /**
+   * Per prompt version, to compare versions. A dispatch of stacked presets
+   * counts under each. `name` is the preset's or rule's, null once deleted.
+   */
+  byPrompt: (RunStats & PromptRef & { name: string | null })[];
+  /** Per model a thread started with; runs that never started one have none. */
+  byModel: (RunStats & { modelInstanceId: string; modelId: string })[];
+};
+
+/** Which runs `listRuns` returns, newest first. Every field narrows; none means the latest 100. */
+export type RunFilter = {
+  ruleId?: string;
+  status?: Run["status"];
+  source?: RunSource;
+  /** Runs whose first message came from this preset or rule prompt, or from one version of it. */
+  prompt?: { owner: PromptVersionOwner; id: string; version?: number };
+  /** Model id, e.g. `claude-opus-5-5`, whatever the provider instance. */
+  model?: string;
+  /** True for rated runs only, false for unrated ones. */
+  rated?: boolean;
+  /** ISO timestamp: runs created at or after it. */
+  since?: string;
+  limit?: number;
 };
 
 /**
@@ -71,8 +101,30 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
-/** What `recordRun` needs; `action` is only set on queued runs, see RunAction. */
-export type RunInput = Omit<Run, "id" | "createdAt" | "action"> & { action?: RunAction | null };
+/** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, or when it is rated. */
+type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs";
+
+/** Statuses that end a run. */
+const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
+
+/** Timing for a run ending now; `elapsedMs` only when its thread opened. */
+const settledTiming = (startedAt: string | null | undefined, now = new Date()): Pick<Run, "settledAt" | "elapsedMs"> => ({
+  settledAt: now.toISOString(),
+  elapsedMs: startedAt ? now.getTime() - Date.parse(startedAt) : null,
+});
+
+/**
+ * What `recordRun` needs. `action` goes to `runActions` and its prompt
+ * versions to `runPrompts`; `promptRefs` overrides them (handoffs, tests).
+ */
+export type RunInput = Omit<Run, "id" | "createdAt" | RunOutcome> &
+  Partial<Pick<Run, Exclude<RunOutcome, "settledAt" | "elapsedMs">>> & { action?: RunAction | null; promptRefs?: PromptRef[] };
+
+/** A change to a run. `settledAt` and `elapsedMs` are the store's to set; `promptRefs` replace the run's prompt versions. */
+export type RunPatch = Partial<Omit<Run, "id" | "createdAt" | "settledAt" | "elapsedMs">> & { promptRefs?: PromptRef[] };
+
+/** A rating: 0 to 10 or none, with the written review that goes with it. */
+export type RunRating = Pick<Run, "rating" | "feedback">;
 
 /**
  * Typed access to rules, prompt presets and their versions, global settings,
@@ -117,6 +169,15 @@ export function makeStore(db: AppDatabase) {
       ? tx.select({ id: prompts.id }).from(prompts).where(eq(prompts.id, ownerId)).get() !== undefined
       : tx.select({ id: rules.id }).from(rules).where(eq(rules.id, ownerId)).get() !== undefined;
 
+  /** Replaces a run's prompt versions, keeping their order. */
+  const writeRunPrompts = (tx: Tx, runId: string, refs: PromptRef[]) => {
+    tx.delete(runPrompts).where(eq(runPrompts.runId, runId)).run();
+    if (refs.length === 0) return;
+    tx.insert(runPrompts)
+      .values(refs.map(({ owner, id, version }, position) => ({ runId, position, owner, ownerId: id, version })))
+      .run();
+  };
+
   return {
     listPrompts: () => Effect.sync(listPrompts),
     createPrompt: (input: PromptInput, source?: PromptVersionSource) => Effect.sync(() => createPrompt(input, source)),
@@ -135,12 +196,15 @@ export function makeStore(db: AppDatabase) {
 
     getPrompt: (id: string) => Effect.sync((): Prompt | null => db.select().from(prompts).where(eq(prompts.id, id)).get() ?? null),
 
-    /** Rules linked to the preset keep their own text and stop following it. */
+    /**
+     * Rules linked to the preset keep their own text and stop following it, as
+     * do queued runs (the foreign key nulls their action's preset). Its
+     * versions stay: runs reference them.
+     */
     deletePrompt: (id: string) =>
       Effect.sync(() =>
         db.transaction((tx) => {
           tx.update(rules).set({ presetId: null }).where(eq(rules.presetId, id)).run();
-          tx.delete(promptVersions).where(ofOwner("preset", id)).run();
           return tx.delete(prompts).where(eq(prompts.id, id)).returning().get() !== undefined;
         }),
       ),
@@ -280,13 +344,35 @@ export function makeStore(db: AppDatabase) {
 
     getRule: (id: string) => Effect.sync((): Rule | null => db.select().from(rules).where(eq(rules.id, id)).get() ?? null),
 
-    deleteRule: (id: string) =>
-      Effect.sync(() =>
-        db.transaction((tx) => {
-          tx.delete(promptVersions).where(ofOwner("rule", id)).run();
-          return tx.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined;
-        }),
-      ),
+    /** Its prompt versions stay: runs reference them. */
+    deleteRule: (id: string) => Effect.sync(() => db.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined),
+
+    /**
+     * Saves hand-edited dispatch text as a one-off version (owner `dispatch`,
+     * version 1), so the runs it starts reference their prompt like any other.
+     */
+    createDispatchPrompt: (body: string, note: string) =>
+      Effect.sync((): PromptRef => {
+        const id = crypto.randomUUID();
+        db.insert(promptVersions).values({ owner: "dispatch", ownerId: id, version: 1, body, note, source: "ui", createdAt: new Date().toISOString() }).run();
+        return { owner: "dispatch", id, version: 1 };
+      }),
+
+    /** Bodies of these versions, in order; null when one does not exist. */
+    promptBodies: (refs: PromptRef[]) =>
+      Effect.sync((): string[] | null => {
+        const bodies: string[] = [];
+        for (const ref of refs) {
+          const row = db
+            .select({ body: promptVersions.body })
+            .from(promptVersions)
+            .where(and(eq(promptVersions.owner, ref.owner), eq(promptVersions.ownerId, ref.id), eq(promptVersions.version, ref.version)))
+            .get();
+          if (!row) return null;
+          bodies.push(row.body);
+        }
+        return bodies;
+      }),
 
     getSettings: () => Effect.sync(getSettings),
 
@@ -298,7 +384,45 @@ export function makeStore(db: AppDatabase) {
           .run();
       }),
 
-    listRuns: (limit = 100) => Effect.sync((): Run[] => db.select().from(runs).orderBy(desc(runs.createdAt)).limit(limit).all()),
+    listRuns: ({ limit = 100, ...filter }: RunFilter = {}) =>
+      Effect.sync((): Run[] => {
+        const { prompt } = filter;
+        const where = and(
+          filter.ruleId === undefined ? undefined : eq(runs.ruleId, filter.ruleId),
+          filter.status === undefined ? undefined : eq(runs.status, filter.status),
+          filter.source === undefined ? undefined : eq(runs.source, filter.source),
+          filter.model === undefined ? undefined : eq(runs.modelId, filter.model),
+          filter.rated === undefined ? undefined : filter.rated ? isNotNull(runs.ratedAt) : isNull(runs.ratedAt),
+          filter.since === undefined ? undefined : gte(runs.createdAt, filter.since),
+          prompt &&
+            inArray(
+              runs.id,
+              db
+                .select({ id: runPrompts.runId })
+                .from(runPrompts)
+                .where(
+                  and(
+                    eq(runPrompts.owner, prompt.owner),
+                    eq(runPrompts.ownerId, prompt.id),
+                    prompt.version === undefined ? undefined : eq(runPrompts.version, prompt.version),
+                  ),
+                ),
+            ),
+        );
+        return db.select().from(runs).where(where).orderBy(desc(runs.createdAt), desc(sql`rowid`)).limit(limit).all();
+      }),
+
+    /** Rates a run, replacing an earlier rating. Null when there is no such run. */
+    rateRun: (id: string, rating: RunRating) =>
+      Effect.sync(
+        (): Run | null =>
+          db
+            .update(runs)
+            .set({ ...rating, ratedAt: new Date().toISOString() })
+            .where(eq(runs.id, id))
+            .returning()
+            .get() ?? null,
+      ),
 
     /** True when this delivery was already handled for the rule (GitHub retries deliveries). */
     hasRun: (deliveryId: string, ruleId: string) =>
@@ -311,22 +435,69 @@ export function makeStore(db: AppDatabase) {
             .get() !== undefined,
       ),
 
-    recordRun: (run: RunInput) =>
+    recordRun: ({ action, promptRefs = action?.promptRefs ?? [], ...run }: RunInput) =>
       Effect.sync(
         (): Run =>
-          db
-            .insert(runs)
-            .values({ action: null, ...run, id: crypto.randomUUID(), createdAt: new Date().toISOString() })
-            .returning()
-            .get(),
+          db.transaction((tx) => {
+            const row = tx
+              .insert(runs)
+              .values({
+                ...run,
+                ...(SETTLED.has(run.status) && settledTiming(run.startedAt)),
+                id: crypto.randomUUID(),
+                createdAt: new Date().toISOString(),
+              })
+              .returning()
+              .get();
+            writeRunPrompts(tx, row.id, promptRefs);
+            if (action) {
+              const { promptRefs: _, model, ...settings } = action;
+              tx.insert(runActions)
+                .values({ ...settings, runId: row.id, modelInstanceId: model?.instanceId ?? null, modelId: model?.model ?? null })
+                .run();
+            }
+            return row;
+          }),
       ),
 
-    updateRun: (id: string, patch: Partial<Omit<Run, "id" | "createdAt">>) =>
-      Effect.sync(() => {
-        db.update(runs).set(patch).where(eq(runs.id, id)).run();
+    /** Updates a run; a status that ends it also stamps `settledAt` and `elapsedMs`. */
+    updateRun: (id: string, { promptRefs, ...patch }: RunPatch) =>
+      Effect.sync(() =>
+        db.transaction((tx) => {
+          const ends = patch.status !== undefined && SETTLED.has(patch.status);
+          const startedAt = () => patch.startedAt ?? tx.select({ startedAt: runs.startedAt }).from(runs).where(eq(runs.id, id)).get()?.startedAt;
+          tx.update(runs)
+            .set(ends ? { ...patch, ...settledTiming(startedAt()) } : patch)
+            .where(eq(runs.id, id))
+            .run();
+          if (promptRefs) writeRunPrompts(tx, id, promptRefs);
+        }),
+      ),
+
+    /** Prompt versions of each run, in stack order; runs without any are left out. */
+    runPromptRefs: (runIds: string[]) =>
+      Effect.sync((): Map<string, PromptRef[]> => {
+        const rows = runIds.length === 0 ? [] : db.select().from(runPrompts).where(inArray(runPrompts.runId, runIds)).orderBy(runPrompts.runId, runPrompts.position).all();
+        const refs = Map.groupBy(rows, (row) => row.runId);
+        return new Map([...refs].map(([runId, rows]) => [runId, rows.map(({ owner, ownerId, version }) => ({ owner, id: ownerId, version }))]));
       }),
 
     getRun: (id: string) => Effect.sync((): Run | null => db.select().from(runs).where(eq(runs.id, id)).get() ?? null),
+
+    /** What a rule-driven run was set to start with; null for handoffs and connection tests. */
+    getRunAction: (runId: string) =>
+      Effect.sync((): RunAction | null => {
+        const row = db.select().from(runActions).where(eq(runActions.runId, runId)).get();
+        if (!row) return null;
+        const { runId: _, modelInstanceId, modelId, ...settings } = row;
+        const promptRefs = db
+          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version })
+          .from(runPrompts)
+          .where(eq(runPrompts.runId, runId))
+          .orderBy(runPrompts.position)
+          .all();
+        return { ...settings, model: modelInstanceId && modelId ? { instanceId: modelInstanceId, model: modelId } : null, promptRefs };
+      }),
 
     /** Runs of a rule in one status; `started` against the rule's concurrency limit. */
     countRuns: (ruleId: string, status: Run["status"]) =>
@@ -523,7 +694,7 @@ export function makeStore(db: AppDatabase) {
         });
       }),
 
-    /** Aggregates over every run: totals, per PR/issue author, and per trigger source. */
+    /** Aggregates over every run: totals, per PR/issue author, per trigger source, per prompt version and per model. */
     analytics: () =>
       Effect.sync((): Analytics => {
         const counts = {
@@ -548,7 +719,37 @@ export function makeStore(db: AppDatabase) {
           .groupBy(runs.source)
           .orderBy(desc(counts.total), runs.source)
           .all();
-        return { all, byAuthor, bySource };
+
+        const rated = {
+          ...counts,
+          rated: count(runs.rating),
+          avgRating: sql<number | null>`round(avg(${runs.rating}), 2)`,
+          avgElapsedMs: sql<number | null>`cast(round(avg(${runs.elapsedMs})) as integer)`,
+        };
+        // The preset's or rule's name, or a dispatch's (its version note); null once a preset or rule is deleted.
+        const name = sql<string | null>`coalesce(${prompts.name}, ${rules.name}, case when ${runPrompts.owner} = 'dispatch' then ${promptVersions.note} end)`;
+        const byPrompt = db
+          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, ...rated })
+          .from(runPrompts)
+          .innerJoin(runs, eq(runs.id, runPrompts.runId))
+          .innerJoin(
+            promptVersions,
+            and(eq(promptVersions.owner, runPrompts.owner), eq(promptVersions.ownerId, runPrompts.ownerId), eq(promptVersions.version, runPrompts.version)),
+          )
+          .leftJoin(prompts, and(eq(runPrompts.owner, "preset"), eq(prompts.id, runPrompts.ownerId)))
+          .leftJoin(rules, and(eq(runPrompts.owner, "rule"), eq(rules.id, runPrompts.ownerId)))
+          .groupBy(runPrompts.owner, runPrompts.ownerId, runPrompts.version)
+          .orderBy(runPrompts.owner, runPrompts.ownerId, desc(runPrompts.version))
+          .all();
+
+        const byModel = db
+          .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, ...rated })
+          .from(runs)
+          .where(isNotNull(runs.modelId))
+          .groupBy(runs.modelInstanceId, runs.modelId)
+          .orderBy(desc(counts.total))
+          .all();
+        return { all, byAuthor, bySource, byPrompt, byModel };
       }),
   };
 }

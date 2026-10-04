@@ -9,14 +9,16 @@ import { logger } from "./log.ts";
 import { notifyUser } from "./notify.ts";
 import { createVersion, listPrompts, promoteVersion, readPrompt } from "./promptVersions.ts";
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
-import { PROMPT_OWNERS } from "./shared.ts";
+import { getRun, listRuns, rateRun, runAnalytics } from "./runHistory.ts";
+import { PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES } from "./shared.ts";
 import { SlackClient } from "./slack.ts";
 
 /**
  * MCP tools for other agents: post as the Slack bot, DM the user for their
  * attention (see notify.ts), and send PRs for review with tracked threads and
- * rounds, and mark those threads merged (see reviewRequests.ts), and read and
- * version the prompts rules and dispatches use (see promptVersions.ts).
+ * rounds, and mark those threads merged (see reviewRequests.ts), read and
+ * version the prompts rules and dispatches use (see promptVersions.ts), and
+ * read, rate and compare past runs (see runHistory.ts).
  * Stateless Streamable HTTP, one server per request;
  * index.ts serves it on loopback. Tool inputs stay zod schemas: that is what
  * the MCP SDK accepts and turns into the JSON Schema it advertises.
@@ -25,7 +27,7 @@ import { SlackClient } from "./slack.ts";
 const log = logger("mcp");
 
 /** Failures the agent can act on: returned as tool errors without an error log. */
-const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError", "PromptNotFoundError"]);
+const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError", "PromptNotFoundError", "RunNotFoundError"]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
 const mentions = z
@@ -35,6 +37,7 @@ const mentions = z
 const note = z.string().optional().describe("Extra Markdown shown in the message, e.g. what changed since the last round");
 const promptOwner = z.enum(PROMPT_OWNERS).describe("preset: a dispatch preset. rule: a rule's own prompt");
 const promptId = z.string().describe("Id of the preset or rule, from list_prompts");
+const runId = z.string().describe("Run id, from list_runs");
 
 /** A web handler for `/mcp`, bound to the services in scope when it is built. */
 export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Response>, never, ReviewServices> = Effect.gen(function* () {
@@ -185,6 +188,78 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         annotations: { destructiveHint: false, idempotentHint: true },
       },
       ({ owner, id, version }) => result("promote_prompt_version", promoteVersion(owner, id, version)),
+    );
+
+    server.registerTool(
+      "list_runs",
+      {
+        description:
+          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), and its rating and written review. Leaves out the context and reply; read those with get_run.",
+        inputSchema: {
+          rule_id: z.string().optional().describe("Only runs of this rule; dispatch, handoff and manual are the ids of runs without a stored rule"),
+          status: z.enum(RUN_STATUSES).optional(),
+          source: z.enum(RUN_SOURCES).optional().describe("What triggered the run: github webhook, slack, poll (inbox automation) or manual"),
+          prompt_owner: z.enum(PROMPT_VERSION_OWNERS).optional().describe("preset, rule, or dispatch: the hand-edited text of an inbox dispatch"),
+          prompt_id: z.string().optional().describe("With prompt_owner: only runs whose message is made of this prompt"),
+          prompt_version: z.number().int().min(1).optional().describe("With prompt_owner and prompt_id: only runs of this version"),
+          model: z.string().optional().describe("Model id, e.g. claude-opus-5-5"),
+          rated: z.boolean().optional().describe("true: rated runs only. false: runs not rated yet"),
+          since: z.string().optional().describe("ISO timestamp: runs created at or after it"),
+          limit: z.number().int().min(1).max(500).optional().describe("Default 50"),
+        },
+        annotations: { readOnlyHint: true },
+      },
+      ({ rule_id, status, source, prompt_owner, prompt_id, prompt_version, model, rated, since, limit }) =>
+        result(
+          "list_runs",
+          listRuns({
+            ruleId: rule_id,
+            status,
+            source,
+            prompt: prompt_owner && prompt_id ? { owner: prompt_owner, id: prompt_id, version: prompt_version } : undefined,
+            model,
+            rated,
+            since,
+            limit: limit ?? 50,
+          }),
+        ),
+    );
+
+    server.registerTool(
+      "get_run",
+      {
+        description:
+          "Read one run in full: its trigger and template variables (context), what it was set to start with (action: the rule's project, workspace, requested model, preset and limit at the time), the first message (prompt, rendered from its prompt versions and context), the model used, the thread's final reply (result) and its rating.",
+        inputSchema: { run_id: runId },
+        annotations: { readOnlyHint: true },
+      },
+      ({ run_id }) => result("get_run", getRun(run_id)),
+    );
+
+    server.registerTool(
+      "rate_run",
+      {
+        description:
+          "Rate a run: a written review of how it went, with an optional score from 0 (useless) to 10 (perfect). Rating again replaces the earlier rating. Ratings feed run_analytics, to compare prompt versions and models.",
+        inputSchema: {
+          run_id: runId,
+          feedback: z.string().trim().min(1).describe("Written review: what was good or bad about the run, in Markdown"),
+          rating: z.number().int().min(0).max(10).optional().describe("Score from 0 to 10"),
+        },
+        annotations: { destructiveHint: false, idempotentHint: true },
+      },
+      ({ run_id, feedback, rating }) => result("rate_run", rateRun(run_id, { feedback, rating: rating ?? null })),
+    );
+
+    server.registerTool(
+      "run_analytics",
+      {
+        description:
+          "Run counts by status: overall, per PR author, per trigger source, per prompt version (byPrompt) and per model (byModel), the last two with how many runs were rated, their average rating and average elapsedMs. Use it to compare prompt versions before promoting one.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+      () => result("run_analytics", runAnalytics()),
     );
 
     return server;

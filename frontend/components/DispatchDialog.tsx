@@ -15,7 +15,7 @@ import { itemContext, type InboxItem } from "../../src/inbox.ts";
 import type { DispatchInput, ModelSelection, Prompt, Run } from "../../src/rules.ts";
 import { DEFAULT_MAX_CONCURRENT, WORKSPACE_MODES, type WorkspaceMode } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
-import { renderTemplate } from "../../src/template.ts";
+import { joinPrompts, renderTemplate } from "../../src/template.ts";
 
 /** Radix Select cannot hold an empty string, so "auto" gets a sentinel. */
 const AUTO_PROJECT = "__auto__";
@@ -41,7 +41,9 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
     defaultValues: { text: "", projectId: null as string | null, workspace: "worktree" as WorkspaceMode, model: null as ModelSelection | null, maxConcurrent: DEFAULT_MAX_CONCURRENT },
     onSubmit: async ({ value: { text, ...rest } }) => {
       setError(null);
-      const body: DispatchInput = { keys: items.map((item) => item.key), name, prompt: text, ...rest };
+      // The server records these versions on the runs while the text is still theirs, else saves the edited text as its own version.
+      const presets = stacked.map((prompt) => ({ id: prompt.id, version: prompt.liveVersion }));
+      const body: DispatchInput = { keys: items.map((item) => item.key), name, prompt: text, presets, ...rest };
       try {
         setResult(await api<Run[]>("/api/inbox/dispatch", { method: "POST", body: JSON.stringify(body) }));
         onDispatched();
@@ -55,7 +57,7 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
 
   const stacked = stack.flatMap((id) => prompts.data?.find((prompt) => prompt.id === id) ?? []);
   useEffect(() => {
-    if (!dirty) form.setFieldValue("text", stacked.map((prompt) => prompt.body).join("\n\n"));
+    if (!dirty) form.setFieldValue("text", joinPrompts(stacked.map((prompt) => prompt.body)));
   }, [stack, prompts.data]);
 
   const toggle = (id: string) => {

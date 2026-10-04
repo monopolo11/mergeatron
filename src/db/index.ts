@@ -13,6 +13,9 @@ export function openDatabase(path: string) {
   sqlite.exec("PRAGMA journal_mode = WAL;");
   const db = drizzle(sqlite, { schema });
   migrate(db, { migrationsFolder: new URL("../../drizzle", import.meta.url).pathname });
+  // After migrating: SQLite rebuilds tables to alter them, and dropping a
+  // referenced table with foreign keys on would cascade into its children.
+  sqlite.exec("PRAGMA foreign_keys = ON;");
   return db;
 }
 

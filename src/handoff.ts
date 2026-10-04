@@ -67,7 +67,7 @@ export const handoffIfStuck = Effect.fn("handoff.ifStuck")(function* (review: Ru
         Effect.gen(function* () {
           yield* log.info("handoff thread started", { ...at, thread: result.threadId });
           yield* store.updateRun(run.id, result);
-          yield* watchCompletion({ ...run, threadId: result.threadId });
+          yield* watchCompletion({ ...run, ...result });
         }),
       ),
       Effect.catchCause((cause) =>

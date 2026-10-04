@@ -36,7 +36,11 @@ describe("concurrency limit", () => {
         const [third] = yield* runRules({ deliveryId: "d3", event: itemEvent(linear), ctx: itemContext(linear) }, [limited]);
         expect(first!.status).toBe("started");
         expect(second).toMatchObject({ status: "queued", detail: "queued: 1 of 1 threads running" });
-        expect(second!.action).toMatchObject({ name: "review", prompt: "x", maxConcurrent: 1 });
+        expect(yield* store.getRunAction(second!.id)).toMatchObject({
+          name: "review",
+          maxConcurrent: 1,
+          promptRefs: [{ owner: "rule", id: limited.id, version: 1 }],
+        });
         expect(third!.status).toBe("queued");
         yield* settle;
         expect(started).toEqual(["review: Add widgets"]);
@@ -91,8 +95,9 @@ describe("concurrency limit", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const dispatch = { ...rule, id: "dispatch", name: "Review PR", maxConcurrent: 1, projectId: "p1" };
-        const [a] = yield* runRules({ deliveryId: "d1", event: itemEvent(pr), ctx: itemContext(pr), source: "manual" }, [dispatch]);
-        const [b] = yield* runRules({ deliveryId: "d2", event: itemEvent(other), ctx: itemContext(other), source: "manual" }, [dispatch]);
+        const refs = [yield* store.createDispatchPrompt(rule.prompt, "Review PR")];
+        const [a] = yield* runRules({ deliveryId: "d1", event: itemEvent(pr), ctx: itemContext(pr), source: "manual" }, [dispatch], refs);
+        const [b] = yield* runRules({ deliveryId: "d2", event: itemEvent(other), ctx: itemContext(other), source: "manual" }, [dispatch], refs);
         expect(b!.status).toBe("queued");
         expect(yield* store.queuedRuleIds()).toEqual(["dispatch"]);
         yield* settle;

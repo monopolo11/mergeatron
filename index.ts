@@ -9,7 +9,7 @@ import { AppConfig } from "./src/config.ts";
 import { Database } from "./src/db/index.ts";
 import { errorMessage } from "./src/errors.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
-import { handleDelivery, runRules, startQueued, type HandlerServices } from "./src/handler.ts";
+import { dispatchPrompt, handleDelivery, runRules, startQueued, type HandlerServices } from "./src/handler.ts";
 import { itemContext, itemEvent, type InboxResponse } from "./src/inbox.ts";
 import { logger, loggerLayer } from "./src/log.ts";
 import { makeMcpHandler } from "./src/mcp.ts";
@@ -120,12 +120,14 @@ const api = HttpRouter.use((router) =>
             result: null,
             action: null,
           });
+          const prompt = "Connection test from the GitHub webhook orchestrator. Reply with the single word ok and do nothing else.";
+          const model = project.defaultModelSelection ?? settings.model;
           const started = yield* Effect.result(
             t3.startThread({
               project,
               title: "Orchestrator connection test",
-              prompt: "Connection test from the GitHub webhook orchestrator. Reply with the single word ok and do nothing else.",
-              modelSelection: project.defaultModelSelection ?? settings.model,
+              prompt,
+              modelSelection: model,
               runtimeMode: settings.runtimeMode,
               baseBranch: null,
               worktree: false,
@@ -136,8 +138,9 @@ const api = HttpRouter.use((router) =>
             yield* store.updateRun(run.id, { status: "failed", detail: started.failure.message, threadId: null, threadUrl: null });
             return json({ error: started.failure.message }, 502);
           }
-          yield* store.updateRun(run.id, { status: "started", detail: `checkout ${project.workspaceRoot}`, ...started.success });
-          yield* watchCompletion({ ...run, threadId: started.success.threadId });
+          const startedAt = new Date().toISOString();
+          yield* store.updateRun(run.id, { status: "started", detail: `checkout ${project.workspaceRoot}`, ...started.success, modelInstanceId: model.instanceId, modelId: model.model, startedAt });
+          yield* watchCompletion({ ...run, threadId: started.success.threadId, startedAt });
           return json(started.success, 201);
         }),
       ),
@@ -242,10 +245,11 @@ const api = HttpRouter.use((router) =>
       "/api/inbox/dispatch",
       route(
         Effect.gen(function* () {
-          const { keys, name, ...action } = yield* body(DispatchInput);
+          const { keys, name, presets, ...action } = yield* body(DispatchInput);
           const items = yield* Effect.forEach(keys, (key) => poller.find(key));
           const missing = keys.filter((_, i) => !items[i]);
           if (missing.length > 0) return json({ error: `not in the inbox: ${missing.join(", ")}` }, 404);
+          const promptRefs = yield* dispatchPrompt(presets, action.prompt, name);
           const now = new Date().toISOString();
           const rule: Rule = {
             id: "dispatch",
@@ -265,7 +269,11 @@ const api = HttpRouter.use((router) =>
             updatedAt: now,
           };
           const runs = yield* Effect.forEach(items, (item) =>
-            runRules({ deliveryId: crypto.randomUUID(), event: itemEvent(item!), ctx: itemContext(item!), source: "manual", force: true }, [rule]),
+            runRules(
+              { deliveryId: crypto.randomUUID(), event: itemEvent(item!), ctx: itemContext(item!), source: "manual", force: true },
+              [rule],
+              promptRefs,
+            ),
           );
           return json(runs.flat(), 201);
         }),

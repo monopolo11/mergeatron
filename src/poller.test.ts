@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
-import { runRules } from "./handler.ts";
+import { dispatchPrompt, runRules } from "./handler.ts";
 import { itemContext, itemEvent, type InboxLabel } from "./inbox.ts";
 import { linear, pr, rule } from "./inbox.test.ts";
 import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
@@ -125,6 +125,27 @@ describe("Poller", () => {
   });
 });
 
+describe("dispatchPrompt", () => {
+  test("is the stacked presets' versions until the text is edited, then a one-off version of the text", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const a = yield* store.createPrompt({ name: "a", body: "A {{pr_url}}" });
+        const b = yield* store.createPrompt({ name: "b", body: "B" });
+        const stacked = [{ id: a.id, version: 1 }, { id: b.id, version: 1 }];
+        expect(yield* dispatchPrompt(stacked, "A {{pr_url}}\n\nB", "a + b")).toEqual([
+          { owner: "preset", id: a.id, version: 1 },
+          { owner: "preset", id: b.id, version: 1 },
+        ]);
+
+        const [edited] = yield* dispatchPrompt(stacked, "A {{pr_url}}\n\nB, but shorter", "a + b");
+        expect(edited).toMatchObject({ owner: "dispatch", version: 1 });
+        expect(yield* store.promptBodies([edited!])).toEqual(["A {{pr_url}}\n\nB, but shorter"]);
+      }),
+    ));
+});
+
 describe("runRules for a dispatch", () => {
   test("one thread per item at a time; a forced dispatch ignores the pause", async () => {
     const { layer, started } = setup();
@@ -136,23 +157,24 @@ describe("runRules for a dispatch", () => {
         const ctx = itemContext(pr);
         yield* store.recordRun({ ruleId: "x", ruleName: "review", deliveryId: "d0", event: "pull_request.opened", repo: "acme/widgets", source: "github", author: "alice", status: "done", detail: "", threadId: "t0", threadUrl: "u0", context: ctx, result: "CHANGES_REQUESTED", action: null });
         const dispatch = { ...rule, id: "dispatch", name: "Review PR", projectId: "p1", skipSelfReview: false };
+        const refs = [yield* store.createDispatchPrompt(rule.prompt, "Review PR")];
 
-        const [paused] = yield* runRules({ deliveryId: "d1", event: itemEvent(pr), ctx, source: "manual" }, [dispatch]);
+        const [paused] = yield* runRules({ deliveryId: "d1", event: itemEvent(pr), ctx, source: "manual" }, [dispatch], refs);
         expect(paused).toMatchObject({ status: "skipped", source: "manual" });
         expect(paused!.detail).toContain("paused");
 
-        const [forced] = yield* runRules({ deliveryId: "d2", event: itemEvent(pr), ctx, source: "manual", force: true }, [dispatch]);
+        const [forced] = yield* runRules({ deliveryId: "d2", event: itemEvent(pr), ctx, source: "manual", force: true }, [dispatch], refs);
         expect(forced).toMatchObject({ status: "started", ruleName: "Review PR" });
         expect(forced!.context?.previous_result).toBe("CHANGES_REQUESTED");
 
-        const [again] = yield* runRules({ deliveryId: "d3", event: itemEvent(pr), ctx, source: "manual", force: true }, [dispatch]);
+        const [again] = yield* runRules({ deliveryId: "d3", event: itemEvent(pr), ctx, source: "manual", force: true }, [dispatch], refs);
         expect(again).toMatchObject({ status: "skipped" });
         expect(again!.detail).toContain("already running for acme/widgets#42");
 
         // Issues lock on their URL the same way.
         const issueCtx = itemContext(linear);
-        const [first] = yield* runRules({ deliveryId: "d4", event: itemEvent(linear), ctx: issueCtx, source: "manual" }, [dispatch]);
-        const [second] = yield* runRules({ deliveryId: "d5", event: itemEvent(linear), ctx: issueCtx, source: "manual" }, [dispatch]);
+        const [first] = yield* runRules({ deliveryId: "d4", event: itemEvent(linear), ctx: issueCtx, source: "manual" }, [dispatch], refs);
+        const [second] = yield* runRules({ deliveryId: "d5", event: itemEvent(linear), ctx: issueCtx, source: "manual" }, [dispatch], refs);
         expect(first!.status).toBe("started");
         expect(second!.detail).toContain("already running for https://linear.app/acme/issue/ENG-7");
         yield* settle;

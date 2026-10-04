@@ -1,4 +1,4 @@
-import { integer, primaryKey, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { foreignKey, index, integer, primaryKey, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -9,18 +9,23 @@ import {
   EMPTY_SENTRY_FILTERS,
   INBOX_KINDS,
   INBOX_SOURCES,
-  PROMPT_OWNERS,
+  PROMPT_VERSION_OWNERS,
   PROMPT_VERSION_SOURCES,
   RUNTIME_MODES,
   RUN_SOURCES,
+  RUN_STATUSES,
   WORKSPACE_MODES,
   type InboxReason,
   type PollingSettings,
+  type PromptVersionOwner,
   type RuleFilters,
   type SentryFilters,
 } from "../shared.ts";
 
 export type ModelSelection = { instanceId: string; model: string };
+
+/** One prompt version, as a run records what its first message came from. */
+export type PromptRef = { owner: PromptVersionOwner; id: string; version: number };
 
 export const rules = sqliteTable("rules", {
   id: text().primaryKey(),
@@ -67,10 +72,13 @@ export const rules = sqliteTable("rules", {
 
 /**
  * What a run starts with: the slice of its rule that `startThreadForRule`
- * reads. Frozen on queued runs, since the rule may change meanwhile and a
- * dispatch from the inbox has no stored rule at all.
+ * reads, and the prompt versions its message is made of (in order). Stored
+ * per run in `runActions` and `runPrompts`, since the rule may change while
+ * the run waits and a dispatch from the inbox has no stored rule at all.
  */
-export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "prompt" | "presetId" | "maxConcurrent">;
+export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "presetId" | "maxConcurrent"> & {
+  promptRefs: PromptRef[];
+};
 
 /** Single-row table holding the global defaults. */
 export const settings = sqliteTable("settings", {
@@ -166,15 +174,16 @@ export const prompts = sqliteTable("prompts", {
 });
 
 /**
- * Every saved revision of a preset's body or a rule's own prompt. Saving
- * never edits a version: it appends the next number, and promoting one copies
- * its body onto the owner, which is what runs use. Versions go with their owner.
+ * Every saved revision of a preset's body or a rule's own prompt, and the
+ * hand-edited text of dispatches. Saving never edits a version: it appends
+ * the next number, and promoting one copies its body onto the owner, which is
+ * what runs use. Versions outlive their owner: runs reference them.
  */
 export const promptVersions = sqliteTable(
   "prompt_versions",
   {
-    owner: text({ enum: PROMPT_OWNERS }).notNull(),
-    /** Id of the preset or rule. */
+    owner: text({ enum: PROMPT_VERSION_OWNERS }).notNull(),
+    /** Id of the preset, rule or dispatch. */
     ownerId: text("owner_id").notNull(),
     /** 1, 2, 3... per owner. */
     version: integer().notNull(),
@@ -190,7 +199,8 @@ export const promptVersions = sqliteTable(
 /**
  * One delivery matched against one rule. `queued` waits for the rule's
  * concurrency limit, `started` means the thread is running; `done`/`failed`
- * are set once its first turn settles.
+ * are set once its first turn settles. `createdAt` is when the delivery
+ * arrived, `startedAt` when the thread opened, `settledAt` when the run ended.
  */
 export const runs = sqliteTable(
   "runs",
@@ -205,7 +215,7 @@ export const runs = sqliteTable(
     source: text({ enum: RUN_SOURCES }).notNull().default("github"),
     /** PR or issue author the review is for. Null for connection tests. */
     author: text(),
-    status: text({ enum: ["queued", "started", "done", "skipped", "failed"] }).notNull(),
+    status: text({ enum: RUN_STATUSES }).notNull(),
     detail: text().notNull().default(""),
     threadId: text("thread_id"),
     threadUrl: text("thread_url"),
@@ -213,12 +223,91 @@ export const runs = sqliteTable(
     context: text({ mode: "json" }).$type<Record<string, string>>(),
     /** Final assistant message of the thread's first turn, once it settles. */
     result: text(),
-    /** Set while queued: what to start with once the rule has capacity. */
-    action: text({ mode: "json" }).$type<RunAction>(),
+    /** Provider instance of the model the thread started with, after the project and global defaults, e.g. `claudeAgent`. */
+    modelInstanceId: text("model_instance_id"),
+    /** Model the thread started with, e.g. `claude-opus-5-5`. Null until a thread starts. */
+    modelId: text("model_id"),
+    /** How good the run was, 0 to 10, from a person or an agent. Null until rated or when only feedback was given. */
+    rating: integer(),
+    /** Written review of the run that goes with the rating. */
+    feedback: text(),
+    ratedAt: text("rated_at"),
+    /** When the T3 thread opened; later than `createdAt` by any queue wait. Null if no thread ever opened. */
+    startedAt: text("started_at"),
+    /** When the run reached done, skipped or failed. */
+    settledAt: text("settled_at"),
+    /** `settledAt` minus `startedAt`: how long the thread worked. Null without both. */
+    elapsedMs: integer("elapsed_ms"),
     createdAt: text("created_at").notNull(),
   },
-  // GitHub retries deliveries; one thread per delivery per rule.
-  (table) => [unique().on(table.deliveryId, table.ruleId)],
+  (table) => [
+    // GitHub retries deliveries; one thread per delivery per rule.
+    unique().on(table.deliveryId, table.ruleId),
+    // Concurrency counts and the queue, per rule.
+    index("runs_rule_status_idx").on(table.ruleId, table.status),
+    // Time-range scans, newest first.
+    index("runs_created_at_idx").on(table.createdAt),
+    index("runs_model_idx").on(table.modelId, table.modelInstanceId),
+  ],
+);
+
+/**
+ * Prompt versions a run's first message is made of, in order: the linked
+ * preset or the rule's own prompt, the stacked presets of a dispatch, or the
+ * dispatch's hand-edited text. Rendering their bodies, joined by a blank
+ * line, with the run's `context` gives the message. Set when the run is
+ * recorded and replaced with what was used when its thread starts (a linked
+ * preset's live version then). None for handoffs and connection tests.
+ */
+export const runPrompts = sqliteTable(
+  "run_prompts",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    /** 0, 1, 2... in message order. */
+    position: integer().notNull(),
+    owner: text({ enum: PROMPT_VERSION_OWNERS }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    version: integer().notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.position] }),
+    foreignKey({ columns: [table.owner, table.ownerId, table.version], foreignColumns: [promptVersions.owner, promptVersions.ownerId, promptVersions.version] }),
+    index("run_prompts_version_idx").on(table.owner, table.ownerId, table.version),
+  ],
+);
+
+/**
+ * What each rule-driven run was set to start with (see RunAction), one row
+ * per run: the rule's settings at the time, frozen so a queued run starts as
+ * matched. Its prompt is the run's `runPrompts`. None for handoffs and
+ * connection tests.
+ */
+export const runActions = sqliteTable(
+  "run_actions",
+  {
+    runId: text("run_id")
+      .primaryKey()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    /** Rule name, or the stacked preset names of a dispatch. */
+    name: text().notNull(),
+    skipSelfReview: integer("skip_self_review", { mode: "boolean" }).notNull(),
+    /** T3 project asked for; null matches by the repository's git remote. */
+    projectId: text("project_id"),
+    workspace: text({ enum: WORKSPACE_MODES }).notNull(),
+    /** Model asked for; null falls back to the project, then the global default. The model used is on the run. */
+    modelInstanceId: text("model_instance_id"),
+    modelId: text("model_id"),
+    /** Preset whose live version replaces the run's prompt at start; null once the preset is deleted. */
+    presetId: text("preset_id").references(() => prompts.id, { onDelete: "set null" }),
+    maxConcurrent: integer("max_concurrent").notNull(),
+  },
+  (table) => [
+    index("run_actions_project_idx").on(table.projectId),
+    index("run_actions_preset_idx").on(table.presetId),
+    index("run_actions_model_idx").on(table.modelId, table.modelInstanceId),
+  ],
 );
 
 /**

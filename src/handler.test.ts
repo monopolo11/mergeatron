@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
-import type { Rule } from "./rules.ts";
+import { DEFAULT_SETTINGS, type Rule } from "./rules.ts";
 import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
+import { getRun } from "./runHistory.ts";
 import { Store } from "./store.ts";
 import type { StartThreadInput, T3Project } from "./t3.ts";
 import { fakeSlack, fakeT3, runWith, settle, testLayer } from "./testing.ts";
@@ -96,7 +97,7 @@ describe("resolveProject", () => {
 });
 
 describe("handleDelivery", () => {
-  test("a rule linked to a preset starts threads with the preset's live version; deleting the preset restores the rule's own text", () => {
+  test("a rule linked to a preset starts threads with the preset's live version, recorded on the run; deleting the preset restores the rule's own text", () => {
     const started: StartThreadInput[] = [];
     const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };
     const t3 = fakeT3({
@@ -109,7 +110,9 @@ describe("handleDelivery", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const preset = yield* store.createPrompt({ name: "review", body: "preset v1 {{pr_url}}" });
-        yield* store.createRule({ ...base, projectId: "p1", prompt: "own {{pr_url}}", presetId: preset.id });
+        const rule = yield* store.createRule({ ...base, projectId: "p1", prompt: "own {{pr_url}}", presetId: preset.id });
+        const lastRun = Effect.map(store.listRuns({ limit: 1 }), ([run]) => run!);
+        const lastRefs = Effect.flatMap(lastRun, (run) => Effect.map(store.runPromptRefs([run.id]), (refs) => refs.get(run.id)));
         const deliver = (n: number) =>
           Effect.andThen(
             handleDelivery({ deliveryId: `d${n}`, event: "pull_request.review_requested", ctx: { repo: "acme/widgets", pr_number: `${n}`, pr_url: `https://github.com/acme/widgets/pull/${n}`, requested_reviewer: "bernardo" } }),
@@ -120,15 +123,26 @@ describe("handleDelivery", () => {
         yield* store.createPromptVersion("preset", preset.id, { body: "preset v2 {{pr_url}}", note: null, source: "ui" });
         yield* deliver(1);
         expect(started.at(-1)?.prompt).toBe("preset v1 https://github.com/acme/widgets/pull/1");
+        // The message is not stored: it renders again from the version and the run's context.
+        expect((yield* getRun((yield* lastRun).id)).prompt).toBe("preset v1 https://github.com/acme/widgets/pull/1");
+        expect(yield* lastRun).toMatchObject({
+          modelInstanceId: DEFAULT_SETTINGS.model.instanceId,
+          modelId: DEFAULT_SETTINGS.model.model,
+          startedAt: expect.any(String),
+          settledAt: null,
+        });
+        expect(yield* lastRefs).toEqual([{ owner: "preset", id: preset.id, version: 1 }]);
 
         yield* store.promotePromptVersion("preset", preset.id, 2);
         yield* deliver(2);
         expect(started.at(-1)?.prompt).toBe("preset v2 https://github.com/acme/widgets/pull/2");
+        expect(yield* lastRefs).toEqual([{ owner: "preset", id: preset.id, version: 2 }]);
 
         yield* store.deletePrompt(preset.id);
         expect((yield* store.listRules())[0]?.presetId).toBeNull();
         yield* deliver(3);
         expect(started.at(-1)?.prompt).toBe("own https://github.com/acme/widgets/pull/3");
+        expect(yield* lastRefs).toEqual([{ owner: "rule", id: rule.id, version: 1 }]);
       }),
     );
   });
@@ -200,7 +214,7 @@ describe("handleDelivery", () => {
         expect(reactions).toEqual(["fast_forward"]);
 
         // Rule opted out, or no login configured: not our concern, so T3 is reached and the fake fails.
-        yield* store.updateRule(rule.id, { ...base, skipSelfReview: false });
+        yield* store.updateRule(rule.id, { ...rule, skipSelfReview: false });
         yield* handleDelivery({ deliveryId: "d5", event: base.events[0]!, ctx: { ...ctx, slack_channel: undefined, slack_ts: undefined } });
         yield* settle;
         expect((yield* store.listRuns()).find((r) => r.deliveryId === "d5")).toMatchObject({ status: "failed", detail: "unexpected" });

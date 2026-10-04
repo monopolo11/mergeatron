@@ -1,16 +1,16 @@
-import { Cause, Effect, Metric, Queue, Semaphore } from "effect";
+import { Cause, Clock, Effect, Metric, Queue, Semaphore } from "effect";
 import { Background, RunEvents } from "./background.ts";
 import { pausedReview, watchCompletion, type CompletionServices } from "./completion.ts";
 import { errorMessage } from "./errors.ts";
 import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
-import type { Rule, Run, RunAction } from "./rules.ts";
+import type { PromptRef, Rule, Run, RunAction } from "./rules.ts";
 import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3Error, type T3Project } from "./t3.ts";
-import { renderTemplate } from "./template.ts";
+import { joinPrompts, renderTemplate } from "./template.ts";
 
 export { matchRules, ruleMismatch } from "./match.ts";
 
@@ -121,15 +121,19 @@ const NO_THREAD: Thread = { threadId: null, threadUrl: null };
  * Each rule runs at most `maxConcurrent` threads at once: past that a match
  * is recorded as `queued` with the rule's action frozen on it, and
  * `startQueued` starts it when a thread of the rule settles.
+ *
+ * `promptRefs` says which prompt versions a one-off rule's text came from (a
+ * dispatch's stacked presets); stored rules record their own prompt's version.
  */
-export const runRules = Effect.fn("handler.runRules")(function* (delivery: Delivery, matched: Rule[]) {
+export const runRules = Effect.fn("handler.runRules")(function* (delivery: Delivery, matched: Rule[], promptRefs?: PromptRef[]) {
   if (matched.length === 0) return [] as Run[];
   const store = yield* Store;
   const background = yield* Background;
   const { repo, pr_number: prNumber } = delivery.ctx;
   const source = delivery.source ?? runSource(delivery.event);
   const at = { delivery: delivery.deliveryId, event: delivery.event, repo: repo || undefined, pr: prNumber };
-  const record = (rule: Rule, status: Run["status"], detail: string, thread: Thread, action: RunAction | null = null) =>
+  // Every run records the action it was matched with (see RunAction); a queued one starts from it.
+  const record = (rule: Rule, status: Run["status"], detail: string, thread: Thread) =>
     store
       .recordRun({
         ruleId: rule.id,
@@ -144,7 +148,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
         ...thread,
         context: delivery.ctx,
         result: null,
-        action,
+        action: actionOf(rule, promptRefs),
       })
       .pipe(Effect.tap(() => Metric.update(Metric.withAttributes(runsRecorded, { status }), 1)));
   const skipAll = (detail: string, thread: Thread, alreadyRunning: boolean) =>
@@ -181,7 +185,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
         const running = rule.maxConcurrent > 0 ? yield* store.countRuns(rule.id, "started") : 0;
         if (rule.maxConcurrent > 0 && running >= rule.maxConcurrent) {
           const detail = `queued: ${running} of ${rule.maxConcurrent} threads running`;
-          return { queued: true as const, running, run: yield* record(rule, "queued", detail, NO_THREAD, actionOf(rule)) };
+          return { queued: true as const, running, run: yield* record(rule, "queued", detail, NO_THREAD) };
         }
         return { queued: false as const, running, run: yield* record(rule, "started", "starting thread", NO_THREAD) };
       }),
@@ -200,7 +204,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
           // Slack deliveries only learn the PR author once `complete` has run.
           const ctx = yield* context;
           yield* store.updateRun(run.id, { context: ctx, author: runAuthor(ctx) });
-          const result = yield* startThreadForRule(rule, ctx);
+          const result = yield* startThreadForRule(actionOf(rule, promptRefs), ctx);
           yield* finishStart(run, delivery.ctx, result, runAt);
         }).pipe(
           Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.void : failStart(run, delivery.ctx, Cause.squash(cause), runAt))),
@@ -213,8 +217,9 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
   return runs;
 });
 
+/** A started thread also records what it started with, for the run history; every field is a RunPatch field. */
 type StartResult =
-  | { status: "started"; detail: string; threadId: string; threadUrl: string }
+  | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[] } & Pick<Run, "modelInstanceId" | "modelId">)
   | { status: "skipped"; detail: string; threadId: null; threadUrl: null };
 
 /** Records how a thread start went and watches it; anything but `started` frees capacity for a queued run. */
@@ -224,7 +229,7 @@ const finishStart = (run: Run, ctx: WebhookContext, result: StartResult, at: Rec
     const events = yield* RunEvents;
     yield* log.info(`run ${result.status}`, { ...at, detail: result.detail, thread: result.threadId ?? undefined });
     yield* store.updateRun(run.id, result);
-    if (result.status === "started") yield* watchCompletion({ id: run.id, threadId: result.threadId, createdAt: new Date().toISOString() });
+    if (result.status === "started") yield* watchCompletion({ ...run, ...result });
     else yield* Queue.offer(events, { _tag: "Capacity", ruleId: run.ruleId });
     yield* notifySlack(ctx, result);
   });
@@ -240,9 +245,10 @@ const failStart = (run: Run, ctx: WebhookContext, error: unknown, at: Record<str
     yield* notifySlack(ctx, { status: "failed", detail });
   });
 
-function actionOf(rule: Rule): RunAction {
-  const { name, skipSelfReview, projectId, workspace, model, prompt, presetId, maxConcurrent } = rule;
-  return { name, skipSelfReview, projectId, workspace, model, prompt, presetId, maxConcurrent };
+/** A rule's action; its prompt is the rule's own live version unless `promptRefs` (a dispatch's) say otherwise. */
+function actionOf(rule: Rule, promptRefs: PromptRef[] = [{ owner: "rule", id: rule.id, version: rule.livePromptVersion }]): RunAction {
+  const { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent } = rule;
+  return { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent, promptRefs };
 }
 
 /**
@@ -262,10 +268,10 @@ export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: s
       for (;;) {
         const next = yield* store.oldestQueuedRun(ruleId);
         if (!next) return;
-        const limit = (yield* store.getRule(ruleId))?.maxConcurrent ?? next.action?.maxConcurrent ?? 0;
+        const action = yield* store.getRunAction(next.id);
+        const limit = (yield* store.getRule(ruleId))?.maxConcurrent ?? action?.maxConcurrent ?? 0;
         if (limit > 0 && (yield* store.countRuns(ruleId, "started")) >= limit) return;
         const ctx = next.context as WebhookContext | null;
-        const action = next.action;
         const at = { run: next.id, rule: next.ruleName, delivery: next.deliveryId };
         if (!ctx || !action) {
           yield* log.error("queued run has no context or action", at);
@@ -306,6 +312,18 @@ export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: s
   );
 });
 
+/**
+ * The prompt versions a dispatch's text is: the stacked presets' while the
+ * text is still their bodies, otherwise the text saved as a one-off version.
+ */
+export const dispatchPrompt = Effect.fn("handler.dispatchPrompt")(function* (presets: readonly { id: string; version: number }[], text: string, name: string) {
+  const store = yield* Store;
+  const stacked = presets.map((preset): PromptRef => ({ owner: "preset", ...preset }));
+  const bodies = stacked.length > 0 ? yield* store.promptBodies(stacked) : null;
+  if (bodies && joinPrompts(bodies) === text) return stacked;
+  return [yield* store.createDispatchPrompt(text, name)];
+});
+
 /** Adds `previous_result` / `previous_thread_url` from the last finished review of this PR, so re-reviews can build on it. */
 const withPreviousReview = (ctx: WebhookContext, repo: string, prNumber: string) =>
   Effect.gen(function* () {
@@ -336,12 +354,16 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
       );
     }
 
-    // A linked preset is read now, not when the rule was saved; a deleted one falls back to the rule's own text.
-    const preset = rule.presetId ? (yield* store.getPrompt(rule.presetId))?.body : undefined;
-    return yield* openThread(rule, project, ctx, {
+    // A linked preset's live version is read now, not when the rule was saved; a deleted one falls back to the action's own versions.
+    const preset = rule.presetId ? yield* store.getPrompt(rule.presetId) : null;
+    const promptRefs: PromptRef[] = preset ? [{ owner: "preset", id: preset.id, version: preset.liveVersion }] : rule.promptRefs;
+    const bodies = promptRefs.length > 0 ? yield* store.promptBodies(promptRefs) : null;
+    if (!bodies) return skipped("no prompt version to start the thread with");
+    const started = yield* openThread(rule, project, ctx, {
       title: `${rule.name}: ${ctx.pr_title ?? ctx.issue_title ?? ctx.slack_text ?? ctx.repo}`,
-      prompt: renderTemplate(preset ?? rule.prompt, ctx),
+      prompt: renderTemplate(joinPrompts(bodies), ctx),
     });
+    return { ...started, promptRefs };
   });
 
 /**
@@ -362,11 +384,12 @@ export const openThread = (
     const baseBranch = ctx.pr_head ?? ctx.default_branch ?? null;
     const worktree = rule.workspace === "worktree";
 
+    const model = rule.model ?? project.defaultModelSelection ?? settings.model;
     const thread = yield* t3.startThread({
       project,
       title: message.title.slice(0, 120),
       prompt: message.prompt,
-      modelSelection: rule.model ?? project.defaultModelSelection ?? settings.model,
+      modelSelection: model,
       runtimeMode: settings.runtimeMode,
       baseBranch,
       worktree,
@@ -383,6 +406,9 @@ export const openThread = (
       status: "started" as const,
       detail: worktree && baseBranch ? `worktree from origin/${baseBranch}` : `checkout ${project.workspaceRoot}`,
       ...thread,
+      modelInstanceId: model.instanceId,
+      modelId: model.model,
+      startedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
     };
   });
 

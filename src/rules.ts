@@ -23,7 +23,7 @@ export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
 export type PromptVersion = typeof promptVersions.$inferSelect;
-export type { ModelSelection, RunAction } from "./db/schema.ts";
+export type { ModelSelection, PromptRef, RunAction } from "./db/schema.ts";
 
 /**
  * Payloads accepted from the UI, as Effect schemas. Decoding trims names,
@@ -140,6 +140,9 @@ export const DispatchInput = Schema.Struct({
   /** Shown as the rule name in the run log, e.g. the preset names used. */
   name: nonEmpty.pipe(Schema.withDecodingDefault(Effect.succeed("dispatch"))),
   prompt: Schema.String.check(Schema.isMinLength(1)),
+  /** Preset versions `prompt` was stacked from. Recorded on the runs while `prompt` is their bodies unedited; otherwise `prompt` is saved as its own version. */
+  presets: Schema.Array(Schema.Struct({ id: nonEmpty, version: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) }))
+    .pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
   projectId: optionalName,
   workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
   model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),

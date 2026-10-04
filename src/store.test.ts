@@ -3,10 +3,10 @@ import { Effect } from "effect";
 import { linear, pr, rule } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Run } from "./rules.ts";
 import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
-import { Store } from "./store.ts";
+import { Store, type RunInput } from "./store.ts";
 import { runWith, testLayer } from "./testing.ts";
 
-const run = (patch: Partial<Run>): Omit<Run, "id" | "createdAt"> => ({
+const run = (patch: Partial<RunInput>): RunInput => ({
   ruleId: "r1",
   ruleName: "review",
   deliveryId: crypto.randomUUID(),
@@ -68,7 +68,98 @@ describe("Store.analytics", () => {
       testLayer(),
       Effect.gen(function* () {
         const store = yield* Store;
-        expect(yield* store.analytics()).toEqual({ all: { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 }, byAuthor: [], bySource: [] });
+        expect(yield* store.analytics()).toEqual({
+          all: { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 },
+          byAuthor: [],
+          bySource: [],
+          byPrompt: [],
+          byModel: [],
+        });
+      }),
+    ));
+});
+
+describe("run history", () => {
+  const preset = (version: number) => ({ owner: "preset" as const, id: "p1", version });
+  const opus = { modelInstanceId: "claudeAgent", modelId: "claude-opus-5-5" };
+  const fable = { modelInstanceId: "claudeAgent", modelId: "claude-fable-5-1" };
+
+  test("lists runs by prompt version, model and rating, and compares their ratings", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const p1 = yield* store.createPrompt({ name: "review", body: "x" });
+        yield* store.createPromptVersion("preset", p1.id, { body: "x2", note: null, source: "ui" });
+        const ref = (version: number) => ({ ...preset(version), id: p1.id });
+        const edited = yield* store.createDispatchPrompt("x2, edited", "Review PR");
+        const v1 = yield* store.recordRun(run({ status: "done", promptRefs: [ref(1)], ...opus }));
+        const v2 = yield* store.recordRun(run({ status: "done", promptRefs: [ref(2)], ...opus }));
+        const v2b = yield* store.recordRun(run({ status: "done", promptRefs: [ref(2), edited], ...fable }));
+        yield* store.recordRun(run({ status: "skipped" }));
+
+        expect(yield* store.rateRun(v1.id, { rating: 4, feedback: "missed the bug" })).toMatchObject({ rating: 4, feedback: "missed the bug" });
+        yield* store.rateRun(v2.id, { rating: 9, feedback: "found it" });
+        yield* store.rateRun(v2b.id, { rating: null, feedback: "no score, just notes" });
+        expect(yield* store.rateRun("gone", { rating: 1, feedback: "x" })).toBeNull();
+
+        const ids = (runs: { id: string }[]) => runs.map((r) => r.id);
+        expect(ids(yield* store.listRuns({ prompt: { owner: "preset", id: p1.id } }))).toEqual([v2b.id, v2.id, v1.id]);
+        expect(ids(yield* store.listRuns({ prompt: { owner: "preset", id: p1.id, version: 2 } }))).toEqual([v2b.id, v2.id]);
+        expect(ids(yield* store.listRuns({ model: "claude-fable-5-1" }))).toEqual([v2b.id]);
+        expect(ids(yield* store.listRuns({ rated: true, limit: 2 }))).toEqual([v2b.id, v2.id]);
+        expect(yield* store.listRuns({ rated: false })).toHaveLength(1);
+
+        const { byPrompt, byModel } = yield* store.analytics();
+        const counts = { queued: 0, started: 0, done: 2, skipped: 0, failed: 0 };
+        expect(byPrompt).toEqual([
+          { ...edited, name: "Review PR", ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+          { ...ref(2), name: "review", ...counts, total: 2, rated: 1, avgRating: 9, avgElapsedMs: null },
+          { ...ref(1), name: "review", ...counts, total: 1, done: 1, rated: 1, avgRating: 4, avgElapsedMs: null },
+        ]);
+        expect(byModel).toEqual([
+          { ...opus, ...counts, total: 2, rated: 2, avgRating: 6.5, avgElapsedMs: null },
+          { ...fable, ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+        ]);
+      }),
+    ));
+
+  test("deleting a preset unlinks it from the actions of queued runs, which keep their own prompt", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const p1 = yield* store.createPrompt({ name: "review", body: "x" });
+        const own = { owner: "preset" as const, id: p1.id, version: 1 };
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, promptRefs: [own] };
+        const queued = yield* store.recordRun(run({ status: "queued", action }));
+        expect(yield* store.getRunAction(queued.id)).toEqual(action);
+
+        yield* store.deletePrompt(p1.id);
+        expect(yield* store.getRunAction(queued.id)).toEqual({ ...action, presetId: null });
+      }),
+    ));
+
+  test("a run that ends records when it settled and how long its thread worked", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const started = yield* store.recordRun(run(opus));
+        expect(started).toMatchObject({ startedAt: null, settledAt: null, elapsedMs: null });
+
+        const startedAt = new Date(Date.now() - 90_000).toISOString();
+        yield* store.updateRun(started.id, { threadId: "t", startedAt });
+        yield* store.updateRun(started.id, { status: "done", result: "ok" });
+        const done = (yield* store.getRun(started.id))!;
+        expect(done.settledAt! >= startedAt).toBe(true);
+        expect(done.elapsedMs).toBe(Date.parse(done.settledAt!) - Date.parse(startedAt));
+        expect((yield* store.analytics()).byModel[0]?.avgElapsedMs).toBe(done.elapsedMs);
+
+        // Skipped before a thread opened: settled, no elapsed time.
+        const skipped = yield* store.recordRun(run({ status: "skipped" }));
+        expect(skipped.settledAt).not.toBeNull();
+        expect(skipped.elapsedMs).toBeNull();
       }),
     ));
 });
@@ -213,7 +304,7 @@ describe("Store prompt versions", () => {
       }),
     ));
 
-  test("a missing owner or version is null, and versions go with their owner", () =>
+  test("a missing owner or version is null, and versions outlive their owner", () =>
     runWith(
       testLayer(),
       Effect.gen(function* () {
@@ -222,8 +313,9 @@ describe("Store prompt versions", () => {
         expect(yield* store.promotePromptVersion("preset", preset.id, 2)).toBeNull();
         expect(yield* store.createPromptVersion("rule", preset.id, { body: "x", note: null, source: "mcp" })).toBeNull();
 
+        // Runs reference versions, so deleting the preset keeps them.
         yield* store.deletePrompt(preset.id);
-        expect(yield* store.listPromptVersions("preset", preset.id)).toEqual([]);
+        expect(yield* store.listPromptVersions("preset", preset.id)).toHaveLength(1);
       }),
     ));
 });

@@ -26,9 +26,23 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 export const RUN_SOURCES = ["github", "slack", "poll", "manual"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 
-/** What owns a versioned prompt: a dispatch preset, or a rule's own prompt. */
+/**
+ * Where a run is: `queued` waits for its rule's concurrency limit, `started`
+ * has a thread running, `done`/`failed` once its first turn settles.
+ */
+export const RUN_STATUSES = ["queued", "started", "done", "skipped", "failed"] as const;
+
+/** What owns an editable versioned prompt: a dispatch preset, or a rule's own prompt. */
 export const PROMPT_OWNERS = ["preset", "rule"] as const;
 export type PromptOwner = (typeof PROMPT_OWNERS)[number];
+
+/**
+ * What a stored prompt version can belong to: the editable owners, plus
+ * `dispatch` for text edited by hand in the inbox's dispatch dialog, saved as
+ * a one-off version (its own id, version 1) so every run's prompt is a version.
+ */
+export const PROMPT_VERSION_OWNERS = [...PROMPT_OWNERS, "dispatch"] as const;
+export type PromptVersionOwner = (typeof PROMPT_VERSION_OWNERS)[number];
 
 /** Where a prompt version was saved from: the UI, or an agent through the MCP tools. */
 export const PROMPT_VERSION_SOURCES = ["ui", "mcp"] as const;
