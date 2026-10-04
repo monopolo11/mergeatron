@@ -1,3 +1,4 @@
+import { useStore } from "@tanstack/react-form";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo, useRef, useState } from "react";
@@ -26,11 +27,12 @@ import { ModelPicker } from "@/components/ModelPicker";
 import { TokenInput, type TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
-import { saveLabel, useAutosave } from "@/lib/useAutosave";
+import type { RuleDraft } from "@/lib/shell";
+import { saveLabel, useAutosaveForm } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import { itemContext, itemEvent, type InboxItem, type InboxResponse, type LabelsResponse } from "../../src/inbox.ts";
 import { ruleMismatch, sameName } from "../../src/match.ts";
-import type { Prompt, Rule, RuleInput, Run } from "../../src/rules.ts";
+import type { Prompt, Rule, Run } from "../../src/rules.ts";
 import {
   INBOX_EVENT_PREFIX,
   INBOX_REASON_LABELS,
@@ -40,13 +42,13 @@ import {
   TEMPLATE_VARS,
   WORKSPACE_MODES,
   inboxSource,
-  type RuleFilters,
 } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
 import { renderTemplate } from "../../src/template.ts";
 
 /** Radix Select cannot hold an empty string, so "auto" gets a sentinel. */
 const AUTO_PROJECT = "__auto__";
+const OWN_PROMPT = "__own__";
 const mono = "font-mono text-xs";
 
 /** Variables only webhook payloads carry; hidden on rules that listen to the inbox alone, and from dispatch presets. */
@@ -70,23 +72,18 @@ export function RuleEditor({
   runs: Run[];
   /** GitHub login from settings; null means "Skip my own PRs" has nothing to compare against. */
   githubLogin: string | null;
-  onSave: (id: string, input: RuleInput) => Promise<void>;
+  onSave: (id: string, input: RuleDraft) => Promise<void>;
   onDelete: (rule: Rule) => Promise<void>;
   /** Called after "Run now" so the run log refreshes without waiting for its poll. */
   onRunsChanged: () => void;
 }) {
-  const { id, createdAt, updatedAt, ...initial } = rule;
-  const [draft, setDraft] = useState<RuleInput>(initial);
+  // `enabled` is the list switch's, not the form's: saving the form must never write a stale copy back.
+  const { id, createdAt, updatedAt, enabled, ...initial } = rule;
   const promptRef = useRef<HTMLTextAreaElement>(null);
 
-  const value = useMemo<RuleInput>(
-    () => ({ ...draft, reviewer: draft.reviewer?.trim() || null, channel: draft.channel?.trim() || null }),
-    [draft],
-  );
-  const { state, error } = useAutosave(value, (input) => onSave(id, input));
-
-  const patch = (partial: Partial<RuleInput>) => setDraft((d) => ({ ...d, ...partial }));
-  const patchFilters = (partial: Partial<RuleFilters>) => setDraft((d) => ({ ...d, filters: { ...d.filters, ...partial } }));
+  const { form, state, error } = useAutosaveForm<RuleDraft>({ defaultValues: initial, save: (input) => onSave(id, trimmed(input)) });
+  const draft = useStore(form.store, (s) => s.values);
+  const value = useMemo(() => trimmed(draft), [draft]);
 
   const events = draft.events;
   const isSlack = events.some((event) => event.startsWith(SLACK_EVENT_PREFIX));
@@ -148,7 +145,9 @@ export function RuleEditor({
   const sample = runs.find((run) => run.context && (run.ruleId === id || events.includes(run.event)));
   const previewCtx = sample?.context ?? (matched[0] ? itemContext(matched[0].item) : null);
   const previewLabel = sample ? `Preview with delivery from ${timeAgo(sample.createdAt)}` : matched[0] ? `Preview with ${matched[0].item.identifier}` : "Preview";
-  const preview = previewCtx ? renderTemplate(draft.prompt, previewCtx) : null;
+  // A linked preset replaces the rule's own text when a thread starts, so the preview follows it.
+  const linked = prompts.data?.find((prompt) => prompt.id === draft.presetId) ?? null;
+  const preview = previewCtx ? renderTemplate(linked?.body ?? draft.prompt, previewCtx) : null;
 
   const vars = TEMPLATE_VARS.filter(
     (name) =>
@@ -160,9 +159,9 @@ export function RuleEditor({
 
   const insertText = (text: string) => {
     const textarea = promptRef.current;
-    if (!textarea) return patch({ prompt: draft.prompt + text });
+    if (!textarea) return form.setFieldValue("prompt", draft.prompt + text);
     const { selectionStart, selectionEnd } = textarea;
-    patch({ prompt: draft.prompt.slice(0, selectionStart) + text + draft.prompt.slice(selectionEnd) });
+    form.setFieldValue("prompt", draft.prompt.slice(0, selectionStart) + text + draft.prompt.slice(selectionEnd));
     requestAnimationFrame(() => {
       textarea.focus();
       textarea.setSelectionRange(selectionStart + text.length, selectionStart + text.length);
@@ -178,185 +177,263 @@ export function RuleEditor({
         <DeleteButton name={draft.name} onConfirm={() => onDelete(rule)} />
       </Toolbar>
 
-      <div className="grid gap-4 p-4">
+      <form
+        className="grid gap-4 p-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void form.handleSubmit();
+        }}
+      >
         {error && <p className="text-xs text-destructive">{error}</p>}
 
         <div className="grid gap-x-4 gap-y-3 md:grid-cols-2">
-          <Field label="Name">
-            <Input autoFocus={rule.name === "New rule"} value={draft.name} onChange={(e) => patch({ name: e.target.value })} />
-          </Field>
-          <Field
-            label="Events"
-            hint={
-              isInbox
-                ? "Fires after each poll for items with activity newer than this rule's last save. Run now below covers what is already in the inbox."
-                : draft.events.includes("slack.message")
-                  ? "slack.message fires only for channel messages that link a GitHub PR."
-                  : draft.events.includes("slack.second_pass")
-                    ? "slack.second_pass fires when the bot is mentioned with 'second pass' (or third, fourth...) inside a review thread. Use {{previous_result}} to hand the agent the previous review."
-                    : "Any selected event starts this rule."
-            }
-          >
-            <EventPicker value={draft.events} onChange={(events) => patch({ events })} />
-          </Field>
+          <form.Field name="name">
+            {(field) => (
+              <Field label="Name">
+                <Input autoFocus={rule.name === "New rule"} value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} />
+              </Field>
+            )}
+          </form.Field>
+          <form.Field name="events">
+            {(field) => (
+              <Field
+                label="Events"
+                hint={
+                  isInbox
+                    ? "Fires after each poll for items with activity newer than this rule's last save. Run now below covers what is already in the inbox."
+                    : events.includes("slack.message")
+                      ? "slack.message fires only for channel messages that link a GitHub PR."
+                      : events.includes("slack.second_pass")
+                        ? "slack.second_pass fires when the bot is mentioned with 'second pass' (or third, fourth...) inside a review thread. Use {{previous_result}} to hand the agent the previous review."
+                        : "Any selected event starts this rule."
+                }
+              >
+                <EventPicker value={field.state.value} onChange={field.handleChange} />
+              </Field>
+            )}
+          </form.Field>
 
           {(isWebhook || isSlack || inboxGitHub) && (
-            <Field label="Repositories" hint={isSlack ? "owner/name of the PR linked in the message. Empty matches any." : "owner/name. Empty matches every repository."}>
-              <TokenInput value={draft.repos} onChange={(repos) => patch({ repos })} options={repoOptions} placeholder="owner/name" />
-            </Field>
+            <form.Field name="repos">
+              {(field) => (
+                <Field label="Repositories" hint={isSlack ? "owner/name of the PR linked in the message. Empty matches any." : "owner/name. Empty matches every repository."}>
+                  <TokenInput value={field.state.value} onChange={field.handleChange} options={repoOptions} placeholder="owner/name" />
+                </Field>
+              )}
+            </form.Field>
           )}
           {(inboxLinear || inboxSentry) && (
-            <Field label={inboxSentry ? "Projects" : "Teams"} hint={inboxSentry ? "Sentry project slugs. Empty matches every project." : "Linear team keys. Empty matches every team."}>
-              <TokenInput value={draft.filters.teams} onChange={(teams) => patchFilters({ teams })} options={teamOptions} placeholder={inboxSentry ? "checkout-api" : "ENG"} />
-            </Field>
+            <form.Field name="filters.teams">
+              {(field) => (
+                <Field label={inboxSentry ? "Projects" : "Teams"} hint={inboxSentry ? "Sentry project slugs. Empty matches every project." : "Linear team keys. Empty matches every team."}>
+                  <TokenInput value={field.state.value} onChange={field.handleChange} options={teamOptions} placeholder={inboxSentry ? "checkout-api" : "ENG"} />
+                </Field>
+              )}
+            </form.Field>
           )}
           {isInbox && (
-            <Field label="Reasons" hint="Why the item is in your inbox; any of the listed. Empty matches any.">
-              <TokenInput value={draft.filters.reasons} onChange={(reasons) => patchFilters({ reasons: reasons as RuleFilters["reasons"] })} options={REASON_OPTIONS} optionsOnly placeholder="review requested, assigned to me, …" />
-            </Field>
+            <form.Field name="filters.reasons">
+              {(field) => (
+                <Field label="Reasons" hint="Why the item is in your inbox; any of the listed. Empty matches any.">
+                  <TokenInput value={field.state.value} onChange={(reasons) => field.handleChange(reasons as typeof field.state.value)} options={REASON_OPTIONS} optionsOnly placeholder="review requested, assigned to me, …" />
+                </Field>
+              )}
+            </form.Field>
           )}
           {isInbox && (
-            <Field
-              label="States"
-              hint={
-                inboxLinear
-                  ? "State name (Todo) or type (unstarted, started). Any of the listed."
-                  : inboxSentry
-                    ? "new, ongoing, escalating or regressed. Any of the listed."
-                    : "open or draft. Any of the listed."
-              }
-            >
-              <TokenInput value={draft.filters.states} onChange={(states) => patchFilters({ states })} options={stateOptions} placeholder={inboxLinear ? "Todo" : inboxSentry ? "escalating" : "open"} />
-            </Field>
+            <form.Field name="filters.states">
+              {(field) => (
+                <Field
+                  label="States"
+                  hint={
+                    inboxLinear
+                      ? "State name (Todo) or type (unstarted, started). Any of the listed."
+                      : inboxSentry
+                        ? "new, ongoing, escalating or regressed. Any of the listed."
+                        : "open or draft. Any of the listed."
+                  }
+                >
+                  <TokenInput value={field.state.value} onChange={field.handleChange} options={stateOptions} placeholder={inboxLinear ? "Todo" : inboxSentry ? "escalating" : "open"} />
+                </Field>
+              )}
+            </form.Field>
           )}
           {(isInbox || isWebhook) && (
-            <Field
-              label={
-                <>
-                  Labels ·{" "}
-                  <button type="button" className="text-primary normal-case tracking-normal" onClick={() => patchFilters({ allLabels: !draft.filters.allLabels })}>
-                    {draft.filters.allLabels ? "all" : "any"} ▾
-                  </button>{" "}
-                  of
-                </>
-              }
-              hint={`${draft.filters.allLabels ? "Every listed label must be present." : "At least one listed label must be present."} Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
-            >
-              <TokenInput value={draft.filters.labels} onChange={(labels) => patchFilters({ labels })} options={labelOptions} placeholder="label" />
-            </Field>
+            <form.Field name="filters.labels">
+              {(field) => (
+                <Field
+                  label={
+                    <>
+                      Labels ·{" "}
+                      <form.Field name="filters.allLabels">
+                        {(all) => (
+                          <button type="button" className="text-primary normal-case tracking-normal" onClick={() => all.handleChange(!all.state.value)}>
+                            {all.state.value ? "all" : "any"} ▾
+                          </button>
+                        )}
+                      </form.Field>{" "}
+                      of
+                    </>
+                  }
+                  hint={`${draft.filters.allLabels ? "Every listed label must be present." : "At least one listed label must be present."} Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
+                >
+                  <TokenInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="label" />
+                </Field>
+              )}
+            </form.Field>
           )}
           {(isInbox || isWebhook) && (
-            <Field label="Not labels" hint="Skips items carrying any of the listed labels. Empty skips none.">
-              <TokenInput value={draft.filters.notLabels} onChange={(notLabels) => patchFilters({ notLabels })} options={labelOptions} placeholder="label" />
-            </Field>
+            <form.Field name="filters.notLabels">
+              {(field) => (
+                <Field label="Not labels" hint="Skips items carrying any of the listed labels. Empty skips none.">
+                  <TokenInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="label" />
+                </Field>
+              )}
+            </form.Field>
           )}
 
           {isSlack && (
-            <Field label="Slack channel" hint="Channel id (C…), from the channel's details. Empty means any channel the bot is in.">
-              <Input className={mono} value={draft.channel ?? ""} onChange={(e) => patch({ channel: e.target.value || null })} placeholder="C0123456789" />
-            </Field>
+            <form.Field name="channel">
+              {(field) => (
+                <Field label="Slack channel" hint="Channel id (C…), from the channel's details. Empty means any channel the bot is in.">
+                  <Input className={mono} value={field.state.value ?? ""} onChange={(e) => field.handleChange(e.target.value || null)} placeholder="C0123456789" />
+                </Field>
+              )}
+            </form.Field>
           )}
           {isSlack && (
-            <Field label="Bot posts" hint="Also fire for PR links posted by other bots and apps, such as another orchestrator's agents or GitHub notifications. This bot's own posts never fire.">
-              <label className="flex h-8 items-center gap-2 text-[13px]">
-                <Switch size="sm" checked={draft.allowBots} onCheckedChange={(allowBots) => patch({ allowBots })} />
-                <span className={cn(!draft.allowBots && "text-muted-foreground")}>{draft.allowBots ? "Reviewed" : "Ignored"}</span>
-              </label>
-            </Field>
+            <form.Field name="allowBots">
+              {(field) => (
+                <Field label="Bot posts" hint="Also fire for PR links posted by other bots and apps, such as another orchestrator's agents or GitHub notifications. This bot's own posts never fire.">
+                  <label className="flex h-8 items-center gap-2 text-[13px]">
+                    <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />
+                    <span className={cn(!field.state.value && "text-muted-foreground")}>{field.state.value ? "Reviewed" : "Ignored"}</span>
+                  </label>
+                </Field>
+              )}
+            </form.Field>
           )}
           {isWebhook && (
-            <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
-              <Input value={draft.reviewer ?? ""} onChange={(e) => patch({ reviewer: e.target.value || null })} placeholder="login or team slug" />
-            </Field>
+            <form.Field name="reviewer">
+              {(field) => (
+                <Field label="Requested reviewer" hint="Fire only when this user or team is requested. Empty means anyone.">
+                  <Input value={field.state.value ?? ""} onChange={(e) => field.handleChange(e.target.value || null)} placeholder="login or team slug" />
+                </Field>
+              )}
+            </form.Field>
           )}
           {showsPullRequestVars && (
-            <Field
-              label="Skip my own PRs"
-              hint={githubLogin ? `PRs authored by ${githubLogin} are recorded as skipped.` : "Set your GitHub login in Settings to make this take effect."}
-            >
-              <label className="flex h-8 items-center gap-2 text-[13px]">
-                <Switch size="sm" checked={draft.skipSelfReview} onCheckedChange={(skipSelfReview) => patch({ skipSelfReview })} />
-                <span className={cn(!draft.skipSelfReview && "text-muted-foreground")}>{draft.skipSelfReview ? "Skipped" : "Reviewed like any other PR"}</span>
-              </label>
-            </Field>
+            <form.Field name="skipSelfReview">
+              {(field) => (
+                <Field
+                  label="Skip my own PRs"
+                  hint={githubLogin ? `PRs authored by ${githubLogin} are recorded as skipped.` : "Set your GitHub login in Settings to make this take effect."}
+                >
+                  <label className="flex h-8 items-center gap-2 text-[13px]">
+                    <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />
+                    <span className={cn(!field.state.value && "text-muted-foreground")}>{field.state.value ? "Skipped" : "Reviewed like any other PR"}</span>
+                  </label>
+                </Field>
+              )}
+            </form.Field>
           )}
           {inboxPr && (
-            <Field label="Re-run on push" hint="Each new head commit gets its own run, like pull_request.synchronize. Off runs once per PR.">
-              <label className="flex h-8 items-center gap-2 text-[13px]">
-                <Switch size="sm" checked={draft.filters.rerunOnPush} onCheckedChange={(rerunOnPush) => patchFilters({ rerunOnPush })} />
-                <span className={cn(!draft.filters.rerunOnPush && "text-muted-foreground")}>{draft.filters.rerunOnPush ? "Per head commit" : "Once per PR"}</span>
-              </label>
-            </Field>
+            <form.Field name="filters.rerunOnPush">
+              {(field) => (
+                <Field label="Re-run on push" hint="Each new head commit gets its own run, like pull_request.synchronize. Off runs once per PR.">
+                  <label className="flex h-8 items-center gap-2 text-[13px]">
+                    <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />
+                    <span className={cn(!field.state.value && "text-muted-foreground")}>{field.state.value ? "Per head commit" : "Once per PR"}</span>
+                  </label>
+                </Field>
+              )}
+            </form.Field>
           )}
-          <Field label="Concurrency" hint="Threads of this rule running at once. Further matches queue and start as earlier ones settle. 0 is unlimited.">
-            <div className="flex h-8 items-center gap-3">
-              <Input type="number" min={0} className={cn("w-20", mono)} value={draft.maxConcurrent} onChange={(e) => patch({ maxConcurrent: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
-              <span className="text-xs text-muted-foreground">
-                {running} running{queued > 0 ? ` · ${queued} queued` : ""}
-              </span>
-            </div>
-          </Field>
+          <form.Field name="maxConcurrent">
+            {(field) => (
+              <Field label="Concurrency" hint="Threads of this rule running at once. Further matches queue and start as earlier ones settle. 0 is unlimited.">
+                <div className="flex h-8 items-center gap-3">
+                  <Input type="number" min={0} className={cn("w-20", mono)} value={field.state.value} onChange={(e) => field.handleChange(Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
+                  <span className="text-xs text-muted-foreground">
+                    {running} running{queued > 0 ? ` · ${queued} queued` : ""}
+                  </span>
+                </div>
+              </Field>
+            )}
+          </form.Field>
 
-          <Field
-            label="T3 project"
-            hint={
-              draft.projectId
-                ? undefined
-                : inboxLinear || inboxSentry
-                  ? `${inboxSentry ? "Sentry" : "Linear"} issues have no repository: pick a project.`
-                  : isSlack
-                    ? "Matched by comparing the PR linked in the message to each project's git remote."
-                    : "Matched by comparing the repository to each project's git remote."
-            }
-          >
-            <Select value={draft.projectId ?? AUTO_PROJECT} onValueChange={(v) => patch({ projectId: v === AUTO_PROJECT ? null : v })}>
-              <SelectTrigger size="sm" className={cn("w-full", (inboxLinear || inboxSentry) && !draft.projectId && "border-warn")}><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
-                {projects.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.title}
-                    {p.repositoryIdentity?.owner && <span className="ml-1 text-muted-foreground">{p.repositoryIdentity.owner}/{p.repositoryIdentity.name}</span>}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Workspace">
-            <Select value={draft.workspace} onValueChange={(v) => patch({ workspace: v as RuleInput["workspace"] })}>
-              <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {WORKSPACE_MODES.map((mode) => (
-                  <SelectItem key={mode} value={mode}>
-                    {mode === "worktree" ? "Worktree from PR head (default branch otherwise)" : "Local project checkout"}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Model" className="md:col-span-2">
-            <div className="flex flex-wrap gap-2">
-              <Select
-                value={draft.model ? "override" : "default"}
-                onValueChange={(v) => patch({ model: v === "override" ? firstAvailableModel(providers) ?? { instanceId: "claudeAgent", model: "claude-fable-5-1" } : null })}
+          <form.Field name="projectId">
+            {(field) => (
+              <Field
+                label="T3 project"
+                hint={
+                  field.state.value
+                    ? undefined
+                    : inboxLinear || inboxSentry
+                      ? `${inboxSentry ? "Sentry" : "Linear"} issues have no repository: pick a project.`
+                      : isSlack
+                        ? "Matched by comparing the PR linked in the message to each project's git remote."
+                        : "Matched by comparing the repository to each project's git remote."
+                }
               >
-                <SelectTrigger size="sm" className="w-56"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">
-                    {project?.defaultModelSelection ? `Project default (${project.defaultModelSelection.model})` : "Project default, else global"}
-                  </SelectItem>
-                  <SelectItem value="override">Override for this rule</SelectItem>
-                </SelectContent>
-              </Select>
-              {draft.model && <ModelPicker value={draft.model} providers={providers} onChange={(model) => patch({ model })} />}
-            </div>
-          </Field>
+                <Select value={field.state.value ?? AUTO_PROJECT} onValueChange={(v) => field.handleChange(v === AUTO_PROJECT ? null : v)}>
+                  <SelectTrigger size="sm" className={cn("w-full", (inboxLinear || inboxSentry) && !field.state.value && "border-warn")}><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
+                    {projects.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.title}
+                        {p.repositoryIdentity?.owner && <span className="ml-1 text-muted-foreground">{p.repositoryIdentity.owner}/{p.repositoryIdentity.name}</span>}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+          </form.Field>
+          <form.Field name="workspace">
+            {(field) => (
+              <Field label="Workspace">
+                <Select value={field.state.value} onValueChange={(v) => field.handleChange(v as typeof field.state.value)}>
+                  <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {WORKSPACE_MODES.map((mode) => (
+                      <SelectItem key={mode} value={mode}>
+                        {mode === "worktree" ? "Worktree from PR head (default branch otherwise)" : "Local project checkout"}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+          </form.Field>
+          <form.Field name="model">
+            {(field) => (
+              <Field label="Model" className="md:col-span-2">
+                <div className="flex flex-wrap gap-2">
+                  <Select
+                    value={field.state.value ? "override" : "default"}
+                    onValueChange={(v) => field.handleChange(v === "override" ? firstAvailableModel(providers) ?? { instanceId: "claudeAgent", model: "claude-fable-5-1" } : null)}
+                  >
+                    <SelectTrigger size="sm" className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">
+                        {project?.defaultModelSelection ? `Project default (${project.defaultModelSelection.model})` : "Project default, else global"}
+                      </SelectItem>
+                      <SelectItem value="override">Override for this rule</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {field.state.value && <ModelPicker value={field.state.value} providers={providers} onChange={field.handleChange} />}
+                </div>
+              </Field>
+            )}
+          </form.Field>
         </div>
 
         {isInbox && (
           <Field
             label={inbox.data ? `Matches now · ${matched.length} of ${candidates.length} in the inbox` : "Matches now"}
-            hint={!draft.enabled ? "This rule is off; matches are shown as if it were on." : undefined}
+            hint={!enabled ? "This rule is off; matches are shown as if it were on." : undefined}
           >
             {!inbox.data ? (
               <span className="text-xs text-muted-foreground">Loading the inbox…</span>
@@ -382,33 +459,77 @@ export function RuleEditor({
           </Field>
         )}
 
-        <Field label="Prompt" hint={`First message of the thread. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`}>
-          <Textarea ref={promptRef} className={cn("min-h-52 leading-relaxed", mono)} value={draft.prompt} onChange={(e) => patch({ prompt: e.target.value })} />
-          <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5">
-            {vars.map((name) => (
-              <Button key={name} type="button" variant="ghost" size="xs" className={cn("h-5 px-1 text-primary", mono)} onClick={() => insertText(`{{${name}}}`)}>
-                {`{{${name}}}`}
-              </Button>
-            ))}
-            {prompts.data && prompts.data.length > 0 && (
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button type="button" variant="ghost" size="xs" className="h-5 px-1 text-primary">insert preset ▾</Button>
-                </PopoverTrigger>
-                <PopoverContent align="start" className="w-64 p-1">
-                  {prompts.data.map((prompt) => (
-                    <button key={prompt.id} type="button" className="block w-full rounded px-2 py-1 text-left text-[13px] hover:bg-muted/60" onClick={() => insertText((draft.prompt && !draft.prompt.endsWith("\n") ? "\n\n" : "") + prompt.body)}>
-                      {prompt.name}
-                    </button>
+        <form.Field name="prompt">
+          {(field) => (
+            <Field
+              label="Prompt"
+              hint={
+                linked
+                  ? `Follows the preset "${linked.name}": editing it in Settings changes this rule too.`
+                  : `First message of the thread. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`
+              }
+            >
+              {prompts.data && prompts.data.length > 0 && (
+                <form.Field name="presetId">
+                  {(preset) => (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Select value={linked?.id ?? OWN_PROMPT} onValueChange={(v) => preset.handleChange(v === OWN_PROMPT ? null : v)}>
+                        <SelectTrigger size="sm" className="w-64"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={OWN_PROMPT}>Write it here</SelectItem>
+                          {prompts.data.map((prompt) => (
+                            <SelectItem key={prompt.id} value={prompt.id}>Preset: {prompt.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {linked && (
+                        <>
+                          <Button size="xs" variant="ghost" className="text-primary" onClick={() => { field.handleChange(linked.body); preset.handleChange(null); }}>
+                            Unlink and edit a copy
+                          </Button>
+                          <Link to="/settings" hash="presets" className="link text-xs text-primary">Edit preset</Link>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </form.Field>
+              )}
+              <Textarea
+                ref={promptRef}
+                className={cn("min-h-52 leading-relaxed", mono)}
+                value={linked?.body ?? field.state.value}
+                readOnly={linked !== null}
+                onChange={(e) => field.handleChange(e.target.value)}
+              />
+              {!linked && (
+                <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                  {vars.map((name) => (
+                    <Button key={name} variant="ghost" size="xs" className={cn("h-5 px-1 text-primary", mono)} onClick={() => insertText(`{{${name}}}`)}>
+                      {`{{${name}}}`}
+                    </Button>
                   ))}
-                  <p className="px-2 pt-1 text-[11px] text-muted-foreground">
-                    Presets are managed in <Link to="/settings" hash="presets" className="link text-primary">Settings</Link>.
-                  </p>
-                </PopoverContent>
-              </Popover>
-            )}
-          </div>
-        </Field>
+                  {prompts.data && prompts.data.length > 0 && (
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button type="button" variant="ghost" size="xs" className="h-5 px-1 text-primary">insert preset ▾</Button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-64 p-1">
+                        {prompts.data.map((prompt) => (
+                          <button key={prompt.id} type="button" className="block w-full rounded px-2 py-1 text-left text-[13px] hover:bg-muted/60" onClick={() => insertText((field.state.value && !field.state.value.endsWith("\n") ? "\n\n" : "") + prompt.body)}>
+                            {prompt.name}
+                          </button>
+                        ))}
+                        <p className="px-2 pt-1 text-[11px] text-muted-foreground">
+                          Inserts a copy. Pick "Preset: …" above to follow a preset instead. Presets are managed in <Link to="/settings" hash="presets" className="link text-primary">Settings</Link>.
+                        </p>
+                      </PopoverContent>
+                    </Popover>
+                  )}
+                </div>
+              )}
+            </Field>
+          )}
+        </form.Field>
 
         <Field label={previewLabel}>
           {preview ? (
@@ -417,9 +538,14 @@ export function RuleEditor({
             <span className="text-xs text-muted-foreground">{isInbox ? "Appears once an inbox item matches." : "Appears after the first delivery matching this event."}</span>
           )}
         </Field>
-      </div>
+      </form>
     </div>
   );
+}
+
+/** What gets saved: blank reviewer and channel become null, like an untouched field. */
+function trimmed(draft: RuleDraft): RuleDraft {
+  return { ...draft, reviewer: draft.reviewer?.trim() || null, channel: draft.channel?.trim() || null };
 }
 
 type Match = { item: InboxItem; why: string | null; run: Run | null };

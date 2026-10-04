@@ -257,6 +257,7 @@ const api = HttpRouter.use((router) =>
             allowBots: true,
             skipSelfReview: false,
             filters: EMPTY_FILTERS,
+            presetId: null,
             ...action,
             createdAt: now,
             updatedAt: now,

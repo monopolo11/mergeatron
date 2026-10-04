@@ -36,7 +36,7 @@ describe("resolveSecondPassTarget", () => {
 describe("botPostIgnored", () => {
   const rule = {
     name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: "C1", allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
-    projectId: null, workspace: "worktree" as const, model: null, prompt: "x",
+    projectId: null, workspace: "worktree" as const, model: null, prompt: "x", presetId: null,
   };
   const ctx = { repo: "acme/widgets", slack_channel: "C1" };
 
@@ -60,7 +60,7 @@ describe("handleSlackEvent", () => {
         const store = yield* Store;
         const rule = yield* store.createRule({
           name: "review", enabled: true, events: ["slack.second_pass"], repos: [pr.repo], reviewer: null, channel: null, allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
-          projectId: null, workspace: "worktree", model: null, prompt: "x",
+          projectId: null, workspace: "worktree", model: null, prompt: "x", presetId: null,
         });
         // Still running, so the second pass is recorded as skipped without reaching T3 or GitHub.
         yield* store.recordRun({ ruleId: "r", ruleName: "review", deliveryId: "d", event: "slack.message", repo: pr.repo, source: "slack", author: "alice", status: "started", detail: "", threadId: "t", threadUrl: "u", context: { ...pr, slack_channel: "C1", slack_ts: "1.0" }, result: null });

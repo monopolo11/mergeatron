@@ -74,6 +74,7 @@ export const RuleInput = Schema.Struct({
   workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
   model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   prompt: Schema.String.check(Schema.isMinLength(1)),
+  presetId: optionalName,
 }).check(
   // One inbox source per rule keeps its filters and label suggestions to one provider.
   Schema.makeFilter((rule) =>

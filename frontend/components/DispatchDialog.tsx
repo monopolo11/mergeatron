@@ -1,3 +1,4 @@
+import { useForm, useStore } from "@tanstack/react-form";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -32,19 +33,29 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
   const providers = useQuery({ queryKey: ["providers"], queryFn: () => api<T3Provider[]>("/api/t3/providers") });
 
   const [stack, setStack] = useState<string[]>([]);
-  const [text, setText] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceMode>("worktree");
-  const [model, setModel] = useState<ModelSelection | null>(null);
-  const [maxConcurrent, setMaxConcurrent] = useState(DEFAULT_MAX_CONCURRENT);
   const [result, setResult] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+
+  const form = useForm({
+    defaultValues: { text: "", projectId: null as string | null, workspace: "worktree" as WorkspaceMode, model: null as ModelSelection | null, maxConcurrent: DEFAULT_MAX_CONCURRENT },
+    onSubmit: async ({ value: { text, ...rest } }) => {
+      setError(null);
+      const body: DispatchInput = { keys: items.map((item) => item.key), name, prompt: text, ...rest };
+      try {
+        setResult(await api<Run[]>("/api/inbox/dispatch", { method: "POST", body: JSON.stringify(body) }));
+        onDispatched();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+  });
+  const { text, projectId } = useStore(form.store, (s) => s.values);
+  const busy = useStore(form.store, (s) => s.isSubmitting);
 
   const stacked = stack.flatMap((id) => prompts.data?.find((prompt) => prompt.id === id) ?? []);
   useEffect(() => {
-    if (!dirty) setText(stacked.map((prompt) => prompt.body).join("\n\n"));
+    if (!dirty) form.setFieldValue("text", stacked.map((prompt) => prompt.body).join("\n\n"));
   }, [stack, prompts.data]);
 
   const toggle = (id: string) => {
@@ -57,16 +68,6 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
   const needsProject = items.some((item) => !item.repo) && !projectId;
   const name = stacked.map((prompt) => prompt.name).join(" + ") || "dispatch";
 
-  const start = () => {
-    setBusy(true);
-    setError(null);
-    const body: DispatchInput = { keys: items.map((item) => item.key), name, prompt: text, projectId, workspace, model, maxConcurrent };
-    api<Run[]>("/api/inbox/dispatch", { method: "POST", body: JSON.stringify(body) })
-      .then((runs) => { setResult(runs); onDispatched(); })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setBusy(false));
-  };
-
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
@@ -78,7 +79,13 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
         {result ? (
           <DispatchResult runs={result} onClose={onClose} />
         ) : (
-          <>
+          <form
+            className="contents"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void form.handleSubmit();
+            }}
+          >
             <Field label="Presets" hint="Click to stack in order. The stacked bodies become the message; edit it freely.">
               <div className="flex flex-wrap items-center gap-1">
                 {prompts.data?.map((prompt) => {
@@ -96,67 +103,87 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
               </div>
             </Field>
 
-            <Field label="Message" hint="Template: variables render per item on the server.">
-              <Textarea className={cn("min-h-36 leading-relaxed", mono)} value={text} onChange={(e) => { setText(e.target.value); setDirty(true); }} />
-              {first && text && (
-                <details className="text-xs">
-                  <summary className="cursor-pointer text-muted-foreground">Preview for {first.identifier}</summary>
-                  <pre className={cn("mt-1 max-h-40 overflow-auto rounded-md border bg-input/20 p-2 whitespace-pre-wrap text-muted-foreground", mono)}>{preview}</pre>
-                </details>
+            <form.Field name="text">
+              {(field) => (
+                <Field label="Message" hint="Template: variables render per item on the server.">
+                  <Textarea className={cn("min-h-36 leading-relaxed", mono)} value={field.state.value} onChange={(e) => { field.handleChange(e.target.value); setDirty(true); }} />
+                  {first && text && (
+                    <details className="text-xs">
+                      <summary className="cursor-pointer text-muted-foreground">Preview for {first.identifier}</summary>
+                      <pre className={cn("mt-1 max-h-40 overflow-auto rounded-md border bg-input/20 p-2 whitespace-pre-wrap text-muted-foreground", mono)}>{preview}</pre>
+                    </details>
+                  )}
+                </Field>
               )}
-            </Field>
+            </form.Field>
 
             <div className="grid gap-x-4 gap-y-3 md:grid-cols-2">
-              <Field label="T3 project" hint={needsProject ? "Linear and Sentry issues have no repository: pick a project." : undefined}>
-                <Select value={projectId ?? AUTO_PROJECT} onValueChange={(v) => setProjectId(v === AUTO_PROJECT ? null : v)}>
-                  <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
-                    {projects.data?.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.title}
-                        {p.repositoryIdentity?.owner && <span className="ml-1 text-muted-foreground">{p.repositoryIdentity.owner}/{p.repositoryIdentity.name}</span>}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Workspace">
-                <Select value={workspace} onValueChange={(v) => setWorkspace(v as WorkspaceMode)}>
-                  <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {WORKSPACE_MODES.map((mode) => (
-                      <SelectItem key={mode} value={mode}>{mode === "worktree" ? "Worktree (PR head, or default branch)" : "Local project checkout"}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Model" className="md:col-span-2">
-                <div className="flex flex-wrap gap-2">
-                  <Select value={model ? "override" : "default"} onValueChange={(v) => setModel(v === "override" ? firstAvailableModel(providers.data ?? null) : null)}>
-                    <SelectTrigger size="sm" className="w-56"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="default">Project default, else global</SelectItem>
-                      <SelectItem value="override">Override</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {model && <ModelPicker value={model} providers={providers.data ?? null} onChange={setModel} />}
-                </div>
-              </Field>
-              <Field label="At a time" hint="Threads running at once across inbox dispatches; the rest queue. 0 starts all.">
-                <Input type="number" min={0} className={cn("w-20", mono)} value={maxConcurrent} onChange={(e) => setMaxConcurrent(Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
-              </Field>
+              <form.Field name="projectId">
+                {(field) => (
+                  <Field label="T3 project" hint={needsProject ? "Linear and Sentry issues have no repository: pick a project." : undefined}>
+                    <Select value={field.state.value ?? AUTO_PROJECT} onValueChange={(v) => field.handleChange(v === AUTO_PROJECT ? null : v)}>
+                      <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
+                        {projects.data?.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            {p.title}
+                            {p.repositoryIdentity?.owner && <span className="ml-1 text-muted-foreground">{p.repositoryIdentity.owner}/{p.repositoryIdentity.name}</span>}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="workspace">
+                {(field) => (
+                  <Field label="Workspace">
+                    <Select value={field.state.value} onValueChange={(v) => field.handleChange(v as WorkspaceMode)}>
+                      <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {WORKSPACE_MODES.map((mode) => (
+                          <SelectItem key={mode} value={mode}>{mode === "worktree" ? "Worktree (PR head, or default branch)" : "Local project checkout"}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="model">
+                {(field) => (
+                  <Field label="Model" className="md:col-span-2">
+                    <div className="flex flex-wrap gap-2">
+                      <Select value={field.state.value ? "override" : "default"} onValueChange={(v) => field.handleChange(v === "override" ? firstAvailableModel(providers.data ?? null) : null)}>
+                        <SelectTrigger size="sm" className="w-56"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">Project default, else global</SelectItem>
+                          <SelectItem value="override">Override</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {field.state.value && <ModelPicker value={field.state.value} providers={providers.data ?? null} onChange={field.handleChange} />}
+                    </div>
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="maxConcurrent">
+                {(field) => (
+                  <Field label="At a time" hint="Threads running at once across inbox dispatches; the rest queue. 0 starts all.">
+                    <Input type="number" min={0} className={cn("w-20", mono)} value={field.state.value} onChange={(e) => field.handleChange(Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
+                  </Field>
+                )}
+              </form.Field>
             </div>
 
             {error && <p className="text-xs text-destructive">{error}</p>}
             <div className="flex items-center justify-end gap-2">
               <span className="mr-auto text-xs text-muted-foreground">One thread per item. A PR with a thread already running is skipped.</span>
               <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
-              <Button size="sm" onClick={start} disabled={busy || !text.trim() || needsProject}>
+              <Button type="submit" size="sm" disabled={busy || !text.trim() || needsProject}>
                 {busy ? "Starting…" : items.length === 1 ? "Start thread" : `Start ${items.length} threads`}
               </Button>
             </div>
-          </>
+          </form>
         )}
       </DialogContent>
     </Dialog>

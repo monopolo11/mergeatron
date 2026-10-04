@@ -36,6 +36,7 @@ function setup() {
       workspace: "worktree",
       model: null,
       prompt: "review {{pr_url}} round {{review_round}}",
+      presetId: null,
     })),
   );
   return { layer, withRule, posts, reactions, merged };

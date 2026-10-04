@@ -4,8 +4,8 @@ import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismat
 import type { Rule } from "./rules.ts";
 import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
-import type { T3Project } from "./t3.ts";
-import { fakeSlack, runWith, settle, testLayer } from "./testing.ts";
+import type { StartThreadInput, T3Project } from "./t3.ts";
+import { fakeSlack, fakeT3, runWith, settle, testLayer } from "./testing.ts";
 
 const base: Rule = {
   id: "r1",
@@ -22,6 +22,7 @@ const base: Rule = {
   workspace: "worktree",
   model: null,
   prompt: "x",
+  presetId: null,
   createdAt: "",
   updatedAt: "",
 };
@@ -94,6 +95,36 @@ describe("resolveProject", () => {
 });
 
 describe("handleDelivery", () => {
+  test("a rule linked to a preset starts threads with the preset's current body; deleting the preset restores the rule's own text", () => {
+    const started: StartThreadInput[] = [];
+    const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };
+    const t3 = fakeT3({
+      projects: () => Effect.succeed([project]),
+      startThread: (input) => Effect.sync(() => (started.push(input), { threadId: "t", threadUrl: "http://t3/t" })),
+      thread: () => Effect.never,
+    });
+    return runWith(
+      testLayer({ t3 }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const preset = yield* store.createPrompt({ name: "review", body: "preset v1 {{pr_url}}" });
+        yield* store.createRule({ ...base, projectId: "p1", prompt: "own {{pr_url}}", presetId: preset.id });
+        const ctx = { repo: "acme/widgets", pr_number: "1", pr_url: "https://github.com/acme/widgets/pull/1", requested_reviewer: "bernardo" };
+
+        yield* store.updatePrompt(preset.id, { name: "review", body: "preset v2 {{pr_url}}" });
+        yield* handleDelivery({ deliveryId: "d1", event: "pull_request.review_requested", ctx });
+        yield* settle;
+        expect(started.at(-1)?.prompt).toBe("preset v2 https://github.com/acme/widgets/pull/1");
+
+        yield* store.deletePrompt(preset.id);
+        expect((yield* store.listRules())[0]?.presetId).toBeNull();
+        yield* handleDelivery({ deliveryId: "d2", event: "pull_request.review_requested", ctx: { ...ctx, pr_number: "2", pr_url: "https://github.com/acme/widgets/pull/2" } });
+        yield* settle;
+        expect(started.at(-1)?.prompt).toBe("own https://github.com/acme/widgets/pull/2");
+      }),
+    );
+  });
+
   // The default fake T3 fails every call with "unexpected": these deliveries must be decided before T3 is reached.
 
   test("a Slack message that matches no rule gets a skipped reaction and no run", async () => {

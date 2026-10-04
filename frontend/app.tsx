@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useNavigate } from "@tanstack/react-router";
-import { use, useEffect, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { Analytics } from "@/components/Analytics";
@@ -14,7 +14,7 @@ import { RunLog } from "@/components/RunLog";
 import { SettingsPage } from "@/components/Settings";
 import { Button } from "@/components/ui/button";
 import { api, type Status } from "@/lib/api";
-import { ShellContext } from "@/lib/shell";
+import { ShellContext, type RuleDraft } from "@/lib/shell";
 import { cn } from "@/lib/utils";
 import type { Rule, RuleInput, Run, Settings } from "../src/rules.ts";
 import type { T3Project, T3Provider } from "../src/t3.ts";
@@ -25,9 +25,10 @@ const DEFAULT_PROMPT = `Review pull request {{pr_url}} ("{{pr_title}}" by {{pr_a
 
 You are checked out on the PR head. Read the diff against {{pr_base}}, then look for correctness bugs, missing tests and unclear code. Keep findings concrete, one line each with file:line. Post nothing to GitHub; report here.`;
 
+/** New rules start off, so a half-filled rule never fires before it is saved and reviewed. */
 const NEW_RULE: RuleInput = {
   name: "New rule",
-  enabled: true,
+  enabled: false,
   events: ["pull_request.review_requested"],
   repos: [],
   reviewer: null,
@@ -40,6 +41,7 @@ const NEW_RULE: RuleInput = {
   workspace: "worktree",
   model: null,
   prompt: DEFAULT_PROMPT,
+  presetId: null,
 };
 
 const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
@@ -99,13 +101,21 @@ function App() {
     selectRule(created.id);
   };
 
-  const saveRule = async (id: string, input: RuleInput) => {
+  const putRule = async (id: string, input: RuleInput) => {
     replaceRule(await api<Rule>(`/api/rules/${id}`, { method: "PUT", body: JSON.stringify(input) }));
+  };
+
+  // Editor saves carry the rule's current switch, read at save time: the editor's copy of the rule can be older than a toggle in the list.
+  const rulesRef = useRef(rules);
+  rulesRef.current = rules;
+  const saveRule = async (id: string, draft: RuleDraft) => {
+    const current = rulesRef.current?.find((rule) => rule.id === id);
+    if (current) await putRule(id, { ...draft, enabled: current.enabled });
   };
 
   const toggleRule = (rule: Rule) => {
     const { id, createdAt, updatedAt, ...input } = rule;
-    return saveRule(id, { ...input, enabled: !rule.enabled });
+    return putRule(id, { ...input, enabled: !rule.enabled });
   };
 
   const deleteRule = async (rule: Rule) => {

@@ -1,3 +1,4 @@
+import { useStore } from "@tanstack/react-form";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { use, useState } from "react";
@@ -24,7 +25,7 @@ import { TokenInput } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { ShellContext, type Shell } from "@/lib/shell";
-import { saveLabel, useAutosave } from "@/lib/useAutosave";
+import { saveLabel, useAutosaveForm, type AutosaveForm } from "@/lib/useAutosave";
 import { cn } from "@/lib/utils";
 import type { InboxResponse } from "../../src/inbox.ts";
 import type { Prompt, PromptInput, Settings } from "../../src/rules.ts";
@@ -42,7 +43,6 @@ import {
   TEMPLATE_VARS,
   sentryQuery,
   type InboxSource,
-  type SentryFilters,
 } from "../../src/shared.ts";
 import type { UpdateResult } from "../../src/update.ts";
 
@@ -80,9 +80,7 @@ export function SettingsPage() {
 }
 
 function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings }) {
-  const [draft, setDraft] = useState(settings);
-  const { state, error } = useAutosave(draft, shell.saveSettings);
-  const patch = (partial: Partial<Settings>) => setDraft((d) => ({ ...d, ...partial }));
+  const { form, state, error } = useAutosaveForm<Settings>({ defaultValues: settings, save: shell.saveSettings });
   const hash = useLocation({ select: (location) => location.hash.replace(/^#/, "") });
   const navigate = useNavigate();
   const section = SECTIONS.find((candidate) => candidate.id === hash) ?? SECTIONS[0];
@@ -118,55 +116,83 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
 
           {section.id === "defaults" && (
             <div className="grid gap-x-6 gap-y-3 md:grid-cols-[minmax(0,28rem)_12rem_16rem]">
-              <Field label="Model" hint="Used when a rule has no model override and the T3 project has no default.">
-                <ModelPicker value={draft.model} providers={shell.providers} onChange={(model) => patch({ model })} />
-              </Field>
-              <Field label="Runtime mode">
-                <Select value={draft.runtimeMode} onValueChange={(value) => patch({ runtimeMode: value as Settings["runtimeMode"] })}>
-                  <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {RUNTIME_MODES.map((mode) => <SelectItem key={mode} value={mode}>{mode}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field label="Your GitHub login" hint="Rules with 'Skip my own PRs' on will not review PRs you authored.">
-                <Input className={mono} value={draft.githubLogin ?? ""} onChange={(e) => patch({ githubLogin: e.target.value || null })} placeholder="octocat" />
-              </Field>
+              <form.Field name="model">
+                {(field) => (
+                  <Field label="Model" hint="Used when a rule has no model override and the T3 project has no default.">
+                    <ModelPicker value={field.state.value} providers={shell.providers} onChange={field.handleChange} />
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="runtimeMode">
+                {(field) => (
+                  <Field label="Runtime mode">
+                    <Select value={field.state.value} onValueChange={(value) => field.handleChange(value as typeof field.state.value)}>
+                      <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {RUNTIME_MODES.map((mode) => <SelectItem key={mode} value={mode}>{mode}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="githubLogin">
+                {(field) => (
+                  <Field label="Your GitHub login" hint="Rules with 'Skip my own PRs' on will not review PRs you authored.">
+                    <Input className={mono} value={field.state.value ?? ""} onChange={(e) => field.handleChange(e.target.value || null)} placeholder="octocat" />
+                  </Field>
+                )}
+              </form.Field>
             </div>
           )}
 
-          {section.id === "polling" && <Polling draft={draft} patch={patch} />}
+          {section.id === "polling" && <Polling form={form} />}
 
-          {section.id === "sentry" && <Sentry shell={shell} filters={draft.sentryFilters} onChange={(sentryFilters) => patch({ sentryFilters })} />}
+          {section.id === "sentry" && <Sentry shell={shell} form={form} />}
 
           {section.id === "presets" && <Presets />}
 
           {section.id === "reviews" && (
             <div className="grid gap-x-6 gap-y-3 md:grid-cols-[14rem_1fr]">
-              <Field label="Pause after change requests" hint="Reviews of one PR that request changes in a row before its reviews pause and a handoff thread is written. 0 never pauses.">
-                <Input type="number" min={0} className={cn("w-20", mono)} value={draft.maxChangesRequestedRounds} onChange={(e) => patch({ maxChangesRequestedRounds: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} />
-              </Field>
-              <TemplateField
-                label="Handoff prompt"
-                value={draft.handoffPrompt}
-                fallback={DEFAULT_HANDOFF_PROMPT}
-                onChange={(handoffPrompt) => patch({ handoffPrompt })}
-                vars={HANDOFF_VARS}
-                hint="First message of the handoff thread."
-                rows="min-h-40"
-              />
+              <form.Field name="maxChangesRequestedRounds">
+                {(field) => (
+                  <Field label="Pause after change requests" hint="Reviews of one PR that request changes in a row before its reviews pause and a handoff thread is written. 0 never pauses.">
+                    <Input type="number" min={0} className={cn("w-20", mono)} value={field.state.value} onChange={(e) => field.handleChange(Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
+                  </Field>
+                )}
+              </form.Field>
+              <form.Field name="handoffPrompt">
+                {(field) => (
+                  <TemplateField
+                    label="Handoff prompt"
+                    value={field.state.value}
+                    fallback={DEFAULT_HANDOFF_PROMPT}
+                    onChange={field.handleChange}
+                    vars={HANDOFF_VARS}
+                    hint="First message of the handoff thread."
+                    rows="min-h-40"
+                  />
+                )}
+              </form.Field>
             </div>
           )}
 
           {section.id === "slack" && (
             <div className="grid gap-6">
               <div className="grid gap-x-6 gap-y-3 md:grid-cols-[14rem_1fr]">
-                <Field label="Review channel" hint="Where request_review posts when the agent names no channel. Channel id or #name.">
-                  <Input className={mono} value={draft.reviewChannel ?? ""} onChange={(e) => patch({ reviewChannel: e.target.value || null })} placeholder="C0123456789" />
-                </Field>
-                <Field label="Your Slack user id" hint="Whom notify_user DMs when an agent needs you. Profile → ⋮ → Copy member ID.">
-                  <Input className={mono} value={draft.slackUserId ?? ""} onChange={(e) => patch({ slackUserId: e.target.value || null })} placeholder="U0123456789" />
-                </Field>
+                <form.Field name="reviewChannel">
+                  {(field) => (
+                    <Field label="Review channel" hint="Where request_review posts when the agent names no channel. Channel id or #name.">
+                      <Input className={mono} value={field.state.value ?? ""} onChange={(e) => field.handleChange(e.target.value || null)} placeholder="C0123456789" />
+                    </Field>
+                  )}
+                </form.Field>
+                <form.Field name="slackUserId">
+                  {(field) => (
+                    <Field label="Your Slack user id" hint="Whom notify_user DMs when an agent needs you. Profile → ⋮ → Copy member ID.">
+                      <Input className={mono} value={field.state.value ?? ""} onChange={(e) => field.handleChange(e.target.value || null)} placeholder="U0123456789" />
+                    </Field>
+                  )}
+                </form.Field>
                 <Field label="MCP for agents" hint="Tools: slack_post_message, notify_user, request_review, request_second_pass, mark_merged, review_status.">
                   <div className="flex h-8 items-center text-xs">
                     <Dot tone={shell.status?.mcp ? "ok" : "idle"} />
@@ -174,20 +200,28 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                   </div>
                 </Field>
               </div>
-              <MessageSection
-                title="Review request message"
-                hint="Posted by request_review. Markdown becomes mrkdwn; <@U123> and <!subteam^S123> pass through."
-                value={draft.reviewRequestMessage}
-                fallback={DEFAULT_REVIEW_REQUEST_MESSAGE}
-                onChange={(reviewRequestMessage) => patch({ reviewRequestMessage })}
-              />
-              <MessageSection
-                title="Second pass message"
-                hint="Posted by request_second_pass in the review thread. round counts from 2."
-                value={draft.secondPassMessage}
-                fallback={DEFAULT_SECOND_PASS_MESSAGE}
-                onChange={(secondPassMessage) => patch({ secondPassMessage })}
-              />
+              <form.Field name="reviewRequestMessage">
+                {(field) => (
+                  <MessageSection
+                    title="Review request message"
+                    hint="Posted by request_review. Markdown becomes mrkdwn; <@U123> and <!subteam^S123> pass through."
+                    value={field.state.value}
+                    fallback={DEFAULT_REVIEW_REQUEST_MESSAGE}
+                    onChange={field.handleChange}
+                  />
+                )}
+              </form.Field>
+              <form.Field name="secondPassMessage">
+                {(field) => (
+                  <MessageSection
+                    title="Second pass message"
+                    hint="Posted by request_second_pass in the review thread. round counts from 2."
+                    value={field.state.value}
+                    fallback={DEFAULT_SECOND_PASS_MESSAGE}
+                    onChange={field.handleChange}
+                  />
+                )}
+              </form.Field>
             </div>
           )}
         </div>
@@ -364,12 +398,10 @@ const SOURCE_NOTES: Record<InboxSource, string> = {
 };
 
 /** One row per inbox source: on/off, interval, live state, poll now. */
-function Polling({ draft, patch }: { draft: Settings; patch: (partial: Partial<Settings>) => void }) {
+function Polling({ form }: { form: AutosaveForm<Settings> }) {
   const queryClient = useQueryClient();
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000 });
   const [polling, setPolling] = useState<InboxSource | null>(null);
-  const patchSource = (source: InboxSource, partial: Partial<Settings["polling"][InboxSource]>) =>
-    patch({ polling: { ...draft.polling, [source]: { ...draft.polling[source], ...partial } } });
   const pollNow = (source: InboxSource) => {
     setPolling(source);
     api("/api/inbox/poll", { method: "POST", body: JSON.stringify({ source }) }).finally(() => {
@@ -390,10 +422,14 @@ function Polling({ draft, patch }: { draft: Settings; patch: (partial: Partial<S
                 .join(" · ");
         return (
           <div key={source} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Switch size="sm" checked={draft.polling[source].enabled} onCheckedChange={(enabled) => patchSource(source, { enabled })} />
+            <form.Field name={`polling.${source}.enabled`}>
+              {(field) => <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />}
+            </form.Field>
             <span className="w-14 text-[13px] capitalize" title={SOURCE_NOTES[source]}>{source}</span>
             <span className="text-muted-foreground">every</span>
-            <Input type="number" min={1} className={cn("h-7 w-16", mono)} value={draft.polling[source].minutes} onChange={(e) => patchSource(source, { minutes: Math.max(1, Math.floor(Number(e.target.value) || 1)) })} />
+            <form.Field name={`polling.${source}.minutes`}>
+              {(field) => <Input type="number" min={1} className={cn("h-7 w-16", mono)} value={field.state.value} onChange={(e) => field.handleChange(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />}
+            </form.Field>
             <span className="text-muted-foreground">min</span>
             <span className={cn("text-muted-foreground", status?.lastError && "text-destructive")} title={status?.lastError ?? undefined}>
               {status?.lastError ? `failed: ${status.lastError}` : live}
@@ -414,12 +450,12 @@ function Polling({ draft, patch }: { draft: Settings; patch: (partial: Partial<S
  * Which Sentry issues reach the inbox. Suggestions come from the instance;
  * the search line is what the next poll sends. Saving polls Sentry right away.
  */
-function Sentry({ shell, filters, onChange }: { shell: Shell; filters: SentryFilters; onChange: (filters: SentryFilters) => void }) {
+function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> }) {
+  const filters = useStore(form.store, (s) => s.values.sentryFilters);
   const config = shell.status?.sentry ?? null;
   const options = useQuery({ queryKey: ["sentry-options"], queryFn: () => api<SentryOptions>("/api/sentry/options"), enabled: config !== null, staleTime: 5 * 60_000, retry: false });
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: config !== null });
   const poll = inbox.data?.polling.sentry ?? null;
-  const patch = (partial: Partial<SentryFilters>) => onChange({ ...filters, ...partial });
   const suggest = (values: string[] | undefined) => (values ?? []).map((value) => ({ value }));
   const scope = [filters.environments.length > 0 && `environment ${filters.environments.join(", ")}`, filters.projects.length > 0 && `project ${filters.projects.join(", ")}`].filter(Boolean);
 
@@ -449,15 +485,27 @@ function Sentry({ shell, filters, onChange }: { shell: Shell; filters: SentryFil
         )}
       </dl>
 
-      <Field label="Projects" hint="Project slugs, usually one per service. Empty covers every project.">
-        <TokenInput value={filters.projects} onChange={(projects) => patch({ projects })} options={suggest(options.data?.projects)} placeholder="checkout-api" />
-      </Field>
-      <Field label="Environments" hint="Any of the listed. Empty covers every environment.">
-        <TokenInput value={filters.environments} onChange={(environments) => patch({ environments })} options={suggest(options.data?.environments)} placeholder="production" />
-      </Field>
-      <Field label="Tags" hint="key:value. Values of one key match any; different keys must all match. Any Sentry search term works, like level:fatal or !release:beta.">
-        <TokenInput value={filters.tags} onChange={(tags) => patch({ tags })} options={suggest(options.data?.tags)} placeholder="service:checkout" />
-      </Field>
+      <form.Field name="sentryFilters.projects">
+        {(field) => (
+          <Field label="Projects" hint="Project slugs, usually one per service. Empty covers every project.">
+            <TokenInput value={field.state.value} onChange={field.handleChange} options={suggest(options.data?.projects)} placeholder="checkout-api" />
+          </Field>
+        )}
+      </form.Field>
+      <form.Field name="sentryFilters.environments">
+        {(field) => (
+          <Field label="Environments" hint="Any of the listed. Empty covers every environment.">
+            <TokenInput value={field.state.value} onChange={field.handleChange} options={suggest(options.data?.environments)} placeholder="production" />
+          </Field>
+        )}
+      </form.Field>
+      <form.Field name="sentryFilters.tags">
+        {(field) => (
+          <Field label="Tags" hint="key:value. Values of one key match any; different keys must all match. Any Sentry search term works, like level:fatal or !release:beta.">
+            <TokenInput value={field.state.value} onChange={field.handleChange} options={suggest(options.data?.tags)} placeholder="service:checkout" />
+          </Field>
+        )}
+      </form.Field>
       <Field label="Search" hint="Unresolved issues seen in the last 14 days, newest first, up to 100.">
         <code className={cn("break-words", mono)}>
           {sentryQuery(filters.tags)}
@@ -542,24 +590,37 @@ function firstLine(body: string): string {
 /** The open row: name and body autosave; variable chips insert at the cursor. */
 function PresetEditor({ prompt, onClose, onDeleted }: { prompt: Prompt; onClose: () => void; onDeleted: () => void }) {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<PromptInput>({ name: prompt.name, body: prompt.body });
-  const { state, error } = useAutosave(draft, async (value) => {
-    const saved = await api<Prompt>(`/api/prompts/${prompt.id}`, { method: "PUT", body: JSON.stringify({ ...value, body: value.body || " " }) });
-    queryClient.setQueryData<Prompt[]>(["prompts"], (all) => all?.map((p) => (p.id === saved.id ? saved : p)));
+  const { form, state, error } = useAutosaveForm<PromptInput>({
+    defaultValues: { name: prompt.name, body: prompt.body },
+    save: async (value) => {
+      const saved = await api<Prompt>(`/api/prompts/${prompt.id}`, { method: "PUT", body: JSON.stringify({ ...value, body: value.body || " " }) });
+      queryClient.setQueryData<Prompt[]>(["prompts"], (all) => all?.map((p) => (p.id === saved.id ? saved : p)));
+    },
   });
+  const name = useStore(form.store, (s) => s.values.name);
   const remove = () => api(`/api/prompts/${prompt.id}`, { method: "DELETE" }).then(onDeleted);
   return (
-    <div className="grid gap-2 border-b bg-muted/20 px-1 py-3">
+    <form
+      className="grid gap-2 border-b bg-muted/20 px-1 py-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void form.handleSubmit();
+      }}
+    >
       <div className="flex items-center gap-2">
-        <Input className="w-72" autoFocus value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+        <form.Field name="name">
+          {(field) => <Input className="w-72" autoFocus value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} />}
+        </form.Field>
         <span className={cn("text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>{saveLabel(state)}</span>
         <span className="ml-auto flex items-center gap-1">
-          <DeletePreset name={draft.name} onConfirm={remove} />
+          <DeletePreset name={name} onConfirm={remove} />
           <Button size="xs" variant="ghost" onClick={onClose}>Close</Button>
         </span>
       </div>
-      <TemplateEditor value={draft.body} onChange={(body) => setDraft({ ...draft, body })} vars={PRESET_VARS} className="min-h-36" placeholder="First message of the thread. Variables render per item." />
-    </div>
+      <form.Field name="body">
+        {(field) => <TemplateEditor value={field.state.value} onChange={field.handleChange} vars={PRESET_VARS} className="min-h-36" placeholder="First message of the thread. Variables render per item." />}
+      </form.Field>
+    </form>
   );
 }
 

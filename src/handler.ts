@@ -241,8 +241,8 @@ const failStart = (run: Run, ctx: WebhookContext, error: unknown, at: Record<str
   });
 
 function actionOf(rule: Rule): RunAction {
-  const { name, skipSelfReview, projectId, workspace, model, prompt, maxConcurrent } = rule;
-  return { name, skipSelfReview, projectId, workspace, model, prompt, maxConcurrent };
+  const { name, skipSelfReview, projectId, workspace, model, prompt, presetId, maxConcurrent } = rule;
+  return { name, skipSelfReview, projectId, workspace, model, prompt, presetId, maxConcurrent };
 }
 
 /**
@@ -336,9 +336,11 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
       );
     }
 
+    // A linked preset is read now, not when the rule was saved; a deleted one falls back to the rule's own text.
+    const preset = rule.presetId ? (yield* store.getPrompt(rule.presetId))?.body : undefined;
     return yield* openThread(rule, project, ctx, {
       title: `${rule.name}: ${ctx.pr_title ?? ctx.issue_title ?? ctx.slack_text ?? ctx.repo}`,
-      prompt: renderTemplate(rule.prompt, ctx),
+      prompt: renderTemplate(preset ?? rule.prompt, ctx),
     });
   });
 

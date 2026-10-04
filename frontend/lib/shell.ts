@@ -4,6 +4,9 @@ import type { Rule, RuleInput, Run, Settings } from "../../src/rules.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
 import type { UpdateStatus } from "../../src/update.ts";
 
+/** The rule fields an editor saves. `enabled` is toggled from the rules list, never by an edit. */
+export type RuleDraft = Omit<RuleInput, "enabled">;
+
 /**
  * What the app shell loads once and every route can read: connection status,
  * T3 projects and providers, settings with a saver, the update check, and
@@ -25,7 +28,7 @@ export type Shell = {
   runs: Run[];
   webhookUrl: string;
   createRule: () => Promise<void>;
-  saveRule: (id: string, input: RuleInput) => Promise<void>;
+  saveRule: (id: string, input: RuleDraft) => Promise<void>;
   toggleRule: (rule: Rule) => Promise<void>;
   deleteRule: (rule: Rule) => Promise<void>;
   refreshRuns: () => void;

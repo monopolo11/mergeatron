@@ -49,7 +49,10 @@ export const rules = sqliteTable("rules", {
   workspace: text({ enum: WORKSPACE_MODES }).notNull().default("worktree"),
   /** Null means use the project default, then the global default. */
   model: text({ mode: "json" }).$type<ModelSelection | null>(),
+  /** The rule's own prompt text; used when `presetId` is null or its preset is gone. */
   prompt: text().notNull(),
+  /** A dispatch preset whose body replaces `prompt` at start time, so editing the preset updates every rule using it. */
+  presetId: text("preset_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -59,7 +62,7 @@ export const rules = sqliteTable("rules", {
  * reads. Frozen on queued runs, since the rule may change meanwhile and a
  * dispatch from the inbox has no stored rule at all.
  */
-export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "prompt" | "maxConcurrent">;
+export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "prompt" | "presetId" | "maxConcurrent">;
 
 /** Single-row table holding the global defaults. */
 export const settings = sqliteTable("settings", {

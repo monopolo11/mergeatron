@@ -9,7 +9,7 @@ import { fakeSlack, fakeT3, runWith, settle, testLayer } from "./testing.ts";
 
 const rule: RuleInput = {
   name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: null, allowBots: false, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
-  projectId: "p1", workspace: "worktree", model: null, prompt: "review {{pr_url}}",
+  projectId: "p1", workspace: "worktree", model: null, prompt: "review {{pr_url}}", presetId: null,
 };
 const ctx = { repo: "acme/widgets", pr_number: "5", pr_url: "https://github.com/acme/widgets/pull/5", pr_title: "Add billing", pr_author: "alice", pr_base: "main", slack_channel: "C1", slack_ts: "1.0" };
 const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };

@@ -95,7 +95,16 @@ export function makeStore(db: AppDatabase) {
             .get() ?? null,
       ),
 
-    deletePrompt: (id: string) => Effect.sync(() => db.delete(prompts).where(eq(prompts.id, id)).returning().get() !== undefined),
+    getPrompt: (id: string) => Effect.sync((): Prompt | null => db.select().from(prompts).where(eq(prompts.id, id)).get() ?? null),
+
+    /** Rules linked to the preset keep their own text and stop following it. */
+    deletePrompt: (id: string) =>
+      Effect.sync(() =>
+        db.transaction((tx) => {
+          tx.update(rules).set({ presetId: null }).where(eq(rules.presetId, id)).run();
+          return tx.delete(prompts).where(eq(prompts.id, id)).returning().get() !== undefined;
+        }),
+      ),
 
     /**
      * Replaces one source's inbox with a fresh poll: upserts every item seen,

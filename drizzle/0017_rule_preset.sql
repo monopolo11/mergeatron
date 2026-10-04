@@ -1,0 +1,1 @@
+ALTER TABLE `rules` ADD `preset_id` text;

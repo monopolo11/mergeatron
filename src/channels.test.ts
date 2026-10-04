@@ -11,7 +11,7 @@ describe("assertChannelAllowed", () => {
       testLayer(),
       Effect.gen(function* () {
         const store = yield* Store;
-        const rule = { name: "r", events: ["slack.message"] as string[], repos: [] as string[], reviewer: null, allowBots: false, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0, projectId: null, workspace: "worktree" as const, model: null, prompt: "p" };
+        const rule = { name: "r", events: ["slack.message"] as string[], repos: [] as string[], reviewer: null, allowBots: false, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0, projectId: null, workspace: "worktree" as const, model: null, prompt: "p", presetId: null };
         yield* store.createRule({ ...rule, enabled: true, channel: "#alerts" });
         yield* store.createRule({ ...rule, enabled: false, channel: "#disabled" });
         yield* store.saveSettings({ ...(yield* store.getSettings()), reviewChannel: "C0REVIEWS" });
