@@ -43,7 +43,7 @@ cp .env.example .env
    ```
 
    The UI is at http://localhost:8787. **Rules** lists your rules on the left with the
-   selected rule's editor beside it (changes autosave). The live run log sits on the
+   selected rule's editor beside it (changes save with **Save**, see [Prompt versions](#prompt-versions)). The live run log sits on the
    right of every page; **Runs** in the top bar hides it. The webhook endpoint
    is `POST /webhooks/github`. **Settings** is its own page with six sections, one shown at a time:
    **Connection** (what the service talks to, a **Test thread** button that starts a
@@ -52,7 +52,7 @@ cp .env.example .env
    mode, your GitHub login, which lets rules skip PRs you authored), **Polling**,
    **Dispatch presets**, **Reviews** (how many change requests in a row pause a
    PR's reviews plus the handoff prompt, see [Stuck PRs](#stuck-prs)) and
-   **Slack and MCP**. Everything on it autosaves.
+   **Slack and MCP**. Everything on it autosaves, except presets.
 
 4. Expose the port to GitHub (for a laptop, `cloudflared tunnel --url http://localhost:8787`
    or [smee.io](https://smee.io)). In the repo or org settings add a webhook:
@@ -115,7 +115,7 @@ another turn when they report. T3 thread links are never posted to Slack; they s
 ### MCP server for agents
 
 With Slack configured, the orchestrator also serves MCP tools that let other agents
-send PRs for review through the bot and DM you when they need you. They live on their own loopback-only port
+send PRs for review through the bot, DM you when they need you, and version prompts. They live on their own loopback-only port
 (`MCP_PORT`, default 8788) so a tunnel to the main port never exposes them:
 
 ```sh
@@ -130,6 +130,10 @@ claude mcp add --scope user --transport http t3-review http://127.0.0.1:8788/mcp
 | `mark_merged` | Once the PR is merged (checked with `gh`), reacts `:merge:` on the message that opened its thread. The workspace needs a custom `:merge:` emoji. |
 | `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`). |
 | `notify_user` | DMs you as the bot (**Settings → Your Slack user id**) when an agent needs your attention. Returns `thread_ts`; passing it back replies in the same DM thread. |
+| `list_prompts` | Every preset and rule prompt with its live and latest version. |
+| `get_prompt` | One preset or rule prompt with every version: body, note, source and date. |
+| `create_prompt_version` | Saves a new version (full `body`, optional `note`). It stays a draft unless `promote` is true. |
+| `promote_prompt_version` | Makes a version live; promote an older one to roll back. |
 
 The orchestrator remembers each PR's channel, thread and round, so agents only pass
 the PR URL. Add `slack.second_pass` to a rule's events for later rounds to be
@@ -288,9 +292,21 @@ renders per item with the same variables webhook deliveries get (`pr_url`,
 `priority`, `issue_identifier`, `branch`, `review_decision`. Presets are edited
 in **Settings → Dispatch presets** (`/api/prompts`, seeded with "Review PR",
 "Implement issue" and "Address review feedback"): one row per preset, click to
-open it, name and body autosave. A dispatch by hand reviews a PR even when its
+open it, rename it or save its body as a new version (see [Prompt versions](#prompt-versions)). A dispatch by hand reviews a PR even when its
 automated reviews are paused; one thread per PR or issue at a time still holds.
 The run log shows dispatches under the preset names with source `manual`.
+
+### Prompt versions
+
+Dispatch presets and each rule's own prompt are versioned. Saving never edits a
+version: a changed body becomes the next version, a **draft** that runs ignore,
+unless you click **Save and promote**. The version select above the prompt shows
+any version read-only, with **Promote** to make it live (an older one rolls back)
+and **Edit from this** to start the draft from it. Rule settings save with the
+same buttons and apply at once. Agents read and version prompts through the MCP
+tools above; their versions are marked `mcp`. Over HTTP: `GET` and `POST
+/api/{prompts,rules}/:id/versions` (`{ body, note?, promote? }`) and `POST
+/api/{prompts,rules}/:id/versions/:version/promote`.
 
 ### Automations
 

@@ -2,10 +2,22 @@ import { and, count, desc, eq, inArray, isNotNull, isNull, lt, notInArray, or, s
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
-import { DEFAULT_SETTINGS, type Prompt, type PromptInput, type ReviewRequest, type Rule, type RuleInput, type Run, type RunAction, type Settings } from "./rules.ts";
-import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type RunSource } from "./shared.ts";
+import {
+  DEFAULT_SETTINGS,
+  type Prompt,
+  type PromptInput,
+  type PromptVersion,
+  type ReviewRequest,
+  type Rule,
+  type RuleInput,
+  type RuleUpdate,
+  type Run,
+  type RunAction,
+  type Settings,
+} from "./rules.ts";
+import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type PromptOwner, type PromptVersionSource, type RunSource } from "./shared.ts";
 
 /** How long items that left the inbox are kept, so a reopened PR or a closed issue still has its history. */
 const INBOX_RETENTION_DAYS = 30;
@@ -54,12 +66,17 @@ export type PullRequestSummary = {
   threadUrl: string | null;
 };
 
+/** A version to append: its body, why, and where it was saved from. */
+export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
+
+type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
+
 /** What `recordRun` needs; `action` is only set on queued runs, see RunAction. */
 export type RunInput = Omit<Run, "id" | "createdAt" | "action"> & { action?: RunAction | null };
 
 /**
- * Typed access to rules, prompt presets, global settings, the inbox and the
- * run log. SQLite is synchronous, so every method is a small `Effect.sync`
+ * Typed access to rules, prompt presets and their versions, global settings,
+ * the inbox and the run log. SQLite is synchronous, so every method is a small `Effect.sync`
  * over Drizzle; a failing statement is a defect, not an expected error.
  */
 export function makeStore(db: AppDatabase) {
@@ -71,25 +88,46 @@ export function makeStore(db: AppDatabase) {
     return { ...stored, polling: { ...DEFAULT_POLLING, ...stored.polling } };
   };
   const listPrompts = (): Prompt[] => db.select().from(prompts).orderBy(prompts.createdAt).all();
-  const createPrompt = (input: PromptInput): Prompt => {
-    const now = new Date().toISOString();
-    return db
-      .insert(prompts)
-      .values({ ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
-      .returning()
-      .get();
-  };
+  const createPrompt = ({ body, ...input }: PromptInput, source: PromptVersionSource = "ui"): Prompt =>
+    db.transaction((tx) => {
+      const now = new Date().toISOString();
+      const prompt = tx
+        .insert(prompts)
+        .values({ ...input, body, liveVersion: 1, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
+        .returning()
+        .get();
+      insertVersion(tx, "preset", prompt.id, 1, { body, note: null, source }, now);
+      return prompt;
+    });
+
+  const ofOwner = (owner: PromptOwner, ownerId: string) => and(eq(promptVersions.owner, owner), eq(promptVersions.ownerId, ownerId));
+  const insertVersion = (tx: Tx, owner: PromptOwner, ownerId: string, version: number, input: NewPromptVersion, now: string): PromptVersion =>
+    tx.insert(promptVersions).values({ ...input, owner, ownerId, version, createdAt: now }).returning().get();
+  const getVersion = (tx: Tx, owner: PromptOwner, ownerId: string, version: number): PromptVersion | null =>
+    tx.select().from(promptVersions).where(and(ofOwner(owner, ownerId), eq(promptVersions.version, version))).get() ?? null;
+  const latestVersion = (tx: Tx, owner: PromptOwner, ownerId: string): PromptVersion | null =>
+    tx.select().from(promptVersions).where(ofOwner(owner, ownerId)).orderBy(desc(promptVersions.version)).get() ?? null;
+  /** Copies a version's body onto its owner, the text runs use. False when the owner is gone. */
+  const setLive = (tx: Tx, { owner, ownerId, version, body }: PromptVersion, now: string): boolean =>
+    owner === "preset"
+      ? tx.update(prompts).set({ body, liveVersion: version, updatedAt: now }).where(eq(prompts.id, ownerId)).returning({ id: prompts.id }).get() !== undefined
+      : tx.update(rules).set({ prompt: body, livePromptVersion: version, updatedAt: now }).where(eq(rules.id, ownerId)).returning({ id: rules.id }).get() !== undefined;
+  const ownerExists = (tx: Tx, owner: PromptOwner, ownerId: string): boolean =>
+    owner === "preset"
+      ? tx.select({ id: prompts.id }).from(prompts).where(eq(prompts.id, ownerId)).get() !== undefined
+      : tx.select({ id: rules.id }).from(rules).where(eq(rules.id, ownerId)).get() !== undefined;
 
   return {
     listPrompts: () => Effect.sync(listPrompts),
-    createPrompt: (input: PromptInput) => Effect.sync(() => createPrompt(input)),
+    createPrompt: (input: PromptInput, source?: PromptVersionSource) => Effect.sync(() => createPrompt(input, source)),
 
-    updatePrompt: (id: string, input: PromptInput) =>
+    /** Renames a preset; its body changes through `createPromptVersion`. */
+    renamePrompt: (id: string, name: string) =>
       Effect.sync(
-        () =>
+        (): Prompt | null =>
           db
             .update(prompts)
-            .set({ ...input, updatedAt: new Date().toISOString() })
+            .set({ name, updatedAt: new Date().toISOString() })
             .where(eq(prompts.id, id))
             .returning()
             .get() ?? null,
@@ -102,7 +140,52 @@ export function makeStore(db: AppDatabase) {
       Effect.sync(() =>
         db.transaction((tx) => {
           tx.update(rules).set({ presetId: null }).where(eq(rules.presetId, id)).run();
+          tx.delete(promptVersions).where(ofOwner("preset", id)).run();
           return tx.delete(prompts).where(eq(prompts.id, id)).returning().get() !== undefined;
+        }),
+      ),
+
+    /** Every version of a preset or rule prompt, newest first. */
+    listPromptVersions: (owner: PromptOwner, ownerId: string) =>
+      Effect.sync((): PromptVersion[] => db.select().from(promptVersions).where(ofOwner(owner, ownerId)).orderBy(desc(promptVersions.version)).all()),
+
+    /** Highest version number per owner, for listing prompts with how far their drafts run ahead. */
+    latestPromptVersions: () =>
+      Effect.sync(
+        (): Map<string, number> =>
+          new Map(
+            db
+              .select({ owner: promptVersions.owner, ownerId: promptVersions.ownerId, version: sql<number>`max(${promptVersions.version})` })
+              .from(promptVersions)
+              .groupBy(promptVersions.owner, promptVersions.ownerId)
+              .all()
+              .map((row) => [`${row.owner}:${row.ownerId}`, row.version]),
+          ),
+      ),
+
+    /**
+     * Appends the next version, promoting it when asked. A body equal to the
+     * latest version's adds nothing and returns that version (promoted if
+     * asked), so repeated saves do not pile up. Null when the owner is gone.
+     */
+    createPromptVersion: (owner: PromptOwner, ownerId: string, input: NewPromptVersion, promote = false) =>
+      Effect.sync(() =>
+        db.transaction((tx): PromptVersion | null => {
+          if (!ownerExists(tx, owner, ownerId)) return null;
+          const now = new Date().toISOString();
+          const latest = latestVersion(tx, owner, ownerId);
+          const version = latest?.body === input.body ? latest : insertVersion(tx, owner, ownerId, (latest?.version ?? 0) + 1, input, now);
+          if (promote) setLive(tx, version, now);
+          return version;
+        }),
+      ),
+
+    /** Makes a version the live one. Null when the owner or the version is gone. */
+    promotePromptVersion: (owner: PromptOwner, ownerId: string, version: number) =>
+      Effect.sync(() =>
+        db.transaction((tx): PromptVersion | null => {
+          const found = getVersion(tx, owner, ownerId, version);
+          return found && setLive(tx, found, new Date().toISOString()) ? found : null;
         }),
       ),
 
@@ -168,17 +251,23 @@ export function makeStore(db: AppDatabase) {
 
     listRules: () => Effect.sync((): Rule[] => db.select().from(rules).orderBy(rules.createdAt).all()),
 
-    createRule: (input: RuleInput) =>
-      Effect.sync((): Rule => {
-        const now = new Date().toISOString();
-        return db
-          .insert(rules)
-          .values({ ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
-          .returning()
-          .get();
-      }),
+    /** The prompt becomes version 1, live. */
+    createRule: (input: RuleInput, source: PromptVersionSource = "ui") =>
+      Effect.sync(() =>
+        db.transaction((tx): Rule => {
+          const now = new Date().toISOString();
+          const rule = tx
+            .insert(rules)
+            .values({ ...input, livePromptVersion: 1, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
+            .returning()
+            .get();
+          insertVersion(tx, "rule", rule.id, 1, { body: input.prompt, note: null, source }, now);
+          return rule;
+        }),
+      ),
 
-    updateRule: (id: string, input: RuleInput) =>
+    /** Everything but the prompt, which changes through `createPromptVersion`. */
+    updateRule: (id: string, input: RuleUpdate) =>
       Effect.sync(
         (): Rule | null =>
           db
@@ -191,7 +280,13 @@ export function makeStore(db: AppDatabase) {
 
     getRule: (id: string) => Effect.sync((): Rule | null => db.select().from(rules).where(eq(rules.id, id)).get() ?? null),
 
-    deleteRule: (id: string) => Effect.sync(() => db.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined),
+    deleteRule: (id: string) =>
+      Effect.sync(() =>
+        db.transaction((tx) => {
+          tx.delete(promptVersions).where(ofOwner("rule", id)).run();
+          return tx.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined;
+        }),
+      ),
 
     getSettings: () => Effect.sync(getSettings),
 

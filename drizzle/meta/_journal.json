@@ -127,6 +127,13 @@
       "when": 1791087959303,
       "tag": "0017_rule_preset",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1791088643692,
+      "tag": "0018_prompt_versions",
+      "breakpoints": true
     }
   ]
 }

@@ -15,8 +15,9 @@ import { SettingsPage } from "@/components/Settings";
 import { Button } from "@/components/ui/button";
 import { api, type Status } from "@/lib/api";
 import { ShellContext, type RuleDraft } from "@/lib/shell";
+import { confirmDiscard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
-import type { Rule, RuleInput, Run, Settings } from "../src/rules.ts";
+import type { Rule, RuleInput, RuleUpdate, Run, Settings } from "../src/rules.ts";
 import type { T3Project, T3Provider } from "../src/t3.ts";
 import { DEFAULT_MAX_CONCURRENT, EMPTY_FILTERS } from "../src/shared.ts";
 import type { UpdateStatus } from "../src/update.ts";
@@ -67,10 +68,14 @@ function App() {
     localStorage.setItem(RUNS_PANEL_KEY, next ? "open" : "closed");
     setRunsOpen(next);
   };
-  // Picking or creating a rule opens its editor, whichever view is showing.
-  const selectRule = (id: string) => {
+  // Picking or creating a rule opens its editor, whichever view is showing; the open editor's unsaved changes are dropped only on confirm.
+  const openRule = (id: string) => {
     setSelectedId(id);
-    void navigate({ to: "/" });
+    // Navigating runs the open editor's route blocker; switching rules has already asked.
+    if (location.pathname !== "/") void navigate({ to: "/" });
+  };
+  const selectRule = (id: string) => {
+    if (id === selectedId || confirmDiscard()) openRule(id);
   };
 
   const refreshRuns = () => void api<Run[]>("/api/runs").then(setRuns).catch(() => {});
@@ -96,12 +101,13 @@ function App() {
   const replaceRule = (updated: Rule) => setRules((all) => (all ?? []).map((rule) => (rule.id === updated.id ? updated : rule)));
 
   const createRule = async () => {
+    if (!confirmDiscard()) return;
     const created = await api<Rule>("/api/rules", { method: "POST", body: JSON.stringify(NEW_RULE) });
     setRules((all) => [...(all ?? []), created]);
-    selectRule(created.id);
+    openRule(created.id);
   };
 
-  const putRule = async (id: string, input: RuleInput) => {
+  const putRule = async (id: string, input: RuleUpdate) => {
     replaceRule(await api<Rule>(`/api/rules/${id}`, { method: "PUT", body: JSON.stringify(input) }));
   };
 

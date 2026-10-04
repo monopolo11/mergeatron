@@ -17,6 +17,7 @@ export function TemplateEditor({
   fallback,
   placeholder,
   className,
+  readOnly = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -26,6 +27,8 @@ export function TemplateEditor({
   placeholder?: string;
   /** Extra classes for the textarea, typically a min height. */
   className?: string;
+  /** Shows the text muted with no chips, e.g. an older prompt version. */
+  readOnly?: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -43,8 +46,15 @@ export function TemplateEditor({
 
   return (
     <>
-      <Textarea ref={ref} className={cn("min-h-20 leading-relaxed", mono, className)} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-      <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+      <Textarea
+        ref={ref}
+        className={cn("min-h-20 leading-relaxed", mono, readOnly && "text-muted-foreground", className)}
+        value={value}
+        readOnly={readOnly}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+      />
+      {!readOnly && <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
         {vars.map((name) => (
           <Button key={name} type="button" variant="ghost" size="xs" className={cn("h-5 px-1 text-primary", mono)} onClick={() => insert(name)}>
             {`{{${name}}}`}
@@ -55,7 +65,7 @@ export function TemplateEditor({
             Reset to default
           </Button>
         )}
-      </div>
+      </div>}
     </>
   );
 }

@@ -15,7 +15,8 @@ import { logger, loggerLayer } from "./src/log.ts";
 import { makeMcpHandler } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
-import { DispatchInput, PromptInput, RuleInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
+import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
+import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
@@ -48,7 +49,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -258,6 +259,7 @@ const api = HttpRouter.use((router) =>
             skipSelfReview: false,
             filters: EMPTY_FILTERS,
             presetId: null,
+            livePromptVersion: 1,
             ...action,
             createdAt: now,
             updatedAt: now,
@@ -270,14 +272,15 @@ const api = HttpRouter.use((router) =>
       ),
     );
 
-    yield* router.add("GET", "/api/prompts", route(Effect.map(store.listPrompts(), json)));
+    yield* router.add("GET", "/api/prompts", route(Effect.map(listPresets(), json)));
     yield* router.add("POST", "/api/prompts", route(Effect.flatMap(body(PromptInput), (input) => Effect.map(store.createPrompt(input), (prompt) => json(prompt, 201)))));
     yield* router.add(
       "PUT",
       "/api/prompts/:id",
       route(
         Effect.gen(function* () {
-          const prompt = yield* store.updatePrompt(yield* param("id"), yield* body(PromptInput));
+          const { name } = yield* body(PromptRename);
+          const prompt = yield* store.renamePrompt(yield* param("id"), name);
           return prompt ? json(prompt) : json({ error: "not found" }, 404);
         }),
       ),
@@ -295,7 +298,7 @@ const api = HttpRouter.use((router) =>
       "/api/rules/:id",
       route(
         Effect.gen(function* () {
-          const rule = yield* store.updateRule(yield* param("id"), yield* body(RuleInput));
+          const rule = yield* store.updateRule(yield* param("id"), yield* body(RuleUpdate));
           if (!rule) return json({ error: "not found" }, 404);
           // A raised limit lets queued runs start now rather than at the next settle.
           yield* startQueued(rule.id);
@@ -321,6 +324,37 @@ const api = HttpRouter.use((router) =>
         }),
       ),
     );
+
+    /**
+     * Prompt versions of a preset or a rule. Saving appends a version (a draft
+     * unless `promote` is set); promoting makes it the text runs use. Each
+     * returns the prompt's history after the change.
+     */
+    for (const [path, owner] of [["prompts", "preset"], ["rules", "rule"]] as const) {
+      yield* router.add("GET", `/api/${path}/:id/versions`, route(Effect.map(Effect.flatMap(param("id"), (id) => readPrompt(owner, id)), json)));
+      yield* router.add(
+        "POST",
+        `/api/${path}/:id/versions`,
+        route(
+          Effect.gen(function* () {
+            const id = yield* param("id");
+            yield* createVersion(owner, id, yield* body(PromptVersionInput), "ui");
+            return json(yield* readPrompt(owner, id), 201);
+          }),
+        ),
+      );
+      yield* router.add(
+        "POST",
+        `/api/${path}/:id/versions/:version/promote`,
+        route(
+          Effect.gen(function* () {
+            const id = yield* param("id");
+            yield* promoteVersion(owner, id, Number(yield* param("version")));
+            return json(yield* readPrompt(owner, id));
+          }),
+        ),
+      );
+    }
 
     yield* router.add("GET", "/api/runs", route(Effect.map(store.listRuns(), json)));
     yield* router.add("GET", "/api/analytics", route(Effect.map(store.analytics(), json)));

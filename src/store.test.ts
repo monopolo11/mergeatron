@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { linear, pr } from "./inbox.test.ts";
+import { linear, pr, rule } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Run } from "./rules.ts";
 import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
 import { Store } from "./store.ts";
@@ -180,6 +180,50 @@ describe("Store inbox", () => {
         expect(yield* store.countGoneInbox()).toBe(2);
         expect(yield* store.getInboxItem(other.key)).toMatchObject({ goneAt: t1 });
         expect(yield* store.syncInbox("github", [other], t2)).toEqual({ appeared: 0, returned: 1, gone: 0 });
+      }),
+    ));
+});
+
+describe("Store prompt versions", () => {
+  const { id, livePromptVersion, createdAt, updatedAt, ...input } = rule;
+
+  test("saving appends a draft; promoting makes it the text runs use, and rolls back to older versions", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const created = yield* store.createRule({ ...input, prompt: "v1" });
+        const draft = { note: null, source: "ui" as const };
+
+        const v2 = yield* store.createPromptVersion("rule", created.id, { ...draft, body: "v2" });
+        expect(v2?.version).toBe(2);
+        expect(yield* store.getRule(created.id)).toMatchObject({ prompt: "v1", livePromptVersion: 1 });
+
+        // The same body again saves nothing new.
+        expect((yield* store.createPromptVersion("rule", created.id, { ...draft, body: "v2" }))?.version).toBe(2);
+
+        yield* store.promotePromptVersion("rule", created.id, 2);
+        expect(yield* store.getRule(created.id)).toMatchObject({ prompt: "v2", livePromptVersion: 2 });
+        yield* store.promotePromptVersion("rule", created.id, 1);
+        expect(yield* store.getRule(created.id)).toMatchObject({ prompt: "v1", livePromptVersion: 1 });
+
+        yield* store.createPromptVersion("rule", created.id, { ...draft, body: "v3" }, true);
+        expect(yield* store.getRule(created.id)).toMatchObject({ prompt: "v3", livePromptVersion: 3 });
+        expect((yield* store.listPromptVersions("rule", created.id)).map((v) => v.version)).toEqual([3, 2, 1]);
+      }),
+    ));
+
+  test("a missing owner or version is null, and versions go with their owner", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const preset = yield* store.createPrompt({ name: "review", body: "v1" });
+        expect(yield* store.promotePromptVersion("preset", preset.id, 2)).toBeNull();
+        expect(yield* store.createPromptVersion("rule", preset.id, { body: "x", note: null, source: "mcp" })).toBeNull();
+
+        yield* store.deletePrompt(preset.id);
+        expect(yield* store.listPromptVersions("preset", preset.id)).toEqual([]);
       }),
     ));
 });

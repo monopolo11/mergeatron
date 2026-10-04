@@ -1,4 +1,4 @@
-import { useStore } from "@tanstack/react-form";
+import { useForm, useStore } from "@tanstack/react-form";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo, useRef, useState } from "react";
@@ -22,16 +22,18 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { firstAvailableModel } from "@/components/DispatchDialog";
-import { ExternalLink, Field, GroupLabel, RunStatus } from "@/components/Field";
+import { Empty, ExternalLink, Field, GroupLabel, RunStatus } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
+import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
 import { TokenInput, type TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import type { RuleDraft } from "@/lib/shell";
-import { saveLabel, useAutosaveForm } from "@/lib/useAutosave";
+import { useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
 import { itemContext, itemEvent, type InboxItem, type InboxResponse, type LabelsResponse } from "../../src/inbox.ts";
 import { ruleMismatch, sameName } from "../../src/match.ts";
+import type { PromptHistory } from "../../src/promptVersions.ts";
 import type { Prompt, Rule, Run } from "../../src/rules.ts";
 import {
   INBOX_EVENT_PREFIX,
@@ -56,16 +58,7 @@ export const WEBHOOK_ONLY_VARS = new Set(["event", "action", "sender", "requeste
 
 const REASON_OPTIONS: TokenOption[] = INBOX_REASONS.map((reason) => ({ value: reason, label: INBOX_REASON_LABELS[reason] }));
 
-export function RuleEditor({
-  rule,
-  projects,
-  providers,
-  runs,
-  githubLogin,
-  onSave,
-  onDelete,
-  onRunsChanged,
-}: {
+type RuleEditorProps = {
   rule: Rule;
   projects: T3Project[];
   providers: T3Provider[] | null;
@@ -76,14 +69,56 @@ export function RuleEditor({
   onDelete: (rule: Rule) => Promise<void>;
   /** Called after "Run now" so the run log refreshes without waiting for its poll. */
   onRunsChanged: () => void;
-}) {
-  // `enabled` is the list switch's, not the form's: saving the form must never write a stale copy back.
-  const { id, createdAt, updatedAt, enabled, ...initial } = rule;
-  const promptRef = useRef<HTMLTextAreaElement>(null);
+};
 
-  const { form, state, error } = useAutosaveForm<RuleDraft>({ defaultValues: initial, save: (input) => onSave(id, trimmed(input)) });
+/** The selected rule's form, once its prompt versions have loaded. */
+export function RuleEditor(props: RuleEditorProps) {
+  const history = usePromptHistory("rule", props.rule.id);
+  if (history.error) return <Empty>{history.error.message}</Empty>;
+  return history.data ? <RuleForm {...props} history={history.data} /> : null;
+}
+
+/**
+ * Edits a rule and saves on demand: settings with a PUT, a changed prompt as
+ * a new version, a draft unless "Save and promote" (see PromptVersions).
+ */
+function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDelete, onRunsChanged, history }: RuleEditorProps & { history: PromptHistory }) {
+  // `enabled` is the list switch's, not the form's: saving the form must never write a stale copy back.
+  const { id, createdAt, updatedAt, enabled, livePromptVersion, ...stored } = rule;
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const versions = usePromptVersions(history);
+
+  const [saved, setSaved] = useState<RuleDraft>({ ...stored, prompt: versions.baseBody });
+  const form = useForm({ defaultValues: saved, onSubmit: () => save(false) });
   const draft = useStore(form.store, (s) => s.values);
   const value = useMemo(() => trimmed(draft), [draft]);
+
+  const promptChanged = value.prompt !== versions.baseBody;
+  const settingsChanged = JSON.stringify({ ...value, prompt: "" }) !== JSON.stringify({ ...trimmed(saved), prompt: "" });
+  const dirty = promptChanged || settingsChanged;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useUnsavedGuard(dirty);
+
+  const save = async (promote: boolean) => {
+    setSaving(true);
+    try {
+      if (settingsChanged) await onSave(id, value);
+      await versions.save(value.prompt, promote);
+      setSaved(value);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const discard = () => {
+    const reverted = { ...saved, prompt: versions.reset() };
+    setSaved(reverted);
+    form.reset(reverted);
+    setError(null);
+  };
 
   const events = draft.events;
   const isSlack = events.some((event) => event.startsWith(SLACK_EVENT_PREFIX));
@@ -120,7 +155,7 @@ export function RuleEditor({
   const stateOptions = countOptions(scoped.flatMap((item) => [item.state, ...(item.stateType ? [item.stateType] : [])]));
 
   // What the rule as drafted would fire on, with the matcher's own reason for every miss.
-  const previewRule: Rule = { ...value, id, createdAt, updatedAt, enabled: true };
+  const previewRule: Rule = { ...value, id, createdAt, updatedAt, livePromptVersion, enabled: true };
   const matches = candidates
     .map((item) => ({
       item,
@@ -147,7 +182,9 @@ export function RuleEditor({
   const previewLabel = sample ? `Preview with delivery from ${timeAgo(sample.createdAt)}` : matched[0] ? `Preview with ${matched[0].item.identifier}` : "Preview";
   // A linked preset replaces the rule's own text when a thread starts, so the preview follows it.
   const linked = prompts.data?.find((prompt) => prompt.id === draft.presetId) ?? null;
-  const preview = previewCtx ? renderTemplate(linked?.body ?? draft.prompt, previewCtx) : null;
+  // What the prompt box shows: the linked preset, a version picked to view, or the draft.
+  const shownPrompt = linked?.body ?? versions.viewed?.body ?? draft.prompt;
+  const preview = previewCtx ? renderTemplate(shownPrompt, previewCtx) : null;
 
   const vars = TEMPLATE_VARS.filter(
     (name) =>
@@ -171,9 +208,14 @@ export function RuleEditor({
   return (
     <div>
       <Toolbar title={draft.name || "Untitled rule"}>
-        <span className={cn("ml-auto text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>
-          {saveLabel(state)}
-        </span>
+        <span className={cn("ml-auto", error ? "text-destructive" : "text-warn")}>{error ? "Save failed" : dirty ? "Unsaved changes" : ""}</span>
+        <Button size="xs" variant="ghost" disabled={!dirty || saving} onClick={discard}>Discard</Button>
+        <Button size="xs" variant="outline" disabled={!dirty || saving} onClick={() => void save(false)}>
+          {promptChanged ? "Save draft" : "Save"}
+        </Button>
+        {(promptChanged || versions.base !== history.liveVersion) && (
+          <Button size="xs" disabled={saving} onClick={() => void save(true)}>Save and promote</Button>
+        )}
         <DeleteButton name={draft.name} onConfirm={() => onDelete(rule)} />
       </Toolbar>
 
@@ -465,43 +507,46 @@ export function RuleEditor({
               label="Prompt"
               hint={
                 linked
-                  ? `Follows the preset "${linked.name}": editing it in Settings changes this rule too.`
-                  : `First message of the thread. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`
+                  ? `Follows the live version of the preset "${linked.name}": promoting one in Settings changes this rule too.`
+                  : `First message of the thread. Runs use the live version. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`
               }
             >
-              {prompts.data && prompts.data.length > 0 && (
-                <form.Field name="presetId">
-                  {(preset) => (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Select value={linked?.id ?? OWN_PROMPT} onValueChange={(v) => preset.handleChange(v === OWN_PROMPT ? null : v)}>
-                        <SelectTrigger size="sm" className="w-64"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={OWN_PROMPT}>Write it here</SelectItem>
-                          {prompts.data.map((prompt) => (
-                            <SelectItem key={prompt.id} value={prompt.id}>Preset: {prompt.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {linked && (
-                        <>
-                          <Button size="xs" variant="ghost" className="text-primary" onClick={() => { field.handleChange(linked.body); preset.handleChange(null); }}>
-                            Unlink and edit a copy
-                          </Button>
-                          <Link to="/settings" hash="presets" className="link text-xs text-primary">Edit preset</Link>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </form.Field>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                {prompts.data && prompts.data.length > 0 && (
+                  <form.Field name="presetId">
+                    {(preset) => (
+                      <>
+                        <Select value={linked?.id ?? OWN_PROMPT} onValueChange={(v) => preset.handleChange(v === OWN_PROMPT ? null : v)}>
+                          <SelectTrigger size="sm" className="w-64"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={OWN_PROMPT}>Write it here</SelectItem>
+                            {prompts.data.map((prompt) => (
+                              <SelectItem key={prompt.id} value={prompt.id}>Preset: {prompt.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {linked && (
+                          <>
+                            <Button size="xs" variant="ghost" className="text-primary" onClick={() => { field.handleChange(linked.body); preset.handleChange(null); }}>
+                              Unlink and edit a copy
+                            </Button>
+                            <Link to="/settings" hash="presets" className="link text-xs text-primary">Edit preset</Link>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </form.Field>
+                )}
+                {!linked && <VersionSelect versions={versions} onEditFrom={field.handleChange} />}
+              </div>
               <Textarea
                 ref={promptRef}
-                className={cn("min-h-52 leading-relaxed", mono)}
-                value={linked?.body ?? field.state.value}
-                readOnly={linked !== null}
+                className={cn("min-h-52 leading-relaxed", mono, versions.viewed && !linked && "text-muted-foreground")}
+                value={shownPrompt}
+                readOnly={linked !== null || versions.viewed !== null}
                 onChange={(e) => field.handleChange(e.target.value)}
               />
-              {!linked && (
+              {!linked && !versions.viewed && (
                 <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5">
                   {vars.map((name) => (
                     <Button key={name} variant="ghost" size="xs" className={cn("h-5 px-1 text-primary", mono)} onClick={() => insertText(`{{${name}}}`)}>

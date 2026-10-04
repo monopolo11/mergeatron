@@ -1,5 +1,5 @@
 import { Effect, Schema, SchemaGetter } from "effect";
-import type { prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import type { promptVersions, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -22,6 +22,7 @@ export type Run = typeof runs.$inferSelect;
 export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
+export type PromptVersion = typeof promptVersions.$inferSelect;
 export type { ModelSelection, RunAction } from "./db/schema.ts";
 
 /**
@@ -58,8 +59,7 @@ const RuleFiltersSchema = Schema.Struct({
   rerunOnPush: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 
-/** Payload accepted from the UI when creating or updating a rule. */
-export const RuleInput = Schema.Struct({
+const ruleFields = {
   name: nonEmpty,
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   events: Schema.Array(nonEmpty).pipe(Schema.mutable).check(Schema.isMinLength(1)),
@@ -73,17 +73,25 @@ export const RuleInput = Schema.Struct({
   projectId: optionalName,
   workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
   model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-  prompt: Schema.String.check(Schema.isMinLength(1)),
   presetId: optionalName,
-}).check(
-  // One inbox source per rule keeps its filters and label suggestions to one provider.
-  Schema.makeFilter((rule) =>
-    new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1
-      ? undefined
-      : { path: ["events"], issue: "An inbox rule polls one source: pick inbox events of GitHub, Linear or Sentry, not several." },
-  ),
+};
+
+/** One inbox source per rule keeps its filters and label suggestions to one provider. */
+const oneInboxSource = Schema.makeFilter((rule: { readonly events: readonly string[] }) =>
+  new Set(rule.events.map(inboxSource).filter(Boolean)).size <= 1
+    ? undefined
+    : { path: ["events"], issue: "An inbox rule polls one source: pick inbox events of GitHub, Linear or Sentry, not several." },
 );
+
+const promptBody = Schema.String.check(Schema.isMinLength(1));
+
+/** Payload accepted from the UI when creating a rule; `prompt` becomes version 1, live. */
+export const RuleInput = Schema.Struct({ ...ruleFields, prompt: promptBody }).check(oneInboxSource);
 export type RuleInput = typeof RuleInput.Type;
+
+/** Payload for updating a rule: everything but its prompt, which changes through versions (PromptVersionInput). */
+export const RuleUpdate = Schema.Struct(ruleFields).check(oneInboxSource);
+export type RuleUpdate = typeof RuleUpdate.Type;
 
 const PollSourceSchema = Schema.Struct({
   enabled: Schema.Boolean,
@@ -111,11 +119,20 @@ export type SettingsInput = typeof SettingsInput.Type;
 
 export const TestThreadInput = Schema.Struct({ projectId: nonEmpty });
 
-export const PromptInput = Schema.Struct({
-  name: nonEmpty,
-  body: Schema.String.check(Schema.isMinLength(1)),
-});
+/** A new preset; `body` becomes version 1, live. */
+export const PromptInput = Schema.Struct({ name: nonEmpty, body: promptBody });
 export type PromptInput = typeof PromptInput.Type;
+
+/** Renaming a preset; its body changes through versions. */
+export const PromptRename = Schema.Struct({ name: nonEmpty });
+
+/** A new version of a preset or rule prompt. Unpromoted versions are drafts: runs keep using the live one. */
+export const PromptVersionInput = Schema.Struct({
+  body: promptBody,
+  note: optionalName,
+  promote: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type PromptVersionInput = typeof PromptVersionInput.Type;
 
 /** A dispatch from the inbox view: one thread per item key, all with the same composed prompt. */
 export const DispatchInput = Schema.Struct({
@@ -148,9 +165,10 @@ export const DEFAULT_SETTINGS: Settings = {
 // The decoded payloads must be storable as rows: a schema that drifts from its table fails to compile here.
 type Extends<T extends U, U> = T;
 export type RowChecks = [
-  Extends<RuleInput, Omit<Rule, "id" | "createdAt" | "updatedAt">>,
+  Extends<RuleInput, Omit<Rule, "id" | "livePromptVersion" | "createdAt" | "updatedAt">>,
   Extends<SettingsInput, Settings>,
-  Extends<PromptInput, Omit<Prompt, "id" | "createdAt" | "updatedAt">>,
+  Extends<PromptInput, Omit<Prompt, "id" | "liveVersion" | "createdAt" | "updatedAt">>,
+  Extends<Omit<PromptVersionInput, "promote">, Pick<PromptVersion, "body" | "note">>,
   Extends<SettingsInput["polling"], PollingSettings>,
   Extends<RuleInput["filters"], RuleFilters>,
   Extends<SettingsInput["sentryFilters"], SentryFilters>,

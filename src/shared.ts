@@ -26,6 +26,14 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 export const RUN_SOURCES = ["github", "slack", "poll", "manual"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 
+/** What owns a versioned prompt: a dispatch preset, or a rule's own prompt. */
+export const PROMPT_OWNERS = ["preset", "rule"] as const;
+export type PromptOwner = (typeof PROMPT_OWNERS)[number];
+
+/** Where a prompt version was saved from: the UI, or an agent through the MCP tools. */
+export const PROMPT_VERSION_SOURCES = ["ui", "mcp"] as const;
+export type PromptVersionSource = (typeof PROMPT_VERSION_SOURCES)[number];
+
 /** APIs the inbox polls for PRs and issues that involve you. */
 export const INBOX_SOURCES = ["github", "linear", "sentry"] as const;
 export type InboxSource = (typeof INBOX_SOURCES)[number];

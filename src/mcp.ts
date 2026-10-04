@@ -7,13 +7,17 @@ import { assertChannelAllowed } from "./channels.ts";
 import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
 import { notifyUser } from "./notify.ts";
+import { createVersion, listPrompts, promoteVersion, readPrompt } from "./promptVersions.ts";
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
+import { PROMPT_OWNERS } from "./shared.ts";
 import { SlackClient } from "./slack.ts";
 
 /**
  * MCP tools for other agents: post as the Slack bot, DM the user for their
  * attention (see notify.ts), and send PRs for review with tracked threads and
- * rounds, and mark those threads merged (see reviewRequests.ts). Stateless Streamable HTTP, one server per request;
+ * rounds, and mark those threads merged (see reviewRequests.ts), and read and
+ * version the prompts rules and dispatches use (see promptVersions.ts).
+ * Stateless Streamable HTTP, one server per request;
  * index.ts serves it on loopback. Tool inputs stay zod schemas: that is what
  * the MCP SDK accepts and turns into the JSON Schema it advertises.
  */
@@ -21,7 +25,7 @@ import { SlackClient } from "./slack.ts";
 const log = logger("mcp");
 
 /** Failures the agent can act on: returned as tool errors without an error log. */
-const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError"]);
+const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError", "PromptNotFoundError"]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
 const mentions = z
@@ -29,6 +33,8 @@ const mentions = z
   .optional()
   .describe("People to tag: Slack user ids (U…), user group ids (S…), or here/channel");
 const note = z.string().optional().describe("Extra Markdown shown in the message, e.g. what changed since the last round");
+const promptOwner = z.enum(PROMPT_OWNERS).describe("preset: a dispatch preset. rule: a rule's own prompt");
+const promptId = z.string().describe("Id of the preset or rule, from list_prompts");
 
 /** A web handler for `/mcp`, bound to the services in scope when it is built. */
 export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Response>, never, ReviewServices> = Effect.gen(function* () {
@@ -129,6 +135,56 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         annotations: { readOnlyHint: true },
       },
       ({ pr_url }) => result("review_status", reviewStatus(pr_url)),
+    );
+
+    server.registerTool(
+      "list_prompts",
+      {
+        description:
+          "List the versioned prompts: dispatch presets (owner preset) and each rule's own prompt (owner rule), with the live version runs use and the latest saved. A rule with a presetId runs that preset's live body instead of its own prompt.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+      () => result("list_prompts", listPrompts()),
+    );
+
+    server.registerTool(
+      "get_prompt",
+      {
+        description:
+          "Read a preset or rule prompt with every version, newest first: body, note, source (ui or mcp) and when it was saved. liveVersion is the one runs use. Templates use {{variables}} such as {{pr_url}}.",
+        inputSchema: { owner: promptOwner, id: promptId },
+        annotations: { readOnlyHint: true },
+      },
+      ({ owner, id }) => result("get_prompt", readPrompt(owner, id)),
+    );
+
+    server.registerTool(
+      "create_prompt_version",
+      {
+        description:
+          "Save a new version of a preset or rule prompt. It stays a draft that runs ignore until promoted, unless promote is true. A body equal to the latest version's saves nothing new. Returns the version.",
+        inputSchema: {
+          owner: promptOwner,
+          id: promptId,
+          body: z.string().min(1).describe("The full prompt text, not a diff"),
+          note: z.string().optional().describe("Why this version exists, shown in its history"),
+          promote: z.boolean().optional().describe("Make it live right away; default false"),
+        },
+        annotations: { destructiveHint: false },
+      },
+      ({ owner, id, body, note, promote }) =>
+        result("create_prompt_version", createVersion(owner, id, { body, note: note?.trim() || null, promote: promote ?? false }, "mcp")),
+    );
+
+    server.registerTool(
+      "promote_prompt_version",
+      {
+        description: "Make a version of a preset or rule prompt the live one: threads started from now on use its body. Promote an older version to roll back.",
+        inputSchema: { owner: promptOwner, id: promptId, version: z.number().int().min(1).describe("Version number from get_prompt") },
+        annotations: { destructiveHint: false, idempotentHint: true },
+      },
+      ({ owner, id, version }) => result("promote_prompt_version", promoteVersion(owner, id, version)),
     );
 
     return server;

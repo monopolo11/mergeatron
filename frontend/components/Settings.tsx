@@ -1,4 +1,4 @@
-import { useStore } from "@tanstack/react-form";
+import { useForm, useStore } from "@tanstack/react-form";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { use, useState } from "react";
@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Dot, Empty, ExternalLink, Field, Heading } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
+import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
 import { WEBHOOK_ONLY_VARS } from "@/components/RuleEditor";
 import { TemplateEditor } from "@/components/TemplateEditor";
 import { TokenInput } from "@/components/TokenInput";
@@ -26,8 +27,10 @@ import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { ShellContext, type Shell } from "@/lib/shell";
 import { saveLabel, useAutosaveForm, type AutosaveForm } from "@/lib/useAutosave";
+import { confirmDiscard, useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
 import type { InboxResponse } from "../../src/inbox.ts";
+import type { PresetWithLatest, PromptHistory } from "../../src/promptVersions.ts";
 import type { Prompt, PromptInput, Settings } from "../../src/rules.ts";
 import type { SentryOptions } from "../../src/sentryInbox.ts";
 import {
@@ -109,7 +112,10 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
 
       <div className="min-w-0 overflow-auto">
         <Toolbar title={section.label}>
-          <span className={cn("ml-auto text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>{saveLabel(state)}</span>
+          {/* Presets save on demand in their own editor; the autosave state is the other sections'. */}
+          {section.id !== "presets" && (
+            <span className={cn("ml-auto text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>{saveLabel(state)}</span>
+          )}
         </Toolbar>
         <div className="p-4">
           {section.id === "connection" && <Connection shell={shell} />}
@@ -529,12 +535,17 @@ const PRESET_VARS = TEMPLATE_VARS.filter((name) => !name.startsWith("slack_") &&
 /** The preset library as rows; the open row is the editor. Presets stack into the first message when dispatching from the Inbox. */
 function Presets() {
   const queryClient = useQueryClient();
-  const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<Prompt[]>("/api/prompts") });
+  const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<PresetWithLatest[]>("/api/prompts") });
   const [openId, setOpenId] = useState<string | null>(null);
+  // Opening another preset (or a new one) closes the open editor: its unsaved changes go only on confirm.
+  const open = (id: string | null) => {
+    if (id === openId || confirmDiscard()) setOpenId(id);
+  };
   const [busy, setBusy] = useState(false);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["prompts"] });
 
   const create = async (input: PromptInput = { name: "New preset", body: "" }) => {
+    if (!confirmDiscard()) return;
     setBusy(true);
     try {
       const created = await api<Prompt>("/api/prompts", { method: "POST", body: JSON.stringify({ ...input, body: input.body || " " }) });
@@ -559,17 +570,20 @@ function Presets() {
     <div className="border-t text-xs">
       {prompts.data.map((prompt) =>
         prompt.id === openId ? (
-          <PresetEditor key={prompt.id} prompt={prompt} onClose={() => setOpenId(null)} onDeleted={() => { setOpenId(null); void refresh(); }} />
+          <PresetEditor key={prompt.id} prompt={prompt} onClose={() => open(null)} onDeleted={() => { setOpenId(null); void refresh(); }} />
         ) : (
           <button
             key={prompt.id}
             type="button"
-            onClick={() => setOpenId(prompt.id)}
+            onClick={() => open(prompt.id)}
             className="grid w-full grid-cols-[12rem_1fr_auto] items-baseline gap-3 border-b px-1 py-2 text-left hover:bg-muted/40"
           >
             <span className="truncate text-[13px]">{prompt.name}</span>
             <span className={cn("truncate text-muted-foreground", mono)}>{firstLine(prompt.body)}</span>
-            <span className="text-muted-foreground/70">edit</span>
+            <span className={cn("text-muted-foreground/70", mono)}>
+              v{prompt.liveVersion}
+              {prompt.latestVersion > prompt.liveVersion && <span className="text-active"> · v{prompt.latestVersion} draft</span>}
+            </span>
           </button>
         ),
       )}
@@ -587,17 +601,52 @@ function firstLine(body: string): string {
   return body.split("\n").find((line) => line.trim()) ?? "";
 }
 
-/** The open row: name and body autosave; variable chips insert at the cursor. */
-function PresetEditor({ prompt, onClose, onDeleted }: { prompt: Prompt; onClose: () => void; onDeleted: () => void }) {
+/** The open row, once the preset's versions have loaded. */
+function PresetEditor(props: { prompt: Prompt; onClose: () => void; onDeleted: () => void }) {
+  const history = usePromptHistory("preset", props.prompt.id);
+  if (history.error) return <p className="border-b px-1 py-3 text-destructive">{history.error.message}</p>;
+  return history.data ? <PresetForm {...props} history={history.data} /> : null;
+}
+
+/**
+ * Name and body save on demand: a rename applies at once, a changed body
+ * becomes a new version, a draft unless "Save and promote" (see PromptVersions).
+ */
+function PresetForm({ prompt, history, onClose, onDeleted }: { prompt: Prompt; history: PromptHistory; onClose: () => void; onDeleted: () => void }) {
   const queryClient = useQueryClient();
-  const { form, state, error } = useAutosaveForm<PromptInput>({
-    defaultValues: { name: prompt.name, body: prompt.body },
-    save: async (value) => {
-      const saved = await api<Prompt>(`/api/prompts/${prompt.id}`, { method: "PUT", body: JSON.stringify({ ...value, body: value.body || " " }) });
-      queryClient.setQueryData<Prompt[]>(["prompts"], (all) => all?.map((p) => (p.id === saved.id ? saved : p)));
-    },
-  });
-  const name = useStore(form.store, (s) => s.values.name);
+  const versions = usePromptVersions(history);
+  const [saved, setSaved] = useState<PromptInput>({ name: prompt.name, body: versions.baseBody });
+  const form = useForm({ defaultValues: saved, onSubmit: () => save(false) });
+  const values = useStore(form.store, (s) => s.values);
+  // An empty body is stored as a space, like a new preset's.
+  const body = values.body || " ";
+  const nameChanged = values.name.trim() !== saved.name.trim();
+  const bodyChanged = body !== versions.baseBody;
+  const dirty = nameChanged || bodyChanged;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useUnsavedGuard(dirty);
+
+  const save = async (promote: boolean) => {
+    setSaving(true);
+    try {
+      if (nameChanged) await api<Prompt>(`/api/prompts/${prompt.id}`, { method: "PUT", body: JSON.stringify({ name: values.name }) });
+      await versions.save(body, promote);
+      await queryClient.invalidateQueries({ queryKey: ["prompts"] });
+      setSaved(values);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const discard = () => {
+    const reverted = { ...saved, body: versions.reset() };
+    setSaved(reverted);
+    form.reset(reverted);
+    setError(null);
+  };
   const remove = () => api(`/api/prompts/${prompt.id}`, { method: "DELETE" }).then(onDeleted);
   return (
     <form
@@ -607,18 +656,35 @@ function PresetEditor({ prompt, onClose, onDeleted }: { prompt: Prompt; onClose:
         void form.handleSubmit();
       }}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <form.Field name="name">
-          {(field) => <Input className="w-72" autoFocus value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} />}
+          {(field) => <Input className="w-56" autoFocus value={field.state.value} onChange={(e) => field.handleChange(e.target.value)} />}
         </form.Field>
-        <span className={cn("text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>{saveLabel(state)}</span>
-        <span className="ml-auto flex items-center gap-1">
-          <DeletePreset name={name} onConfirm={remove} />
-          <Button size="xs" variant="ghost" onClick={onClose}>Close</Button>
+        <span className={cn("ml-auto", error ? "text-destructive" : "text-warn")} title={error ?? undefined}>
+          {error ? "Save failed" : dirty ? "Unsaved changes" : ""}
         </span>
+        <Button type="button" size="xs" variant="ghost" disabled={!dirty || saving} onClick={discard}>Discard</Button>
+        <Button type="submit" size="xs" variant="outline" disabled={!dirty || saving}>{bodyChanged ? "Save draft" : "Save"}</Button>
+        {(bodyChanged || versions.base !== history.liveVersion) && (
+          <Button type="button" size="xs" disabled={saving} onClick={() => void save(true)}>Save and promote</Button>
+        )}
+        <DeletePreset name={values.name} onConfirm={remove} />
+        <Button type="button" size="xs" variant="ghost" onClick={onClose}>Close</Button>
       </div>
       <form.Field name="body">
-        {(field) => <TemplateEditor value={field.state.value} onChange={field.handleChange} vars={PRESET_VARS} className="min-h-36" placeholder="First message of the thread. Variables render per item." />}
+        {(field) => (
+          <>
+            <VersionSelect versions={versions} onEditFrom={field.handleChange} />
+            <TemplateEditor
+              value={versions.viewed?.body ?? field.state.value}
+              onChange={field.handleChange}
+              readOnly={versions.viewed !== null}
+              vars={PRESET_VARS}
+              className="min-h-36"
+              placeholder="First message of the thread. Variables render per item."
+            />
+          </>
+        )}
       </form.Field>
     </form>
   );

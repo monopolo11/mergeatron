@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -9,6 +9,8 @@ import {
   EMPTY_SENTRY_FILTERS,
   INBOX_KINDS,
   INBOX_SOURCES,
+  PROMPT_OWNERS,
+  PROMPT_VERSION_SOURCES,
   RUNTIME_MODES,
   RUN_SOURCES,
   WORKSPACE_MODES,
@@ -49,8 +51,14 @@ export const rules = sqliteTable("rules", {
   workspace: text({ enum: WORKSPACE_MODES }).notNull().default("worktree"),
   /** Null means use the project default, then the global default. */
   model: text({ mode: "json" }).$type<ModelSelection | null>(),
-  /** The rule's own prompt text; used when `presetId` is null or its preset is gone. */
+  /**
+   * The rule's own prompt text; used when `presetId` is null or its preset is
+   * gone. A copy of the promoted version's body (see `promptVersions`),
+   * written only by the store when a version is created live or promoted.
+   */
   prompt: text().notNull(),
+  /** Version of the rule's prompt that `prompt` holds. */
+  livePromptVersion: integer("live_prompt_version").notNull().default(1),
   /** A dispatch preset whose body replaces `prompt` at start time, so editing the preset updates every rule using it. */
   presetId: text("preset_id"),
   createdAt: text("created_at").notNull(),
@@ -149,10 +157,35 @@ export const inboxItems = sqliteTable("inbox_items", {
 export const prompts = sqliteTable("prompts", {
   id: text().primaryKey(),
   name: text().notNull(),
+  /** A copy of the promoted version's body (see `promptVersions`); what dispatches and linked rules use. */
   body: text().notNull(),
+  /** Version that `body` holds. */
+  liveVersion: integer("live_version").notNull().default(1),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
+
+/**
+ * Every saved revision of a preset's body or a rule's own prompt. Saving
+ * never edits a version: it appends the next number, and promoting one copies
+ * its body onto the owner, which is what runs use. Versions go with their owner.
+ */
+export const promptVersions = sqliteTable(
+  "prompt_versions",
+  {
+    owner: text({ enum: PROMPT_OWNERS }).notNull(),
+    /** Id of the preset or rule. */
+    ownerId: text("owner_id").notNull(),
+    /** 1, 2, 3... per owner. */
+    version: integer().notNull(),
+    body: text().notNull(),
+    /** Why this version exists, e.g. what an agent changed. */
+    note: text(),
+    source: text({ enum: PROMPT_VERSION_SOURCES }).notNull().default("ui"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.owner, table.ownerId, table.version] })],
+);
 
 /**
  * One delivery matched against one rule. `queued` waits for the rule's

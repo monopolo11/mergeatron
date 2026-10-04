@@ -22,6 +22,7 @@ const base: Rule = {
   workspace: "worktree",
   model: null,
   prompt: "x",
+  livePromptVersion: 1,
   presetId: null,
   createdAt: "",
   updatedAt: "",
@@ -95,7 +96,7 @@ describe("resolveProject", () => {
 });
 
 describe("handleDelivery", () => {
-  test("a rule linked to a preset starts threads with the preset's current body; deleting the preset restores the rule's own text", () => {
+  test("a rule linked to a preset starts threads with the preset's live version; deleting the preset restores the rule's own text", () => {
     const started: StartThreadInput[] = [];
     const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };
     const t3 = fakeT3({
@@ -109,18 +110,25 @@ describe("handleDelivery", () => {
         const store = yield* Store;
         const preset = yield* store.createPrompt({ name: "review", body: "preset v1 {{pr_url}}" });
         yield* store.createRule({ ...base, projectId: "p1", prompt: "own {{pr_url}}", presetId: preset.id });
-        const ctx = { repo: "acme/widgets", pr_number: "1", pr_url: "https://github.com/acme/widgets/pull/1", requested_reviewer: "bernardo" };
+        const deliver = (n: number) =>
+          Effect.andThen(
+            handleDelivery({ deliveryId: `d${n}`, event: "pull_request.review_requested", ctx: { repo: "acme/widgets", pr_number: `${n}`, pr_url: `https://github.com/acme/widgets/pull/${n}`, requested_reviewer: "bernardo" } }),
+            settle,
+          );
 
-        yield* store.updatePrompt(preset.id, { name: "review", body: "preset v2 {{pr_url}}" });
-        yield* handleDelivery({ deliveryId: "d1", event: "pull_request.review_requested", ctx });
-        yield* settle;
-        expect(started.at(-1)?.prompt).toBe("preset v2 https://github.com/acme/widgets/pull/1");
+        // A saved but unpromoted version is a draft: runs keep the live one.
+        yield* store.createPromptVersion("preset", preset.id, { body: "preset v2 {{pr_url}}", note: null, source: "ui" });
+        yield* deliver(1);
+        expect(started.at(-1)?.prompt).toBe("preset v1 https://github.com/acme/widgets/pull/1");
+
+        yield* store.promotePromptVersion("preset", preset.id, 2);
+        yield* deliver(2);
+        expect(started.at(-1)?.prompt).toBe("preset v2 https://github.com/acme/widgets/pull/2");
 
         yield* store.deletePrompt(preset.id);
         expect((yield* store.listRules())[0]?.presetId).toBeNull();
-        yield* handleDelivery({ deliveryId: "d2", event: "pull_request.review_requested", ctx: { ...ctx, pr_number: "2", pr_url: "https://github.com/acme/widgets/pull/2" } });
-        yield* settle;
-        expect(started.at(-1)?.prompt).toBe("own https://github.com/acme/widgets/pull/2");
+        yield* deliver(3);
+        expect(started.at(-1)?.prompt).toBe("own https://github.com/acme/widgets/pull/3");
       }),
     );
   });
