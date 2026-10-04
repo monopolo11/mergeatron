@@ -92,15 +92,12 @@ export function inboxSource(event: string): InboxSource | null {
  * Filters a rule applies on top of its event, matched against the delivery's
  * template variables (`reasons`, `labels`, `state`/`state_type`, `team`), so
  * they work for webhook deliveries that carry those variables too. An empty
- * list matches anything.
+ * list or expression matches anything.
  */
 export type RuleFilters = {
   reasons: InboxReason[];
-  labels: string[];
-  /** Require every label in `labels` instead of any one of them. */
-  allLabels: boolean;
-  /** Labels that must not be present: a delivery carrying any of them is skipped. */
-  notLabels: string[];
+  /** Label expression such as `(bug or p0) and !wontfix`; see `labelQuery.ts`. Empty matches anything. */
+  labels: string;
   /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). Sentry: substatus (`escalating`) or status (`unresolved`). */
   states: string[];
   /** Linear team keys, or Sentry project slugs. */
@@ -108,7 +105,7 @@ export type RuleFilters = {
   /** Inbox PR rules: run again when the PR head moves, like `pull_request.synchronize`. */
   rerunOnPush: boolean;
 };
-export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: [], allLabels: false, notLabels: [], states: [], teams: [], rerunOnPush: true };
+export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: "", states: [], teams: [], rerunOnPush: true };
 
 /**
  * Threads one rule may have running at once. Matches past the limit are

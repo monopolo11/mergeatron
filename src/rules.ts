@@ -1,5 +1,6 @@
 import { Effect, Schema, SchemaGetter } from "effect";
 import type { promptVersions, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import { parseLabels } from "./labelQuery.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -53,9 +54,10 @@ const ModelSelectionSchema = Schema.Struct({ instanceId: nonEmpty, model: nonEmp
 
 const RuleFiltersSchema = Schema.Struct({
   reasons: Schema.Array(Schema.Literals(INBOX_REASONS)).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
-  labels: names,
-  allLabels: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  notLabels: names,
+  labels: Schema.Trim.check(Schema.makeFilter((text: string) => {
+    const parsed = parseLabels(text);
+    return parsed.ok ? undefined : parsed.error;
+  })).pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   states: names,
   teams: names,
   rerunOnPush: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
