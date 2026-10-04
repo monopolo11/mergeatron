@@ -23,6 +23,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { firstAvailableModel } from "@/components/DispatchDialog";
 import { Empty, ExternalLink, Field, GroupLabel, RunStatus } from "@/components/Field";
+import { LabelsInput } from "@/components/LabelsInput";
 import { ModelPicker } from "@/components/ModelPicker";
 import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
 import { TokenInput, type TokenOption } from "@/components/TokenInput";
@@ -304,31 +305,10 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
             <form.Field name="filters.labels">
               {(field) => (
                 <Field
-                  label={
-                    <>
-                      Labels ·{" "}
-                      <form.Field name="filters.allLabels">
-                        {(all) => (
-                          <button type="button" className="text-primary normal-case tracking-normal" onClick={() => all.handleChange(!all.state.value)}>
-                            {all.state.value ? "all" : "any"} ▾
-                          </button>
-                        )}
-                      </form.Field>{" "}
-                      of
-                    </>
-                  }
-                  hint={`${draft.filters.allLabels ? "Every listed label must be present." : "At least one listed label must be present."} Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
+                  label="Labels"
+                  hint={`and, or (or a comma), parentheses. !label or not:label skips items carrying it. Quote labels holding an operator. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
                 >
-                  <TokenInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="label" />
-                </Field>
-              )}
-            </form.Field>
-          )}
-          {(isInbox || isWebhook) && (
-            <form.Field name="filters.notLabels">
-              {(field) => (
-                <Field label="Not labels" hint="Skips items carrying any of the listed labels. Empty skips none.">
-                  <TokenInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="label" />
+                  <LabelsInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="(bug or p0) and !wontfix" />
                 </Field>
               )}
             </form.Field>

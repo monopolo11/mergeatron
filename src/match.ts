@@ -1,4 +1,5 @@
 import type { WebhookContext } from "./github.ts";
+import { matchesLabels, parseLabels } from "./labelQuery.ts";
 import type { Rule } from "./rules.ts";
 import type { RuleFilters } from "./shared.ts";
 
@@ -31,16 +32,15 @@ export function ruleMismatch(rule: Rule, key: string, ctx: WebhookContext): stri
 
 /**
  * The first filter the delivery fails, or null. List-valued variables
- * (`labels`, `reasons`) are comma separated; a filter passes when any of its
- * values is present, except `notLabels`, which fails when any of its values is
- * present. `states` accepts the state name or, for Linear, its type.
+ * (`labels`, `reasons`) are comma separated; a list filter passes when any of
+ * its values is present, `labels` when its expression holds. `states` accepts
+ * the state name or, for Linear, its type.
  */
 export function filterMismatch(filters: RuleFilters, ctx: WebhookContext): string | null {
   if (!intersects(filters.reasons, ctx.reasons)) return `reasons ${ctx.reasons || "(none)"} include none of ${filters.reasons.join(", ")}`;
-  if (filters.allLabels && !includesAll(filters.labels, ctx.labels)) return `labels ${ctx.labels || "(none)"} lack one of ${filters.labels.join(", ")}`;
-  if (!filters.allLabels && !intersects(filters.labels, ctx.labels)) return `labels ${ctx.labels || "(none)"} include none of ${filters.labels.join(", ")}`;
-  const excluded = filters.notLabels.find((label) => intersects([label], ctx.labels));
-  if (excluded) return `labels ${ctx.labels} include ${excluded}`;
+  const labels = parseLabels(filters.labels);
+  if (!labels.ok) return `label filter is invalid: ${labels.error}`;
+  if (!matchesLabels(labels.query, values(ctx.labels))) return `labels ${ctx.labels || "(none)"} do not match ${filters.labels.trim()}`;
   if (!intersects(filters.states, [ctx.state, ctx.state_type].filter(Boolean).join(","))) {
     return `state ${ctx.state ?? "(none)"} is not ${filters.states.join(", ")}`;
   }
@@ -52,12 +52,6 @@ export function filterMismatch(filters: RuleFilters, ctx: WebhookContext): strin
 function intersects(wanted: string[], actual: string | undefined): boolean {
   const present = values(actual);
   return wanted.length === 0 || wanted.some((value) => present.includes(value.trim().toLowerCase()));
-}
-
-/** True when every value of `wanted` is in the comma-separated `actual`, ignoring case. */
-function includesAll(wanted: string[], actual: string | undefined): boolean {
-  const present = values(actual);
-  return wanted.every((value) => present.includes(value.trim().toLowerCase()));
 }
 
 function values(list: string | undefined): string[] {

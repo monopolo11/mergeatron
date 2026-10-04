@@ -119,12 +119,12 @@ describe("filterMismatch", () => {
   test("lists match any value, case-insensitively; empty lists match anything", () => {
     const ctx = itemContext(linear);
     expect(filterMismatch(EMPTY_FILTERS, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, reasons: ["assigned"], labels: ["Ready For Dev"], states: ["todo"], teams: ["eng"] }, ctx)).toBeNull();
+    expect(filterMismatch({ ...EMPTY_FILTERS, reasons: ["assigned"], labels: "Ready For Dev", states: ["todo"], teams: ["eng"] }, ctx)).toBeNull();
     expect(filterMismatch({ ...EMPTY_FILTERS, states: ["unstarted"] }, ctx)).toBeNull();
     expect(filterMismatch({ ...EMPTY_FILTERS, reasons: ["review_requested"] }, ctx)).toBe("reasons assigned include none of review_requested");
-    expect(filterMismatch({ ...EMPTY_FILTERS, labels: ["bug"] }, ctx)).toBe("labels ready for dev include none of bug");
-    expect(filterMismatch({ ...EMPTY_FILTERS, notLabels: ["bug"] }, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, notLabels: ["bug", "Ready For Dev"] }, ctx)).toBe("labels ready for dev include Ready For Dev");
+    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "bug" }, ctx)).toBe("labels ready for dev do not match bug");
+    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "!bug" }, ctx)).toBeNull();
+    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "bug (" }, ctx)).toStartWith("label filter is invalid");
     expect(filterMismatch({ ...EMPTY_FILTERS, states: ["In Progress"] }, ctx)).toBe("state Todo is not In Progress");
     expect(filterMismatch({ ...EMPTY_FILTERS, teams: ["OPS"] }, ctx)).toBe("team ENG is not OPS");
   });
@@ -154,8 +154,8 @@ describe("automationsFor", () => {
   });
 
   test("filters apply", () => {
-    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: ["backend"], reasons: ["review_requested"] } };
+    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: "backend", reasons: ["review_requested"] } };
     expect(automationsFor(pr, [labelled], never)).toHaveLength(1);
-    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, labels: ["frontend"] } }], never)).toEqual([]);
+    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, labels: "frontend" } }], never)).toEqual([]);
   });
 });

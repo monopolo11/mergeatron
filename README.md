@@ -313,11 +313,16 @@ tools above; their versions are marked `mcp`. Over HTTP: `GET` and `POST
 An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub
 issue**, **Inbox: Linear issue** or **Inbox: Sentry issue**. A rule polls one
 source: picking an inbox event of one source drops the others'. On top of the
-repository list the editor gets **Reasons**, **States**, **Labels** (any of the
-listed, or switch to all), **Not labels** (skip items carrying any of them) and, for Linear, **Teams** instead of repositories
-(for Sentry, **Projects**, within what the Sentry filters let in).
-Each is a token field that suggests values seen in the inbox with counts; type
-to add one not seen yet. Labels also come from the source itself: after a poll,
+repository list the editor gets **Reasons**, **States**, **Labels** and, for
+Linear, **Teams** instead of repositories (for Sentry, **Projects**, within what
+the Sentry filters let in). Reasons, States and Teams are token fields that
+suggest values seen in the inbox with counts; type to add one not seen yet.
+Labels is an expression such as `(bug or p0) and !wontfix`: `and`, `or` (or a
+comma) and parentheses, with `and` binding tighter; `!label` or `not:label`
+skips items carrying the label, and negates a group too. Consecutive words are
+one label (`Ready For Dev`); quote a label holding an operator, a parenthesis or
+a comma (`"Bugs and Fixes"`). The label at the caret autocompletes, and an
+expression that does not parse is shown and refused on save. Labels also come from the source itself: after a poll,
 labels older than an hour are synced from every GitHub repository with inbox
 items or named in a rule, and from Linear's workspace and team labels, and the
 editor suggests those within the rule's repositories or teams.

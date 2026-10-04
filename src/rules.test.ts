@@ -16,7 +16,7 @@ describe("RuleInput", () => {
       maxConcurrent: 3,
       workspace: "worktree",
       model: null,
-      filters: { rerunOnPush: true, labels: [] },
+      filters: { rerunOnPush: true, labels: "" },
     });
   });
 
@@ -32,6 +32,8 @@ describe("RuleInput", () => {
     expect(Result.isFailure(empty) && empty.failure.message).toContain('at ["name"]');
     const negative = decode({ name: "r", prompt: "x", events: ["a"], maxConcurrent: -1 });
     expect(Result.isFailure(negative) && negative.failure.message).toContain('at ["maxConcurrent"]');
+    const labels = decode({ name: "r", prompt: "x", events: ["a"], filters: { labels: "(bug or p0" } });
+    expect(Result.isFailure(labels) && labels.failure.message).toContain('Missing ) after "bug or p0"');
   });
 });
 
