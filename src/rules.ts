@@ -52,6 +52,7 @@ const RuleFiltersSchema = Schema.Struct({
   reasons: Schema.Array(Schema.Literals(INBOX_REASONS)).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
   labels: names,
   allLabels: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  notLabels: names,
   states: names,
   teams: names,
   rerunOnPush: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),

@@ -298,7 +298,7 @@ An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub
 issue**, **Inbox: Linear issue** or **Inbox: Sentry issue**. A rule polls one
 source: picking an inbox event of one source drops the others'. On top of the
 repository list the editor gets **Reasons**, **States**, **Labels** (any of the
-listed, or switch to all) and, for Linear, **Teams** instead of repositories
+listed, or switch to all), **Not labels** (skip items carrying any of them) and, for Linear, **Teams** instead of repositories
 (for Sentry, **Projects**, within what the Sentry filters let in).
 Each is a token field that suggests values seen in the inbox with counts; type
 to add one not seen yet. Labels also come from the source itself: after a poll,

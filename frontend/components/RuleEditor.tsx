@@ -245,6 +245,11 @@ export function RuleEditor({
               <TokenInput value={draft.filters.labels} onChange={(labels) => patchFilters({ labels })} options={labelOptions} placeholder="label" />
             </Field>
           )}
+          {(isInbox || isWebhook) && (
+            <Field label="Not labels" hint="Skips items carrying any of the listed labels. Empty skips none.">
+              <TokenInput value={draft.filters.notLabels} onChange={(notLabels) => patchFilters({ notLabels })} options={labelOptions} placeholder="label" />
+            </Field>
+          )}
 
           {isSlack && (
             <Field label="Slack channel" hint="Channel id (C…), from the channel's details. Empty means any channel the bot is in.">

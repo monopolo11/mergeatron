@@ -77,6 +77,8 @@ export type RuleFilters = {
   labels: string[];
   /** Require every label in `labels` instead of any one of them. */
   allLabels: boolean;
+  /** Labels that must not be present: a delivery carrying any of them is skipped. */
+  notLabels: string[];
   /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). Sentry: substatus (`escalating`) or status (`unresolved`). */
   states: string[];
   /** Linear team keys, or Sentry project slugs. */
@@ -84,7 +86,7 @@ export type RuleFilters = {
   /** Inbox PR rules: run again when the PR head moves, like `pull_request.synchronize`. */
   rerunOnPush: boolean;
 };
-export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: [], allLabels: false, states: [], teams: [], rerunOnPush: true };
+export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: [], allLabels: false, notLabels: [], states: [], teams: [], rerunOnPush: true };
 
 /**
  * Threads one rule may have running at once. Matches past the limit are
