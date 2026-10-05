@@ -60,7 +60,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
     );
 
   const server = () => {
-    const server = new McpServer({ name: "t3-review", version: "1.0.0" });
+    const server = new McpServer({ name: "mergeatron", version: "1.0.0" });
 
     server.registerTool(
       "slack_post_message",

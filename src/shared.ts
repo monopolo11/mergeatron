@@ -4,7 +4,10 @@
  */
 
 /** launchd label of the macOS user agent written by `service.ts`. */
-export const SERVICE_LABEL = "com.t3.review-orchestrator";
+export const SERVICE_LABEL = "com.mergeatron.service";
+
+/** Label before the rename to mergeatron; `bun service.ts migrate` replaces an agent installed under it. */
+export const LEGACY_SERVICE_LABEL = "com.t3.review-orchestrator";
 
 export const WORKSPACE_MODES = ["worktree", "local"] as const;
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];

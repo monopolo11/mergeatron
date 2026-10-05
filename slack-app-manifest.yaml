@@ -4,12 +4,12 @@
 # with scope connections:write (SLACK_APP_TOKEN); Install to Workspace and copy the
 # bot token from OAuth & Permissions (SLACK_BOT_TOKEN).
 display_information:
-  name: T3 Review
+  name: mergeatron
   description: Starts a T3 Code review thread when a GitHub PR link is posted, replies with the result.
   background_color: "#1f1f1f"
 features:
   bot_user:
-    display_name: T3 Review
+    display_name: mergeatron
     always_online: true
   app_home:
     messages_tab_enabled: true # notify_user DMs land here

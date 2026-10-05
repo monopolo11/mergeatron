@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "workspaces": {
     "": {
-      "name": "t3_review_orchestrator",
+      "name": "mergeatron",
       "dependencies": {
         "@effect/opentelemetry": "4.0.0",
         "@effect/platform-bun": "4.0.0",

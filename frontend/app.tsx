@@ -48,7 +48,7 @@ const NEW_RULE: RuleInput = {
 
 const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
 /** Remembers whether the run panel is open across reloads. */
-const RUNS_PANEL_KEY = "t3-review.runs-panel";
+const RUNS_PANEL_KEY = "mergeatron.runs-panel";
 
 /** App shell: top bar, the active route, and the live run log beside it on every page but Runs. */
 function App() {
