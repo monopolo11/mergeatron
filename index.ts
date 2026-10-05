@@ -18,7 +18,7 @@ import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
 import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, RunQuery, RunRatingInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
-import { getRun, listRuns, rateRun } from "./src/runHistory.ts";
+import { deleteRun, getRun, listRuns, rateRun } from "./src/runHistory.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
@@ -51,7 +51,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, RunActiveError: 409, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -367,7 +367,7 @@ const api = HttpRouter.use((router) =>
     }
 
     yield* router.add("GET", "/api/runs", route(Effect.map(store.listRuns(), json)));
-    /** The runs page: summaries matching its filters, one run in full, and rating a run (see src/runHistory.ts). */
+    /** The runs page: summaries matching its filters, one run in full, rating a run and deleting it (see src/runHistory.ts). */
     yield* router.add(
       "GET",
       "/api/runs/history",
@@ -380,6 +380,7 @@ const api = HttpRouter.use((router) =>
       ),
     );
     yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
+    yield* router.add("DELETE", "/api/runs/:id", route(Effect.as(Effect.flatMap(param("id"), deleteRun), HttpServerResponse.empty({ status: 204 }))));
     yield* router.add(
       "PUT",
       "/api/runs/:id/rating",

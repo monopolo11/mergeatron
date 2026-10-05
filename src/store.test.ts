@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { linear, pr, rule } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Run } from "./rules.ts";
+import { deleteRun, RunActiveError, RunNotFoundError } from "./runHistory.ts";
 import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
 import { Store, type RunInput } from "./store.ts";
-import { runWith, testLayer } from "./testing.ts";
+import { failureOf, runWith, testLayer } from "./testing.ts";
 
 const run = (patch: Partial<RunInput>): RunInput => ({
   ruleId: "r1",
@@ -137,6 +138,27 @@ describe("run history", () => {
 
         yield* store.deletePrompt(p1.id);
         expect(yield* store.getRunAction(queued.id)).toEqual({ ...action, presetId: null });
+      }),
+    ));
+
+  test("deleting a settled run takes its prompt versions and action with it; queued and working runs stay", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const p1 = yield* store.createPrompt({ name: "review", body: "x" });
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, promptRefs: [{ ...preset(1), id: p1.id }] };
+        const done = yield* store.recordRun(run({ status: "done", action }));
+        const started = yield* store.recordRun(run({ status: "started" }));
+
+        yield* deleteRun(done.id);
+        expect(yield* store.getRun(done.id)).toBeNull();
+        expect(yield* store.getRunAction(done.id)).toBeNull();
+        expect((yield* store.runPromptRefs([done.id])).size).toBe(0);
+
+        expect(yield* failureOf(deleteRun(started.id))).toBeInstanceOf(RunActiveError);
+        expect(yield* store.getRun(started.id)).not.toBeNull();
+        expect(yield* failureOf(deleteRun(done.id))).toBeInstanceOf(RunNotFoundError);
       }),
     ));
 

@@ -1,13 +1,16 @@
 import { Data, Effect } from "effect";
 import { logger } from "./log.ts";
 import type { PromptRef, Run, RunAction } from "./rules.ts";
-import { Store, type RunFilter, type RunRating } from "./store.ts";
+import { SETTLED, Store, type RunFilter, type RunRating } from "./store.ts";
 import { joinPrompts, renderTemplate } from "./template.ts";
 
 const log = logger("runs");
 
 /** The run asked for does not exist. */
 export class RunNotFoundError extends Data.TaggedError("RunNotFoundError")<{ readonly message: string }> {}
+
+/** The run is queued or its thread is still working, so it holds a slot in its rule's queue. */
+export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonly message: string }> {}
 
 /**
  * The run history behind the MCP tools: every run with the trigger, prompt
@@ -77,6 +80,16 @@ export const rateRun = Effect.fn("runs.rate")(function* (id: string, rating: Run
   yield* log.info("run rated", { run: id, rating: rating.rating ?? undefined });
   const [detail] = yield* withPromptRefs([run]);
   return summarize(detail!);
+});
+
+/** Deletes a settled run with its rating. A queued or working run stays until it settles. */
+export const deleteRun = Effect.fn("runs.delete")(function* (id: string) {
+  const store = yield* Store;
+  const run = yield* store.getRun(id);
+  if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
+  if (!SETTLED.has(run.status)) return yield* Effect.fail(new RunActiveError({ message: `Run ${id} is ${run.status}; delete it once it settles.` }));
+  yield* store.deleteRun(id);
+  yield* log.info("run deleted", { run: id });
 });
 
 export const runAnalytics = Effect.fn("runs.analytics")(function* () {

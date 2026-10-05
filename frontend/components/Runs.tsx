@@ -4,6 +4,17 @@ import { XIcon } from "lucide-react";
 import { use, useState, type ReactNode } from "react";
 import { Empty, ExternalLink, GroupLabel, RunStatus } from "@/components/Field";
 import { Count, Toolbar, ToolbarDivider } from "@/components/Toolbar";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -267,6 +278,7 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
           {run.url && <ExternalLink href={run.url}>{run.ref ?? "link"}</ExternalLink>}
           {run.threadUrl && <ExternalLink href={run.threadUrl}>thread</ExternalLink>}
         </span>
+        {!UNSETTLED.has(run.status) && <DeleteRun id={run.id} onDeleted={onClose} />}
         <CloseButton onClose={onClose} />
       </Toolbar>
 
@@ -317,6 +329,51 @@ function CloseButton({ onClose }: { onClose: () => void }) {
     <Button size="icon-xs" variant="ghost" className="text-muted-foreground" onClick={onClose} aria-label="Close run">
       <XIcon />
     </Button>
+  );
+}
+
+/**
+ * Deletes a settled run after a confirmation; the server refuses queued and
+ * working runs. The dialog stays open while deleting and shows a failure.
+ */
+function DeleteRun({ id, onDeleted }: { id: string; onDeleted: () => void }) {
+  const queryClient = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => api<void>(`/api/runs/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["run", id] });
+      void queryClient.invalidateQueries({ queryKey: ["runs", "history"] });
+      void queryClient.invalidateQueries({ queryKey: ["analytics"] });
+      onDeleted();
+    },
+  });
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button size="xs" variant="ghost" className="text-destructive">Delete</Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this run?</AlertDialogTitle>
+          <AlertDialogDescription className={cn(remove.error && "text-destructive")}>
+            {remove.error ? remove.error.message : "Its reply, score and feedback go with it. The T3 thread is not affected."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={remove.isPending}
+            onClick={(e) => {
+              e.preventDefault();
+              remove.mutate();
+            }}
+          >
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 

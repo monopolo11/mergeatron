@@ -105,7 +105,7 @@ type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs";
 
 /** Statuses that end a run. */
-const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
+export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
 
 /** Timing for a run ending now; `elapsedMs` only when its thread opened. */
 const settledTiming = (startedAt: string | null | undefined, now = new Date()): Pick<Run, "settledAt" | "elapsedMs"> => ({
@@ -423,6 +423,9 @@ export function makeStore(db: AppDatabase) {
             .returning()
             .get() ?? null,
       ),
+
+    /** Deletes a run; its prompt versions and action go with it (the foreign keys cascade). False when there is no such run. */
+    deleteRun: (id: string) => Effect.sync(() => db.delete(runs).where(eq(runs.id, id)).returning({ id: runs.id }).get() !== undefined),
 
     /** True when this delivery was already handled for the rule (GitHub retries deliveries). */
     hasRun: (deliveryId: string, ruleId: string) =>
