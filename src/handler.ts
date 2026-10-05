@@ -5,7 +5,7 @@ import { errorMessage } from "./errors.ts";
 import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
-import type { PromptRef, Rule, Run, RunAction } from "./rules.ts";
+import type { PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
 import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
@@ -34,9 +34,10 @@ export type Delivery = {
 /**
  * Reaction on a Slack message that was seen but deliberately not reviewed: no
  * rule matched, or a rule skipped it (own PR, no T3 project). Distinct from
- * the ❌ that marks a failure.
+ * the ❌ that marks a failure. The `skip` emoji replaces ⏩ when the
+ * `skipReaction` setting is on.
  */
-const SKIPPED_REACTION = "fast_forward";
+const skippedReaction = (settings: Pick<Settings, "skipReaction">) => (settings.skipReaction ? "skip" : "fast_forward");
 /** Reaction while a Slack-triggered review waits for its rule's concurrency limit. */
 const QUEUED_REACTION = "hourglass_flowing_sand";
 
@@ -91,7 +92,7 @@ export const handleDelivery = Effect.fn("handler.handleDelivery")(function* (del
     yield* log.info("no rule matched", { ...at, why: why || "no rules configured" });
     // Slack only: tell the poster the message was seen but no rule wanted it.
     const origin = slackOrigin(delivery.ctx);
-    if (origin) yield* slack.react(origin, SKIPPED_REACTION).pipe(Effect.catch((error) => log.warn("slack react failed", { ...at, error: error.message })));
+    if (origin) yield* slack.react(origin, skippedReaction(yield* store.getSettings())).pipe(Effect.catch((error) => log.warn("slack react failed", { ...at, error: error.message })));
     return { event: delivery.event, repo: delivery.ctx.repo, matched: [] as string[] };
   }
   const matched: Rule[] = [];
@@ -421,11 +422,12 @@ export const openThread = (
 const notifySlack = (
   ctx: WebhookContext,
   result: { status: "queued" | "started" | "skipped" | "failed"; detail: string; alreadyRunning?: boolean },
-): Effect.Effect<void, never, SlackClient> =>
+): Effect.Effect<void, never, SlackClient | Store> =>
   Effect.gen(function* () {
     const origin = slackOrigin(ctx);
     if (!origin) return;
     const slack = yield* SlackClient;
+    const store = yield* Store;
     const action =
       result.status === "queued"
         ? slack.react(origin, QUEUED_REACTION)
@@ -433,7 +435,7 @@ const notifySlack = (
           ? slack.react(origin, "eyes")
           : result.alreadyRunning
             ? slack.reply(origin, `Review not started: ${result.detail}.`)
-            : Effect.andThen(slack.reply(origin, `Review not started: ${result.detail}`), slack.react(origin, result.status === "skipped" ? SKIPPED_REACTION : "x"));
+            : Effect.andThen(slack.reply(origin, `Review not started: ${result.detail}`), slack.react(origin, result.status === "skipped" ? skippedReaction(yield* store.getSettings()) : "x"));
     yield* action.pipe(Effect.catch((error) => log.warn("slack notify failed", { channel: origin.channel, ts: origin.ts, error: error.message })));
   });
 

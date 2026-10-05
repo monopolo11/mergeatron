@@ -199,6 +199,15 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                     </Field>
                   )}
                 </form.Field>
+                <form.Field name="skipReaction">
+                  {(field) => (
+                    <Field label="Skip reaction" hint="React with :skip: instead of ⏩ on messages seen but not reviewed. Needs a custom emoji named skip.">
+                      <div className="flex h-8 items-center">
+                        <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />
+                      </div>
+                    </Field>
+                  )}
+                </form.Field>
                 <Field label="MCP for agents" hint="Tools: slack_post_message, notify_user, request_review, request_second_pass, mark_merged, review_status.">
                   <div className="flex h-8 items-center text-xs">
                     <Dot tone={shell.status?.mcp ? "ok" : "idle"} />

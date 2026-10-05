@@ -98,6 +98,8 @@ export const settings = sqliteTable("settings", {
   reviewChannel: text("review_channel"),
   /** Your Slack user id (`U…`), whom the MCP `notify_user` tool DMs. Null turns the tool off. */
   slackUserId: text("slack_user_id"),
+  /** React with `:skip:` instead of ⏩ when a Slack message is seen but not reviewed. */
+  skipReaction: integer("skip_reaction", { mode: "boolean" }).notNull().default(false),
   /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
   reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
   secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),

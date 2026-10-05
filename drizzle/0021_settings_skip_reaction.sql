@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `skip_reaction` integer DEFAULT false NOT NULL;

@@ -165,6 +165,21 @@ describe("handleDelivery", () => {
     );
   });
 
+  test("the skipReaction setting swaps the skipped reaction for :skip:", async () => {
+    const reactions: string[] = [];
+    const slack = fakeSlack({ react: (_, name) => Effect.sync(() => void reactions.push(name)) });
+    await runWith(
+      testLayer({ slack }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.saveSettings({ ...(yield* store.getSettings()), skipReaction: true });
+        const ctx = { repo: "acme/widgets", pr_number: "1", pr_url: "https://github.com/acme/widgets/pull/1", slack_channel: "C1", slack_ts: "1.0" };
+        yield* handleDelivery({ deliveryId: "d0", event: "slack.message", ctx });
+        expect(reactions).toEqual(["skip"]);
+      }),
+    );
+  });
+
   test("one review per PR at a time: a second delivery is skipped and points at the running thread", () =>
     runWith(
       testLayer(),
