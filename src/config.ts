@@ -5,6 +5,11 @@ import { logger } from "./log.ts";
 
 const log = logger("server");
 
+/** The database lives outside the checkout so it survives re-cloning and is shared by every checkout. */
+const DEFAULT_DATA_PATH = join(homedir(), ".mergeatron", "data", "mergeatron.sqlite");
+/** Pre-mergeatron default: relative to the working directory, which is the checkout for `bun index.ts` and the launchd agent. */
+const LEGACY_DATA_PATH = join(process.cwd(), "data", "orchestrator.sqlite");
+
 /** Startup cannot continue; the message says what to set. */
 export class StartupError extends Data.TaggedError("StartupError")<{ readonly message: string }> {}
 
@@ -39,6 +44,8 @@ export class AppConfig extends Context.Service<AppConfig>()("AppConfig", {
     );
     if (Option.isNone(sentry)) yield* log.warn("SENTRY_AUTH_TOKEN and SENTRY_ORG are not both set: the inbox does not poll Sentry.");
 
+    const explicitDataPath = yield* Config.String("DATA_PATH").pipe(Config.option);
+
     return {
       t3Token,
       /** `T3_ORIGIN`; otherwise the origin is read from T3's server-runtime.json under `t3Home` (see t3.ts). */
@@ -53,7 +60,9 @@ export class AppConfig extends Context.Service<AppConfig>()("AppConfig", {
       port: yield* Config.Port("PORT").pipe(Config.withDefault(8787)),
       /** Loopback-only port of the MCP tools, so a tunnel to `port` never exposes them. */
       mcpPort: yield* Config.Port("MCP_PORT").pipe(Config.withDefault(8788)),
-      dataPath: yield* Config.String("DATA_PATH").pipe(Config.withDefault("data/orchestrator.sqlite")),
+      dataPath: Option.getOrElse(explicitDataPath, () => DEFAULT_DATA_PATH),
+      /** Where the database lived before `~/.mergeatron`; set only when `DATA_PATH` is not, see db/legacy.ts. */
+      legacyDataPath: Option.isNone(explicitDataPath) ? Option.some(LEGACY_DATA_PATH) : Option.none<string>(),
       development: (yield* Config.String("NODE_ENV").pipe(Config.withDefault("development"))) !== "production",
     };
   }),

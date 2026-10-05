@@ -1,4 +1,6 @@
-# GitHub / Slack → T3 Code review orchestrator
+# mergeatron
+
+GitHub / Slack → T3 Code review orchestrator.
 
 Small Bun service that listens for GitHub webhooks and Slack messages (Socket Mode) and starts a
 [T3 Code](https://github.com/pingdotgg/t3code) thread with a prompt you configure.
@@ -71,7 +73,7 @@ needs no tunnel and keeps working when a quick tunnel's URL changes.
 3. **Install to Workspace**; put the `xoxb-` bot token (OAuth & Permissions) in `.env`
    as `SLACK_BOT_TOKEN`.
 4. Restart the service (the header shows `slack connected`) and invite the bot to the
-   channel (`/invite @T3 Review`).
+   channel (`/invite @mergeatron`).
 
 Behind a TLS-inspecting proxy (Cloudflare WARP, Zscaler, ...) `fetch` to slack.com
 fails with `self signed certificate in certificate chain` and the header stays on
@@ -95,7 +97,7 @@ head. Without `gh` or access to the repository the thread runs in the local
 checkout instead, so add `gh pr checkout {{pr_number}}` to the prompt as a fallback.
 
 Mentioning the bot with "second pass" (or "third pass", "4th pass", "next pass", "another pass"...) inside a review's Slack thread
-(`@T3 Review second pass`) re-reviews that PR in a new T3 thread. The PR comes
+(`@mergeatron second pass`) re-reviews that PR in a new T3 thread. The PR comes
 from the message the thread hangs under (or a PR link in the mention). It fires
 rules with event `slack.second_pass`, whose prompt can use `{{previous_result}}`
 and `{{previous_thread_url}}` (the last finished review of that PR; also available
@@ -119,7 +121,7 @@ send PRs for review through the bot, DM you when they need you, and version prom
 (`MCP_PORT`, default 8788) so a tunnel to the main port never exposes them:
 
 ```sh
-claude mcp add --scope user --transport http t3-review http://127.0.0.1:8788/mcp
+claude mcp add --scope user --transport http mergeatron http://127.0.0.1:8788/mcp
 ```
 
 | Tool | What it does |
@@ -155,13 +157,53 @@ bun service.ts install
 ```
 
 `bun service.ts status` shows pid and last exit code, `logs` tails
-`~/Library/Logs/t3-review-orchestrator/orchestrator.log` (one timestamped line per
+`~/Library/Logs/mergeatron/mergeatron.log` (one timestamped line per
 decision: every delivery received, each rule it did not match and why, skips,
 thread starts and verdicts; grep by `delivery=` or `run=`), `restart` picks up
 code or `.env` changes, and `uninstall` stops it and removes the agent. The agent
-runs `bun index.ts` from this directory, so `.env` and `data/` are the same ones
+runs `bun index.ts` from this directory, so `.env` is the same one
 used when running by hand. Reinstall after moving the checkout or changing the CA
 bundle path (see the Slack section).
+
+## Data
+
+The SQLite database lives at `~/.mergeatron/data/mergeatron.sqlite` (override with
+`DATA_PATH`), outside the checkout. On the first start with `DATA_PATH` unset, a database at
+`./data/orchestrator.sqlite` is copied there; the old file stays as a backup and can be
+deleted once you are happy. Every checkout shares that default file, so give a second
+instance its own `DATA_PATH`.
+
+## Upgrading from "T3 Review"
+
+The project used to be called T3 Review / `t3-review-orchestrator`. After pulling the
+rename, three things on your machine still use the old names:
+
+1. **MCP server**: the server is now named `mergeatron`, so the tools show up as
+   `mcp__mergeatron__*` instead of `mcp__t3-review__*`. Re-register it, and update any
+   prompt, skill or permission rule that mentions the old tool names:
+
+   ```sh
+   claude mcp remove t3-review --scope user
+   claude mcp add --scope user --transport http mergeatron http://127.0.0.1:8788/mcp
+   ```
+
+2. **launchd agent** (if you run it as a service): the label changed from
+   `com.t3.review-orchestrator` to `com.mergeatron.service` and the log moved to
+   `~/Library/Logs/mergeatron/mergeatron.log`. Until you migrate, the old agent keeps
+   running and `bun service.ts status` / `restart` point you here. One command stops and
+   removes the old agent, then installs the new one (a brief downtime; the old log stays
+   in `~/Library/Logs/t3-review-orchestrator/`):
+
+   ```sh
+   bun service.ts migrate
+   ```
+
+3. **Database**: nothing to do. It is copied to `~/.mergeatron/data/` on the first start
+   (see [Data](#data)); migrate the launchd agent first if you run one, so the old and new
+   process never share the file.
+
+The Slack app is not renamed by pulling: re-apply `slack-app-manifest.yaml` (or rename it
+in the Slack app settings) to change the bot's name to `@mergeatron`.
 
 ## Rules
 

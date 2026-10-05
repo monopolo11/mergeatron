@@ -7,6 +7,7 @@
  *   bun service.ts restart     stop the running process; launchd starts it again
  *   bun service.ts status      launchd's view of the agent (pid, last exit status)
  *   bun service.ts logs        tail the service log
+ *   bun service.ts migrate     replace an agent installed under the old com.t3.review-orchestrator label
  *
  * The agent runs `bun index.ts` from this directory, so `.env` and the default
  * `data/` path resolve exactly as they do when run by hand. `install` also copies
@@ -18,12 +19,13 @@ import { ChildProcess, type ChildProcessSpawner } from "effect/process";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { exec, execOk } from "./src/exec.ts";
-import { SERVICE_LABEL as LABEL } from "./src/shared.ts";
+import { LEGACY_SERVICE_LABEL, SERVICE_LABEL as LABEL } from "./src/shared.ts";
 
 const projectDir = import.meta.dir;
 const plistPath = join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
-const logDir = join(homedir(), "Library", "Logs", "t3-review-orchestrator");
-const logPath = join(logDir, "orchestrator.log");
+const legacyPlistPath = join(homedir(), "Library", "LaunchAgents", `${LEGACY_SERVICE_LABEL}.plist`);
+const logDir = join(homedir(), "Library", "Logs", "mergeatron");
+const logPath = join(logDir, "mergeatron.log");
 const domain = `gui/${process.getuid?.() ?? 501}`;
 
 /** A command cannot proceed; printed as is, without a stack. */
@@ -94,7 +96,15 @@ function agentPlist(): string {
 
 const launchctl = (...args: string[]) => execOk("launchctl", args).pipe(Effect.mapError((error) => new ServiceError({ message: error.message })));
 
-const isLoaded = Effect.map(exec("launchctl", ["print", `${domain}/${LABEL}`]), (output) => output.exitCode === 0).pipe(Effect.orElseSucceed(() => false));
+const loaded = (label: string) => Effect.map(exec("launchctl", ["print", `${domain}/${label}`]), (output) => output.exitCode === 0).pipe(Effect.orElseSucceed(() => false));
+const isLoaded = loaded(LABEL);
+
+/** What `restart` and `status` say when the agent is missing: points at `migrate` if the old label is what is installed. */
+const notInstalled = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const legacy = (yield* loaded(LEGACY_SERVICE_LABEL)) || (yield* fs.exists(legacyPlistPath));
+  return `${LABEL} is not installed; run: bun service.ts ${legacy ? "migrate" : "install"}${legacy ? ` (the old ${LEGACY_SERVICE_LABEL} agent is still there)` : ""}`;
+});
 
 /** `launchctl bootout` returns before the agent is gone; bootstrapping too early fails with I/O error 5. */
 const bootoutAndWait = Effect.gen(function* () {
@@ -133,13 +143,13 @@ const uninstall = Effect.gen(function* () {
 });
 
 const restart = Effect.gen(function* () {
-  if (!(yield* isLoaded)) return yield* Effect.fail(new ServiceError({ message: `${LABEL} is not installed; run: bun service.ts install` }));
+  if (!(yield* isLoaded)) return yield* Effect.fail(new ServiceError({ message: yield* notInstalled }));
   yield* launchctl("kickstart", "-k", `${domain}/${LABEL}`);
   yield* Console.log(`Restarted ${LABEL}`);
 });
 
 const status = Effect.gen(function* () {
-  if (!(yield* isLoaded)) return yield* Console.log(`${LABEL} is not installed`);
+  if (!(yield* isLoaded)) return yield* Console.log(yield* notInstalled);
   const out = (yield* launchctl("print", `${domain}/${LABEL}`)).stdout;
   const lines = out.split("\n").filter((line) => /^\t(state|pid|last exit code|last terminating signal) = /.test(line));
   yield* Console.log([LABEL, ...lines.map((line) => `  ${line.trim()}`), `  logs = ${logPath}`].join("\n"));
@@ -148,7 +158,25 @@ const status = Effect.gen(function* () {
 /** Streams the log to this terminal until interrupted. */
 const logs = Effect.scoped(Effect.flatMap(ChildProcess.make("tail", ["-n", "50", "-f", logPath], { stdout: "inherit", stderr: "inherit" }), (handle) => handle.exitCode));
 
-const commands = { install, uninstall, restart, status, logs };
+/**
+ * Moves an agent installed under the old label to the current one: stops and removes
+ * the old agent first, then runs `install`, so the old and new process are never
+ * both up on the same database and ports. Safe to run when nothing old is installed
+ * (it is then just `install`). Old logs stay where they were.
+ */
+const migrate = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  if (yield* loaded(LEGACY_SERVICE_LABEL)) {
+    yield* launchctl("bootout", `${domain}/${LEGACY_SERVICE_LABEL}`);
+    // Same wait as bootoutAndWait: bootout returns before the process is gone.
+    yield* loaded(LEGACY_SERVICE_LABEL).pipe(Effect.repeat({ schedule: Schedule.spaced("100 millis").pipe(Schedule.upTo({ times: 50 })), while: (up) => up }));
+  }
+  if (yield* fs.exists(legacyPlistPath)) yield* fs.remove(legacyPlistPath);
+  yield* Console.log(`Removed ${LEGACY_SERVICE_LABEL}`);
+  yield* install;
+});
+
+const commands = { install, uninstall, restart, status, logs, migrate };
 const command = process.argv[2] as keyof typeof commands | undefined;
 
 if (process.platform !== "darwin") {

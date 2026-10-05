@@ -7,6 +7,7 @@ import { Background, RunEvents } from "./src/background.ts";
 import { resumeWatchers, reviewVerdict, watchCompletion } from "./src/completion.ts";
 import { AppConfig } from "./src/config.ts";
 import { Database } from "./src/db/index.ts";
+import { copyLegacyDatabase } from "./src/db/legacy.ts";
 import { errorMessage } from "./src/errors.ts";
 import { eventKey, extractContext, verifySignature } from "./src/github.ts";
 import { dispatchPrompt, handleDelivery, runRules, startQueued, type HandlerServices } from "./src/handler.ts";
@@ -542,7 +543,7 @@ const startupLayer = Layer.effectDiscard(
 const telemetryLayer = Layer.unwrap(
   Effect.map(Config.String("OTEL_EXPORTER_OTLP_ENDPOINT").pipe(Config.option), (endpoint) =>
     Option.isSome(endpoint)
-      ? Otlp.layer({ baseUrl: endpoint.value, resource: { serviceName: "t3-review-orchestrator" }, loggerMergeWithExisting: true }).pipe(
+      ? Otlp.layer({ baseUrl: endpoint.value, resource: { serviceName: "mergeatron" }, loggerMergeWithExisting: true }).pipe(
           Layer.provide([FetchHttpClient.layer, OtlpSerialization.layerJson]),
         )
       : Layer.empty,
@@ -550,7 +551,13 @@ const telemetryLayer = Layer.unwrap(
 ).pipe(Layer.provideMerge(Metric.enableRuntimeMetricsLayer));
 
 const platformLayer = Layer.mergeAll(FetchHttpClient.layer, BunSocket.layerWebSocketConstructor, BunChildProcessSpawner.layer.pipe(Layer.provide(BunServices.layer)));
-const databaseLayer = Layer.unwrap(Effect.map(AppConfig, (config) => Database.layer(config.dataPath)));
+const databaseLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const config = yield* AppConfig;
+    if (Option.isSome(config.legacyDataPath)) yield* copyLegacyDatabase(config.legacyDataPath.value, config.dataPath);
+    return Database.layer(config.dataPath);
+  }),
+);
 const servicesLayer = Layer.mergeAll(
   Store.layer.pipe(Layer.provide(databaseLayer)),
   T3.layer,

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { exec, execOk } from "./exec.ts";
 import { logger } from "./log.ts";
-import { SERVICE_LABEL } from "./shared.ts";
+import { LEGACY_SERVICE_LABEL, SERVICE_LABEL } from "./shared.ts";
 
 const log = logger("update");
 
@@ -104,8 +104,11 @@ const makeUpdater = Effect.gen(function* () {
       if (process.execArgv.includes("--hot")) return "hot" as const;
       if (process.platform === "darwin") {
         const uid = process.getuid?.() ?? 501;
-        const print = yield* exec("launchctl", ["print", `gui/${uid}/${SERVICE_LABEL}`]).pipe(provide, Effect.orElseSucceed(() => null));
-        if (print?.exitCode === 0 && new RegExp(`^\\s*pid = ${process.pid}$`, "m").test(print.stdout)) return "launchd" as const;
+        // The legacy label counts until `bun service.ts migrate` is run: its agent restarts this process too.
+        for (const label of [SERVICE_LABEL, LEGACY_SERVICE_LABEL]) {
+          const print = yield* exec("launchctl", ["print", `gui/${uid}/${label}`]).pipe(provide, Effect.orElseSucceed(() => null));
+          if (print?.exitCode === 0 && new RegExp(`^\\s*pid = ${process.pid}$`, "m").test(print.stdout)) return "launchd" as const;
+        }
       }
       return "respawn" as const;
     }),

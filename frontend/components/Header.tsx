@@ -37,7 +37,7 @@ export function Header({
 }) {
   return (
     <header className="flex h-10 min-w-0 items-center gap-4 overflow-hidden border-b px-3">
-      <Link to="/" className="text-[13px] font-semibold whitespace-nowrap">T3 Review</Link>
+      <Link to="/" className="text-[13px] font-semibold whitespace-nowrap">mergeatron</Link>
       <nav className="flex h-full gap-1">
         {NAV.map(({ to, label }) => (
           <Link
