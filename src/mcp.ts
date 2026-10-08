@@ -7,18 +7,22 @@ import { assertChannelAllowed } from "./channels.ts";
 import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
 import { notifyUser } from "./notify.ts";
+import { Poller } from "./poller.ts";
 import { createVersion, listPrompts, promoteVersion, readPrompt } from "./promptVersions.ts";
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
+import { createRule, deleteRule, updateRule, type RuleCreate, type RulePatch } from "./ruleAdmin.ts";
 import { getRun, listRuns, rateRun, runAnalytics } from "./runHistory.ts";
-import { PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES } from "./shared.ts";
+import { INBOX_REASONS, PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES, SUGGESTED_EVENTS, WORKSPACE_MODES } from "./shared.ts";
+import { Store } from "./store.ts";
 import { SlackClient } from "./slack.ts";
 
 /**
  * MCP tools for other agents: post as the Slack bot, DM the user for their
  * attention (see notify.ts), and send PRs for review with tracked threads and
  * rounds, and mark those threads merged (see reviewRequests.ts), read and
- * version the prompts rules and dispatches use (see promptVersions.ts), and
- * read, rate and compare past runs (see runHistory.ts).
+ * version the prompts rules and dispatches use (see promptVersions.ts),
+ * list, create, edit and delete rules (see ruleAdmin.ts), and read, rate and
+ * compare past runs (see runHistory.ts).
  * Stateless Streamable HTTP, one server per request;
  * index.ts serves it on loopback. Tool inputs stay zod schemas: that is what
  * the MCP SDK accepts and turns into the JSON Schema it advertises.
@@ -27,7 +31,16 @@ import { SlackClient } from "./slack.ts";
 const log = logger("mcp");
 
 /** Failures the agent can act on: returned as tool errors without an error log. */
-const EXPECTED = new Set(["ReviewRequestError", "NotifyError", "SlackApiError", "ChannelNotAllowedError", "PromptNotFoundError", "RunNotFoundError"]);
+const EXPECTED = new Set([
+  "ReviewRequestError",
+  "NotifyError",
+  "SlackApiError",
+  "ChannelNotAllowedError",
+  "PromptNotFoundError",
+  "RunNotFoundError",
+  "RuleNotFoundError",
+  "SchemaError",
+]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
 const mentions = z
@@ -38,15 +51,68 @@ const note = z.string().optional().describe("Extra Markdown shown in the message
 const promptOwner = z.enum(PROMPT_OWNERS).describe("preset: a dispatch preset. rule: a rule's own prompt");
 const promptId = z.string().describe("Id of the preset or rule, from list_prompts");
 const runId = z.string().describe("Run id, from list_runs");
+const ruleId = z.string().describe("Rule id, from list_rules");
+
+/**
+ * A rule's fields as the tools advertise them. ruleAdmin.ts decodes them
+ * again with the UI's schemas, which own defaults and validation; the check
+ * below keeps these in step with those schemas.
+ */
+const ruleFields = z.object({
+  name: z.string().describe("Shown in the UI and the run log"),
+  enabled: z.boolean().describe("false: the rule stops firing. Default true"),
+  events: z
+    .array(z.string())
+    .min(1)
+    .describe(`Event keys it fires on: ${SUGGESTED_EVENTS.map((event) => event.key).join(", ")}. An inbox rule takes the inbox events of one source only`),
+  repos: z.array(z.string()).describe("owner/name repositories; empty means every repository"),
+  reviewer: z.string().nullable().describe("Only fire when this GitHub login or team slug is the requested reviewer"),
+  channel: z.string().nullable().describe("Slack events: the channel id to listen in; null means any channel the bot is in"),
+  allowBots: z.boolean().describe("Slack events: also fire for posts by other bots and apps. Default true"),
+  skipSelfReview: z.boolean().describe("Skip PRs authored by the GitHub login in Settings. Default true"),
+  filters: z
+    .object({
+      reasons: z.array(z.enum(INBOX_REASONS)).optional().describe("Inbox: why the item is in the inbox; empty matches any"),
+      labels: z
+        .string()
+        .optional()
+        .describe(
+          'Label expression such as "(bug or p0) and !wontfix": and, or (or a comma), parentheses, ! or not: to negate; quote a label holding an operator. Case-insensitive; empty matches anything. Names from list_labels',
+        ),
+      states: z.array(z.string()).optional().describe("GitHub: open or draft. Linear: state name or type. Sentry: substatus or status"),
+      teams: z.array(z.string()).optional().describe("Linear team keys, or Sentry project slugs"),
+      rerunOnPush: z.boolean().optional().describe("Inbox PR rules: run again when the PR head moves. Default true"),
+    })
+    .describe("Filters on top of the event; an empty filter matches anything"),
+  maxConcurrent: z.number().int().min(0).describe("Threads running at once; further matches queue. 0 means no limit. Default 3"),
+  projectId: z.string().nullable().describe("T3 project to open threads in; null matches by the repository's git remote"),
+  workspace: z.enum(WORKSPACE_MODES).describe("worktree (default): a new worktree per thread. local: the project's checkout"),
+  model: z.object({ instanceId: z.string(), model: z.string() }).nullable().describe("Provider instance and model; null uses the project's default, then Settings'"),
+  presetId: z.string().nullable().describe("Run this preset's live prompt instead of the rule's own; ids from list_prompts"),
+});
+const rulePatch = ruleFields.partial().extend({
+  filters: ruleFields.shape.filters.optional().describe("Only the filters given change; the rest keep their values"),
+});
+const ruleCreate = rulePatch.required({ name: true, events: true }).extend({
+  prompt: z.string().min(1).describe("First message of each thread; becomes version 1, live. Templates use {{variables}} such as {{pr_url}}"),
+});
+// The advertised fields must be ones the schemas accept: drift fails to compile here.
+type Extends<T extends U, U> = T;
+export type RuleFieldChecks = [Extends<z.infer<typeof rulePatch>, RulePatch>, Extends<z.infer<typeof ruleCreate>, RuleCreate>];
+
+/** What the tools need: the review tools' services plus the poller, for label suggestions. */
+export type McpServices = ReviewServices | Poller;
 
 /** A web handler for `/mcp`, bound to the services in scope when it is built. */
-export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Response>, never, ReviewServices> = Effect.gen(function* () {
-  const services = yield* Effect.context<ReviewServices>();
+export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Response>, never, McpServices> = Effect.gen(function* () {
+  const services = yield* Effect.context<McpServices>();
   const runPromise = Effect.runPromiseWith(services);
   const slack = yield* SlackClient;
+  const store = yield* Store;
+  const poller = yield* Poller;
 
   /** Runs a tool body; errors the agent can act on (bad input, Slack's error code) come back as tool errors, not protocol failures. */
-  const result = <A, E>(tool: string, body: Effect.Effect<A, E, ReviewServices>): Promise<CallToolResult> =>
+  const result = <A, E>(tool: string, body: Effect.Effect<A, E, McpServices>): Promise<CallToolResult> =>
     runPromise(
       Effect.gen(function* () {
         const exit = yield* Effect.exit(body);
@@ -260,6 +326,60 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         annotations: { readOnlyHint: true },
       },
       () => result("run_analytics", runAnalytics()),
+    );
+
+    server.registerTool(
+      "list_rules",
+      {
+        description:
+          "List the rules: what each fires on (events, repos, reviewer, channel, filters), whether it is enabled, how its threads start (projectId, workspace, model, maxConcurrent) and its live prompt (prompt, livePromptVersion; presetId when a preset's prompt replaces it).",
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+      () => result("list_rules", store.listRules()),
+    );
+
+    server.registerTool(
+      "create_rule",
+      {
+        description:
+          "Create a rule: it starts a T3 thread with its prompt for each event that matches. Fields left out take the UI's defaults. Returns the rule; change its prompt later with create_prompt_version (owner rule).",
+        inputSchema: ruleCreate.shape,
+        annotations: { destructiveHint: false },
+      },
+      (input) => result("create_rule", createRule(input)),
+    );
+
+    server.registerTool(
+      "update_rule",
+      {
+        description:
+          "Change a rule: only the fields given change, e.g. { enabled: false } to disable it or { filters: { labels: \"bug and !wontfix\" } } to change its label filter. A raised maxConcurrent starts queued runs. The prompt changes through create_prompt_version (owner rule). Returns the rule.",
+        inputSchema: { id: ruleId, ...rulePatch.shape },
+        annotations: { destructiveHint: false, idempotentHint: true },
+      },
+      ({ id, ...patch }) => result("update_rule", updateRule(id, patch)),
+    );
+
+    server.registerTool(
+      "delete_rule",
+      {
+        description: "Delete a rule. Its runs and prompt versions stay readable with list_runs and get_run. To stop it for now, update_rule with enabled false instead.",
+        inputSchema: { id: ruleId },
+        annotations: { destructiveHint: true, idempotentHint: true },
+      },
+      ({ id }) => result("delete_rule", deleteRule(id)),
+    );
+
+    server.registerTool(
+      "list_labels",
+      {
+        description:
+          "Labels synced from each inbox source (github, linear, sentry), with the repository or team each belongs to: the names a rule's filters.labels expression can use.",
+        inputSchema: {},
+        annotations: { readOnlyHint: true },
+      },
+      () => result("list_labels", poller.labelCatalog),
     );
 
     return server;

@@ -13,7 +13,7 @@ import { eventKey, extractContext, verifySignature } from "./src/github.ts";
 import { dispatchPrompt, handleDelivery, runRules, startQueued, type HandlerServices } from "./src/handler.ts";
 import { itemContext, itemEvent, type InboxResponse } from "./src/inbox.ts";
 import { logger, loggerLayer } from "./src/log.ts";
-import { makeMcpHandler } from "./src/mcp.ts";
+import { makeMcpHandler, type McpServices } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
@@ -474,7 +474,7 @@ const mcpRoutes = HttpRouter.use((router) =>
     );
   }),
 );
-const mcpLayer: Layer.Layer<never, HttpServerError.ServeError, AppConfig | HandlerServices | PullRequests> = Layer.unwrap(
+const mcpLayer: Layer.Layer<never, HttpServerError.ServeError, AppConfig | McpServices> = Layer.unwrap(
   Effect.map(AppConfig, (config) =>
     Option.isSome(config.slack)
       ? HttpRouter.serve(mcpRoutes, { disableLogger: true, disableListenLog: true }).pipe(
