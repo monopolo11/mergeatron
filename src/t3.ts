@@ -1,9 +1,11 @@
 import { Context, Data, Effect, Layer, Option, Redacted } from "effect";
 import { identity } from "effect/Function";
 import { HttpClient, HttpClientRequest } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 import { Socket } from "effect/socket";
 import { join } from "node:path";
 import { AppConfig } from "./config.ts";
+import { execOk, type CommandError } from "./exec.ts";
 import { logger } from "./log.ts";
 import { memoSuccess } from "./memo.ts";
 import type { ModelSelection } from "./rules.ts";
@@ -148,12 +150,19 @@ export type T3Shape = {
   readonly thread: (threadId: string) => Effect.Effect<T3Thread, T3HttpError>;
   /** Creates the thread (and worktree, when asked), sends the prompt, links the PR. */
   readonly startThread: (input: StartThreadInput) => Effect.Effect<StartedThread, T3Error>;
+  /**
+   * The default branch of a project's checkout: where `origin/HEAD` points,
+   * without `origin/`. T3's API does not say, so it is read with git, for
+   * worktrees of items that name no branch (Linear and Sentry issues).
+   */
+  readonly defaultBranch: (project: Pick<T3Project, "workspaceRoot">) => Effect.Effect<string, CommandError>;
 };
 
-/** Builds the client for one origin and token. Needs an `HttpClient` and a `WebSocketConstructor`. */
+/** Builds the client for one origin and token. Needs an `HttpClient`, a `WebSocketConstructor` and a `ChildProcessSpawner` (for git). */
 export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: string) {
   const client = yield* HttpClient.HttpClient;
   const sockets = yield* Socket.WebSocketConstructor;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const decoder = new TextDecoder();
 
   const request = <T>(method: "GET" | "POST", path: string, options: { authenticated?: boolean } = {}): Effect.Effect<T, T3HttpError> =>
@@ -297,6 +306,11 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
         (snapshot) => snapshot.projection,
       ),
     startThread,
+    defaultBranch: (project) =>
+      execOk("git", ["-C", project.workspaceRoot, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).pipe(
+        Effect.map((output) => output.stdout.trim().replace(/^origin\//, "")),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
   };
   return shape;
 });

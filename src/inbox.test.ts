@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { automationsFor, itemContext, itemDeliveryId, type PolledItem } from "./inbox.ts";
+import { automationsFor, itemContext, itemDeliveryId, rulesLeftBy, type ItemRuns, type PolledItem } from "./inbox.ts";
 import { filterMismatch } from "./match.ts";
 import type { Rule } from "./rules.ts";
 import { EMPTY_FILTERS } from "./shared.ts";
@@ -136,26 +136,60 @@ describe("itemDeliveryId", () => {
     expect(itemDeliveryId(pr, { filters: { ...EMPTY_FILTERS, rerunOnPush: false } })).toBe("github:acme/widgets#42");
     expect(itemDeliveryId(linear, rule)).toBe("linear:ENG-7");
   });
+
+  test("an issue's later generations get their own delivery id; a PR's never do", () => {
+    expect(itemDeliveryId(linear, rule, 0)).toBe("linear:ENG-7");
+    expect(itemDeliveryId(linear, rule, 2)).toBe("linear:ENG-7#2");
+    expect(itemDeliveryId(pr, rule, 2)).toBe("github:acme/widgets#42@abc123def456");
+  });
 });
 
-describe("automationsFor", () => {
-  const never = () => false;
+/** A run log where nothing ran and every item is at generation 0, or where `ran` lists the deliveries that did. */
+const runLog = (ran: string[] = [], generation = 0): ItemRuns => ({ generation: () => generation, hasRun: (deliveryId) => ran.includes(deliveryId) });
 
+describe("automationsFor", () => {
   test("fires matching rules once per delivery id", () => {
-    expect(automationsFor(pr, [rule], never)).toEqual([{ rule, deliveryId: "github:acme/widgets#42@abc123def456" }]);
-    expect(automationsFor(pr, [rule], () => true)).toEqual([]);
-    expect(automationsFor(linear, [rule], never)).toEqual([]);
+    expect(automationsFor(pr, [rule], runLog())).toEqual([{ rule, deliveryId: "github:acme/widgets#42@abc123def456" }]);
+    expect(automationsFor(pr, [rule], runLog(["github:acme/widgets#42@abc123def456"]))).toEqual([]);
+    expect(automationsFor(linear, [rule], runLog())).toEqual([]);
+  });
+
+  test("an issue fires again in a new generation", () => {
+    const issues = { ...rule, events: ["inbox.linear.issue"] };
+    expect(automationsFor(linear, [issues], runLog(["linear:ENG-7"]))).toEqual([]);
+    expect(automationsFor(linear, [issues], runLog(["linear:ENG-7"], 1))).toEqual([{ rule: issues, deliveryId: "linear:ENG-7#1" }]);
   });
 
   test("a rule is armed only for activity after its last save, unless backfilling", () => {
     const edited = { ...rule, updatedAt: "2026-01-02T12:00:00Z" };
-    expect(automationsFor(pr, [edited], never)).toEqual([]);
-    expect(automationsFor(pr, [edited], never, { armed: false })).toHaveLength(1);
+    expect(automationsFor(pr, [edited], runLog())).toEqual([]);
+    expect(automationsFor(pr, [edited], runLog(), { armed: false })).toHaveLength(1);
   });
 
   test("filters apply", () => {
     const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: "backend", reasons: ["review_requested"] } };
-    expect(automationsFor(pr, [labelled], never)).toHaveLength(1);
-    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, labels: "frontend" } }], never)).toEqual([]);
+    expect(automationsFor(pr, [labelled], runLog())).toHaveLength(1);
+    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, labels: "frontend" } }], runLog())).toEqual([]);
+  });
+});
+
+describe("rulesLeftBy", () => {
+  const implement: Rule = { ...rule, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, labels: "needs grooming" } };
+
+  test("an issue leaves an enabled rule of its event that ran for its current generation and no longer matches", () => {
+    expect(rulesLeftBy(linear, [implement], runLog(["linear:ENG-7"]))).toEqual([implement]);
+    expect(rulesLeftBy(linear, [implement], runLog(["linear:ENG-7#1"], 1))).toEqual([implement]);
+    // Already bumped: the new generation has no run, so the next poll does not bump again.
+    expect(rulesLeftBy(linear, [implement], runLog(["linear:ENG-7"], 1))).toEqual([]);
+    // Still matching, never ran, disabled, or listening to another event: nothing to re-arm.
+    expect(rulesLeftBy(linear, [{ ...implement, filters: EMPTY_FILTERS }], runLog(["linear:ENG-7"]))).toEqual([]);
+    expect(rulesLeftBy(linear, [implement], runLog())).toEqual([]);
+    expect(rulesLeftBy(linear, [{ ...implement, enabled: false }], runLog(["linear:ENG-7"]))).toEqual([]);
+    expect(rulesLeftBy(linear, [{ ...implement, events: ["inbox.github.issue"] }], runLog(["linear:ENG-7"]))).toEqual([]);
+  });
+
+  test("PRs never leave a rule: they re-run per head instead", () => {
+    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: "frontend" } };
+    expect(rulesLeftBy(pr, [labelled], runLog(["github:acme/widgets#42@abc123def456"]))).toEqual([]);
   });
 });

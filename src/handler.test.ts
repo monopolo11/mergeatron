@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch } from "./handler.ts";
+import { CommandError } from "./exec.ts";
+import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch, runRules } from "./handler.ts";
+import { itemContext, itemEvent } from "./inbox.ts";
+import { linear } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Rule } from "./rules.ts";
 import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
 import { getRun } from "./runHistory.ts";
@@ -267,6 +270,44 @@ describe("handleDelivery", () => {
         expect(again.matched).toEqual([rule.name]);
         yield* settle;
         expect((yield* store.listRuns()).find((run) => run.deliveryId === "d7")?.context?.previous_result).toBe("CHANGES_REQUESTED: 2 comments");
+      }),
+    );
+  });
+});
+
+describe("worktrees for issues", () => {
+  test("an issue with no branch starts a worktree from the project's default branch, or the checkout when git cannot tell", async () => {
+    const started: StartThreadInput[] = [];
+    let branch: Effect.Effect<string, CommandError> = Effect.succeed("main");
+    const project: T3Project = { id: "p1", title: "widgets", workspaceRoot: "/w", deletedAt: null, defaultModelSelection: null };
+    const t3 = fakeT3({
+      projects: () => Effect.succeed([project]),
+      startThread: (input) => Effect.sync(() => (started.push(input), { threadId: "t", threadUrl: "http://t3/t" })),
+      thread: () => Effect.never,
+      defaultBranch: () => branch,
+    });
+    await runWith(
+      testLayer({ t3 }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const rule = yield* store.createRule({ ...base, events: [itemEvent(linear)], projectId: "p1", prompt: "branch off {{default_branch}}" });
+        const start = (deliveryId: string) =>
+          Effect.gen(function* () {
+            const [run] = yield* runRules({ deliveryId, event: itemEvent(linear), ctx: itemContext(linear) }, [rule]);
+            yield* settle;
+            const finished = (yield* store.getRun(run!.id))!;
+            yield* store.updateRun(finished.id, { status: "done" });
+            return finished;
+          });
+
+        const run = yield* start("d1");
+        expect(started[0]).toMatchObject({ baseBranch: "main", worktree: true, prompt: "branch off main" });
+        expect(run).toMatchObject({ detail: "worktree from origin/main", context: { default_branch: "main" } });
+
+        branch = Effect.fail(new CommandError({ command: "git", exitCode: 128, stderr: "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref" }));
+        const fallback = yield* start("d2");
+        expect(started[1]).toMatchObject({ baseBranch: null, worktree: true });
+        expect(fallback.detail).toBe("checkout /w (no default branch for a worktree: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref)");
       }),
     );
   });

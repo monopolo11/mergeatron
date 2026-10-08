@@ -4,7 +4,7 @@ import { AppConfig } from "./config.ts";
 import { errorMessage } from "./errors.ts";
 import { GitHubInbox } from "./githubInbox.ts";
 import { runRules, type HandlerServices } from "./handler.ts";
-import { automationsFor, itemContext, itemDeliveryId, itemEvent, type InboxItem, type InboxLabel, type LabelsResponse, type PolledItem } from "./inbox.ts";
+import { automationsFor, itemContext, itemDeliveryId, itemEvent, rulesLeftBy, type InboxItem, type InboxLabel, type ItemRuns, type LabelsResponse, type PolledItem } from "./inbox.ts";
 import type { InboxSourceClient } from "./inboxSource.ts";
 import { LinearInbox } from "./linearInbox.ts";
 import { Sentry } from "./sentryInbox.ts";
@@ -50,7 +50,10 @@ export type PollerShape = {
   readonly pollNow: (source: InboxSource) => Effect.Effect<PollStatus>;
   /** Polls one source now and runs its automations. Errors are kept on the status, not failed: the UI shows them and the next tick retries. */
   readonly poll: (source: InboxSource) => Effect.Effect<PollStatus>;
-  /** Starts every armed rule for these items; `armed: false` backfills a rule on everything that matches ("Run now" in the editor). Returns the runs recorded. */
+  /**
+   * Starts every armed rule for these items; `armed: false` backfills a rule on everything that matches ("Run now" in the editor).
+   * An issue that no longer matches a rule that ran for it starts its next generation, so the rule fires again on re-entry (see `rulesLeftBy`). Returns the runs recorded.
+   */
   readonly runAutomations: (items: PolledItem[], options?: { armed: boolean; ruleId?: string }) => Effect.Effect<Run[]>;
   /** Refreshes a source's labels when they are an hour old or, for GitHub, when the repositories to cover changed. A failed sync keeps the previous labels and is retried after the next poll. */
   readonly syncLabels: (source: InboxSource) => Effect.Effect<void>;
@@ -59,7 +62,8 @@ export type PollerShape = {
 /**
  * Polls each configured source on its own interval (Settings), writes the
  * items to the store (see `Store.syncInbox`) and after every poll starts the
- * rules armed for them (see `automationsFor`) and refreshes stale labels.
+ * rules armed for them (see `automationsFor`), re-arms issues that left a
+ * rule's filters (see `rulesLeftBy`) and refreshes stale labels.
  * Each source has one loop fiber (sleep, poll, repeat) that `reschedule`
  * replaces, and one permit per source so a manual poll never overlaps the
  * scheduled one. Items survive restarts, so the inbox is full before the
@@ -122,13 +126,20 @@ export const makePoller = (sources: Record<InboxSource, InboxSourceClient | null
         const rules = (yield* store.listRules()).filter((rule) => !options.ruleId || rule.id === options.ruleId);
         const runs: Run[] = [];
         for (const item of items) {
-          // The matcher is pure; look up which of its candidate deliveries already ran first.
+          // The matcher is pure; look up the item's generations and which of its candidate deliveries already ran first.
+          const generations = yield* store.itemGenerations(item.key);
+          const generation = (ruleId: string) => generations.get(ruleId) ?? 0;
           const handled = new Set<string>();
           for (const rule of rules) {
-            const deliveryId = itemDeliveryId(item, rule);
+            const deliveryId = itemDeliveryId(item, rule, generation(rule.id));
             if (yield* store.hasRun(deliveryId, rule.id)) handled.add(`${deliveryId}\n${rule.id}`);
           }
-          for (const { rule, deliveryId } of automationsFor(item, rules, (id, ruleId) => handled.has(`${id}\n${ruleId}`), options)) {
+          const history: ItemRuns = { generation, hasRun: (id, ruleId) => handled.has(`${id}\n${ruleId}`) };
+          for (const rule of rulesLeftBy(item, rules, history)) {
+            const next = yield* store.bumpGeneration(rule.id, item.key);
+            yield* log.info("item left rule, fires again on re-entry", { rule: rule.name, item: item.key, generation: next });
+          }
+          for (const { rule, deliveryId } of automationsFor(item, rules, history, options)) {
             yield* log.info("automation armed", { rule: rule.name, item: item.key, delivery: deliveryId });
             const started = yield* runRules({ deliveryId, event: itemEvent(item), ctx: itemContext(item) }, [rule]).pipe(Effect.provide(handlerServices));
             runs.push(...started);

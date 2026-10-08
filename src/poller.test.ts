@@ -5,6 +5,7 @@ import { itemContext, itemEvent, type InboxLabel } from "./inbox.ts";
 import { linear, pr, rule } from "./inbox.test.ts";
 import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
 import { Poller } from "./poller.ts";
+import { EMPTY_FILTERS } from "./shared.ts";
 import { Store } from "./store.ts";
 import type { T3Project } from "./t3.ts";
 import { fakeT3, runWith, settle, testLayer } from "./testing.ts";
@@ -54,6 +55,65 @@ describe("Poller", () => {
         // A push after the rule was saved: new head, new delivery, fires on its own (and is skipped: the first review still runs).
         const pushed = { ...pr, headSha: "fedcba987654321", updatedAt: new Date(Date.now() + 60_000).toISOString() };
         expect((yield* poller.runAutomations([pushed])).map((run) => [run.status, run.deliveryId])).toEqual([["skipped", "github:acme/widgets#42@fedcba987654"]]);
+      }),
+    );
+  });
+
+  test("an issue fires a rule again each time it re-enters the rule's filters", async () => {
+    const { layer, started } = setup();
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const poller = yield* Poller;
+        const issueRule = { ...input, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, labels: "ready for dev" }, projectId: "p1", workspace: "local" as const };
+        const implement = yield* store.createRule({ ...issueRule, name: "implement" });
+        // A disabled rule that once ran for the issue never re-arms.
+        const off = yield* store.createRule({ ...issueRule, name: "off", enabled: false });
+        yield* store.recordRun({ ruleId: off.id, ruleName: "off", deliveryId: linear.key, event: itemEvent(linear), repo: "", source: "poll", author: null, status: "done", detail: "", threadId: null, threadUrl: null, context: itemContext(linear), result: null });
+        const later = new Date(Date.now() + 60_000).toISOString();
+        const ready = { ...linear, updatedAt: later };
+        const regroom = { ...ready, labels: ["needs grooming"] };
+        const poll = (item: typeof linear) => Effect.map(poller.runAutomations([item]), (runs) => runs.map((run) => run.deliveryId));
+
+        expect(yield* poll(ready)).toEqual(["linear:ENG-7"]);
+        yield* settle;
+        yield* store.updateRun((yield* store.listRuns({ ruleId: implement.id }))[0]!.id, { status: "done" });
+        // Still matching: nothing new.
+        expect(yield* poll(ready)).toEqual([]);
+
+        // Sent back to grooming: the rule's next generation starts, once.
+        expect(yield* poll(regroom)).toEqual([]);
+        expect(yield* poll(regroom)).toEqual([]);
+        expect(yield* store.itemGenerations(linear.key)).toEqual(new Map([[implement.id, 1]]));
+
+        // Ready again: fires in the new generation.
+        expect(yield* poll(ready)).toEqual(["linear:ENG-7#1"]);
+        yield* settle;
+        expect(started).toEqual(["implement: Rate limit the API", "implement: Rate limit the API"]);
+      }),
+    );
+  });
+
+  test("an issue busy with another thread is left for the next poll instead of using the rule up", async () => {
+    const { layer, started } = setup();
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const poller = yield* Poller;
+        yield* store.createRule({ ...input, name: "implement", events: ["inbox.linear.issue"], projectId: "p1", workspace: "local" });
+        const grooming = yield* store.recordRun({ ruleId: "groom", ruleName: "groom", deliveryId: linear.key, event: itemEvent(linear), repo: "", source: "poll", author: null, status: "started", detail: "", threadId: "t0", threadUrl: "http://t3/t0", context: itemContext(linear), result: null });
+        const ready = { ...linear, updatedAt: new Date(Date.now() + 60_000).toISOString() };
+
+        expect(yield* poller.runAutomations([ready])).toEqual([]);
+        expect((yield* store.listRuns()).map((run) => run.ruleName)).toEqual(["groom"]);
+
+        // The grooming thread settles: the next poll fires.
+        yield* store.updateRun(grooming.id, { status: "done" });
+        expect((yield* poller.runAutomations([ready])).map((run) => [run.status, run.deliveryId])).toEqual([["started", "linear:ENG-7"]]);
+        yield* settle;
+        expect(started).toEqual(["implement: Rate limit the API"]);
       }),
     );
   });

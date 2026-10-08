@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
 import { Background, RunEvents } from "./background.ts";
+import { CommandError } from "./exec.ts";
 import { loggerLayer } from "./log.ts";
 import { PullRequests, type PullRequestsShape } from "./pulls.ts";
 import { SlackClient, type SlackClientShape } from "./slack.ts";
@@ -21,6 +22,7 @@ export const fakeT3 = (overrides: Partial<T3Shape> = {}): T3Shape => ({
   providers: () => unexpected(),
   thread: () => unexpected(),
   startThread: () => unexpected(),
+  defaultBranch: () => Effect.fail(new CommandError({ command: "git", exitCode: -1, stderr: "unexpected" })),
   ...overrides,
 });
 

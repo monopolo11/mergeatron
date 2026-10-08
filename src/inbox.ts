@@ -83,13 +83,23 @@ export function itemContext(item: PolledItem): WebhookContext {
 }
 
 /**
- * Delivery id of an item for a rule: the item key, plus the PR head when the
- * rule re-runs on pushes, so each head gets its own review and nothing else
- * repeats. `hasRun(deliveryId, ruleId)` then dedupes across polls.
+ * Delivery id of an item for a rule. A PR's is its key, plus the head when
+ * the rule re-runs on pushes, so each head gets its own review. An issue's is
+ * its key, plus `#<generation>` once it re-entered the rule's filters (see
+ * `rulesLeftBy`), so each re-entry fires the rule again; generation 0 is the
+ * bare key, which older runs carry. `hasRun(deliveryId, ruleId)` then dedupes
+ * across polls.
  */
-export function itemDeliveryId(item: PolledItem, rule: Pick<Rule, "filters">): string {
-  return item.kind === "pull_request" && rule.filters.rerunOnPush && item.headSha ? `${item.key}@${item.headSha.slice(0, 12)}` : item.key;
+export function itemDeliveryId(item: PolledItem, rule: Pick<Rule, "filters">, generation = 0): string {
+  if (item.kind === "pull_request") return rule.filters.rerunOnPush && item.headSha ? `${item.key}@${item.headSha.slice(0, 12)}` : item.key;
+  return generation > 0 ? `${item.key}#${generation}` : item.key;
 }
+
+/** What the run log knows about one item: its generation per rule, and whether a rule ran for a delivery id. */
+export type ItemRuns = {
+  generation: (ruleId: string) => number;
+  hasRun: (deliveryId: string, ruleId: string) => boolean;
+};
 
 /**
  * Rules an item should start now: the rule matches, has not run for this
@@ -101,7 +111,7 @@ export function itemDeliveryId(item: PolledItem, rule: Pick<Rule, "filters">): s
 export function automationsFor(
   item: PolledItem,
   rules: Rule[],
-  hasRun: (deliveryId: string, ruleId: string) => boolean,
+  runs: ItemRuns,
   options: { armed: boolean } = { armed: true },
 ): { rule: Rule; deliveryId: string }[] {
   const ctx = itemContext(item);
@@ -109,7 +119,26 @@ export function automationsFor(
   return rules.flatMap((rule) => {
     if (ruleMismatch(rule, event, ctx) !== null) return [];
     if (options.armed && Date.parse(item.updatedAt) <= Date.parse(rule.updatedAt)) return [];
-    const deliveryId = itemDeliveryId(item, rule);
-    return hasRun(deliveryId, rule.id) ? [] : [{ rule, deliveryId }];
+    const deliveryId = itemDeliveryId(item, rule, runs.generation(rule.id));
+    return runs.hasRun(deliveryId, rule.id) ? [] : [{ rule, deliveryId }];
   });
+}
+
+/**
+ * Rules an issue has left since they last ran for it: enabled, listening to
+ * its event, no longer matching it, and with a run for its current delivery
+ * id. Bumping the issue's generation for them makes each fire again the next
+ * time the issue matches. PRs re-run per head instead (Re-run on push).
+ */
+export function rulesLeftBy(item: PolledItem, rules: Rule[], runs: ItemRuns): Rule[] {
+  if (item.kind === "pull_request") return [];
+  const ctx = itemContext(item);
+  const event = itemEvent(item);
+  return rules.filter(
+    (rule) =>
+      rule.enabled &&
+      rule.events.includes(event) &&
+      ruleMismatch(rule, event, ctx) !== null &&
+      runs.hasRun(itemDeliveryId(item, rule, runs.generation(rule.id)), rule.id),
+  );
 }

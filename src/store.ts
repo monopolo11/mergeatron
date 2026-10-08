@@ -2,7 +2,7 @@ import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, 
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, rules, runActions, runPrompts, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -436,6 +436,32 @@ export function makeStore(db: AppDatabase) {
             .from(runs)
             .where(and(eq(runs.deliveryId, deliveryId), eq(runs.ruleId, ruleId)))
             .get() !== undefined,
+      ),
+
+    /** An issue's generation per rule (see `itemDeliveryId`); rules it never re-entered are absent. */
+    itemGenerations: (itemKey: string) =>
+      Effect.sync(
+        (): Map<string, number> =>
+          new Map(
+            db
+              .select({ ruleId: ruleGenerations.ruleId, generation: ruleGenerations.generation })
+              .from(ruleGenerations)
+              .where(eq(ruleGenerations.itemKey, itemKey))
+              .all()
+              .map((row) => [row.ruleId, row.generation]),
+          ),
+      ),
+
+    /** Starts an issue's next generation for a rule, so the rule fires again on its next match. Returns the new generation. */
+    bumpGeneration: (ruleId: string, itemKey: string) =>
+      Effect.sync(
+        () =>
+          db
+            .insert(ruleGenerations)
+            .values({ ruleId, itemKey, generation: 1 })
+            .onConflictDoUpdate({ target: [ruleGenerations.ruleId, ruleGenerations.itemKey], set: { generation: sql`${ruleGenerations.generation} + 1` } })
+            .returning({ generation: ruleGenerations.generation })
+            .get().generation,
       ),
 
     recordRun: ({ action, promptRefs = action?.promptRefs ?? [], ...run }: RunInput) =>

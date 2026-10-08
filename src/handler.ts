@@ -115,7 +115,10 @@ const NO_THREAD: Thread = { threadId: null, threadUrl: null };
  *
  * A PR or issue gets one thread at a time: while a run for it is still
  * `started` or `queued`, further deliveries are recorded as skipped and point
- * at that thread instead of opening another. A PR whose reviews keep
+ * at that thread instead of opening another. An inbox automation on a busy
+ * issue records nothing instead, so it fires on a later poll once the issue is
+ * free: a recorded skip would use the rule up for the issue (see
+ * `itemDeliveryId`). A PR whose reviews keep
  * requesting changes (see `pausedReview`) is skipped too, unless the delivery
  * is forced: a "second pass" on Slack or a dispatch from the inbox.
  *
@@ -164,7 +167,12 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
     if (repo && prNumber) yield* withPreviousReview(delivery.ctx, repo, prNumber);
     const active = repo && prNumber ? yield* store.activeRunForPullRequest(repo, prNumber) : yield* store.activeRunForIssue(what);
     if (active) {
-      yield* log.info("skipped: thread already running", { ...at, rules: matched.map((rule) => rule.name).join(", "), thread: active.threadId });
+      const busy = { ...at, rules: matched.map((rule) => rule.name).join(", "), thread: active.threadId };
+      if (source === "poll" && !(repo && prNumber)) {
+        yield* log.info("deferred to a later poll: thread already running", busy);
+        return [] as Run[];
+      }
+      yield* log.info("skipped: thread already running", busy);
       return yield* skipAll(`review already running for ${what} (${active.ruleName})`, { threadId: active.threadId, threadUrl: active.threadUrl }, true);
     }
     const force = delivery.force || delivery.event === SECOND_PASS_EVENT;
@@ -220,7 +228,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
 
 /** A started thread also records what it started with, for the run history; every field is a RunPatch field. */
 type StartResult =
-  | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[] } & Pick<Run, "modelInstanceId" | "modelId">)
+  | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[]; context?: WebhookContext } & Pick<Run, "modelInstanceId" | "modelId">)
   | { status: "skipped"; detail: string; threadId: null; threadUrl: null };
 
 /** Records how a thread start went and watches it; anything but `started` frees capacity for a queued run. */
@@ -360,11 +368,29 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
     const promptRefs: PromptRef[] = preset ? [{ owner: "preset", id: preset.id, version: preset.liveVersion }] : rule.promptRefs;
     const bodies = promptRefs.length > 0 ? yield* store.promptBodies(promptRefs) : null;
     if (!bodies) return skipped("no prompt version to start the thread with");
-    const started = yield* openThread(rule, project, ctx, {
+    const branched = yield* withProjectBranch(rule, project, ctx);
+    const started = yield* openThread(rule, project, branched.ctx, {
       title: `${rule.name}: ${ctx.pr_title ?? ctx.issue_title ?? ctx.slack_text ?? ctx.repo}`,
-      prompt: renderTemplate(joinPrompts(bodies), ctx),
+      prompt: renderTemplate(joinPrompts(bodies), branched.ctx),
     });
-    return { ...started, promptRefs };
+    const detail = branched.note ? `${started.detail} (${branched.note})` : started.detail;
+    return { ...started, detail, promptRefs, context: branched.ctx };
+  });
+
+/**
+ * Items that name no branch (Linear and Sentry issues) would start a worktree
+ * rule in the project checkout: fill `default_branch` from the checkout's git
+ * instead, which also renders `{{default_branch}}`. When git cannot tell, the
+ * thread keeps the checkout and the note says why.
+ */
+const withProjectBranch = (rule: Pick<RunAction, "workspace">, project: T3Project, ctx: WebhookContext): Effect.Effect<{ ctx: WebhookContext; note: string | null }, never, T3> =>
+  Effect.gen(function* () {
+    if (rule.workspace !== "worktree" || ctx.pr_head || ctx.default_branch) return { ctx, note: null };
+    const t3 = yield* T3;
+    return yield* t3.defaultBranch(project).pipe(
+      Effect.map((branch) => ({ ctx: { ...ctx, default_branch: branch }, note: null })),
+      Effect.catch((error) => Effect.succeed({ ctx, note: `no default branch for a worktree: ${error.message}` })),
+    );
   });
 
 /**

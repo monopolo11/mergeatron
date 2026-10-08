@@ -224,7 +224,10 @@ Each rule has:
   to each project's git remote.
 - **Workspace**: `worktree` asks T3 to start the thread in a new worktree from
   `origin/<PR head>` (or the default branch for non-PR events); `local` starts it
-  in the project checkout. Fork PRs have no branch on `origin`, so use `local`
+  in the project checkout. Linear and Sentry issues name no branch, so their
+  worktree starts from the project checkout's `origin/HEAD`, which also fills
+  `{{default_branch}}`; when git cannot tell, the thread runs in the checkout
+  and the run's detail says why. Fork PRs have no branch on `origin`, so use `local`
   and `gh pr checkout` in the prompt for those.
 - **Model**: optional override; otherwise project default, then the global default.
   Provider and model pickers are populated from T3's own provider config
@@ -384,9 +387,15 @@ Progress is not Todo"). After every poll each armed rule fires on the items it
 matches. A rule is armed for an item when the item saw activity after the rule
 was last saved, so a new or re-enabled rule does not fan out over everything
 already in the inbox; **Run on N now** backfills (`POST /api/rules/:id/run-now`).
-An item fires a rule once (delivery id = item key); PR rules with **Re-run on
-push** (default on) fire again for each new head commit, like
-`pull_request.synchronize`. Runs show in the log with source `poll`.
+An item fires a rule once per delivery id. A PR's is its key; rules with
+**Re-run on push** (default on) fire again for each new head commit, like
+`pull_request.synchronize`. An issue's is its key until it leaves the rule's
+filters after the rule ran for it (a label or state change, say): from then on
+it is `<key>#1`, `#2` and so on, so the rule fires again each time the issue
+matches it again. Only enabled rules on the issue's event count as left, and
+the issue must still be in the inbox for a poll to see it leave. An issue
+already busy with a thread is not recorded as skipped: it fires on a later poll
+once that thread settles. Runs show in the log with source `poll`.
 
 ### Concurrency
 

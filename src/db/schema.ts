@@ -254,6 +254,25 @@ export const runs = sqliteTable(
 );
 
 /**
+ * How many times an issue re-entered a rule's filters after the rule ran for
+ * it. The issue's delivery id for the rule carries the generation (see
+ * `itemDeliveryId`), so each re-entry fires the rule again. No row means
+ * generation 0, the bare item key.
+ */
+export const ruleGenerations = sqliteTable(
+  "rule_generations",
+  {
+    ruleId: text("rule_id")
+      .notNull()
+      .references(() => rules.id, { onDelete: "cascade" }),
+    /** Inbox item key, e.g. `linear:ENG-123`. Not a foreign key: it outlives pruned items, whose runs it must keep apart. */
+    itemKey: text("item_key").notNull(),
+    generation: integer().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.ruleId, table.itemKey] })],
+);
+
+/**
  * Prompt versions a run's first message is made of, in order: the linked
  * preset or the rule's own prompt, the stacked presets of a dispatch, or the
  * dispatch's hand-edited text. Rendering their bodies, joined by a blank
