@@ -476,6 +476,18 @@ function DeleteRun({ id, onDeleted }: { id: string; onDeleted: () => void }) {
   );
 }
 
+/** The rule the run being followed up was started by, as a chip under the id field; says so when the id matches no run. */
+function FollowUpRule({ id }: { id: string }) {
+  const { data: run, error, isPending } = useQuery({ queryKey: ["run", id], queryFn: () => api<RunDetail>(`/api/runs/${id}`), retry: false });
+  if (isPending) return null;
+  if (error) return <p className="text-muted-foreground">No run with this id.</p>;
+  return (
+    <span className="w-fit max-w-full truncate rounded-md border bg-input/30 px-2 py-0.5" title={`Rule of ${target(run)}`}>
+      {run.ruleName}
+    </span>
+  );
+}
+
 /**
  * A 0 to 10 score and written feedback, and the id of the earlier run this one
  * follows up (a run that fixes a previous implementation); a score or feedback
@@ -542,6 +554,7 @@ function RatingForm({ run, onNext }: { run: RunDetail; onNext: (() => void) | nu
         aria-label="Run this one follows up"
         onChange={(e) => setFollowUpOf(e.target.value)}
       />
+      {followed && <FollowUpRule id={followed} />}
       <div className="flex items-center gap-2">
         <Button size="xs" disabled={!canSave} onClick={() => submit(false)}>Save</Button>
         <Button size="xs" variant="ghost" disabled={!onNext || (changed && !canSave)} onClick={() => submit(true)} title="⌘⏎">
