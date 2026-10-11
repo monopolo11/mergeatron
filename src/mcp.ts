@@ -335,7 +335,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "backfill_usage",
       {
         description:
-          "Measure the usage (tokens, estimated cost) of settled runs from the last 30 days that have none yet, such as runs from before usage was recorded. Runs in the background, one run at a time, about a second each; returns how many runs it will try. Read the results with list_runs or run_analytics once it is done. Safe to repeat: a backfill already running is not started twice.",
+          "Measure the usage (tokens, estimated cost) of settled runs from the last 30 days that have none yet, such as runs from before usage was recorded. Runs in the background, one run at a time, about a second each; returns how many runs it will try (pending) and whether it is running. Read the results with list_runs or run_analytics once it is done. Safe to repeat: a backfill already running is not started twice.",
         inputSchema: {},
         annotations: { destructiveHint: false, idempotentHint: true },
       },

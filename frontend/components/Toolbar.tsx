@@ -65,3 +65,8 @@ export function Count({
 export function ToolbarDivider() {
   return <span aria-hidden className="h-4 w-px bg-border" />;
 }
+
+/** A number inside a toolbar summary line, set a size up and in the foreground colour. */
+export function Figure({ children }: { children: ReactNode }) {
+  return <span className="text-[13px] text-foreground">{children}</span>;
+}

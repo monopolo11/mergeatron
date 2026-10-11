@@ -412,15 +412,19 @@ while queued, then 👀 when they start.
 ## Runs
 
 **Runs** lists every run newest first with its target, rule, model, prompt
-version, status, how long its thread worked and its score. The selects filter
+version, status, cost and tokens (see [Usage and cost](#usage-and-cost)), how
+long its thread worked and its score. The selects filter
 by rule, source, model, prompt (one version, or all versions of a preset or
 rule prompt) and time; the counts toggle status and unrated. Filters live in
 the URL, so a filtered view can be linked. The toolbar sums up the listed runs:
-how many are scored, their average score and average work time, so filtering
-by one prompt version and then another compares them.
+how many are scored, their average score and average work time, and what the
+measured ones cost, so filtering by one prompt version and then another
+compares them.
 
 Picking a run opens it beside the table: trigger, model, prompt versions (the
-rendered message on **show**), timing, the reply, and a 0 to 10 score with
+rendered message on **show**), timing, usage (cost, tokens split by kind, the
+models that answered), the reply (folded to its verdict and length; click to
+read it), and a 0 to 10 score with
 written feedback. Either one alone saves; rating again replaces it. **Next
 unrated** (or ⌘⏎ in the feedback box, which saves first) moves to the next
 finished run without a rating. Ratings feed the MCP `run_analytics` tool. The
@@ -454,9 +458,14 @@ prompt version and model, so a version can be judged on rating and cost together
 
 ## Analytics
 
-**Analytics** in the header swaps the editor for run counts: totals, runs per PR
-or issue author, and runs per trigger source, each split into running, done,
-skipped and failed. Sources are `github` (webhook), `slack` (Socket Mode), `poll`
+**Analytics** in the header swaps the editor for run figures. Per prompt
+version (the live one marked) and per model: runs, how many are scored and
+their average score, how many have usage measured, their average and total
+cost, average output tokens and the share of input read from the prompt cache.
+Then runs per PR or issue author and per trigger source, each split into
+running, done, skipped and failed. The toolbar shows how many settled runs are
+measured and what they cost; **Measure** starts the backfill for the rest
+(`GET /api/runs/usage/backfill` says how many are left and whether one is running). Sources are `github` (webhook), `slack` (Socket Mode), `poll`
 (inbox automations) and `manual` (inbox dispatches and connection tests). The same data is at `GET /api/analytics`.
 
 ## Updating

@@ -64,9 +64,11 @@ export type Analytics = {
    * Per prompt version, to compare versions. A dispatch of stacked presets
    * counts under each. `name` is the preset's or rule's, null once deleted.
    */
-  byPrompt: (RunStats & PromptRef & { name: string | null })[];
+  byPrompt: (RunStats & PromptRef & { name: string | null; live: boolean })[];
   /** Per model a thread started with; runs that never started one have none. */
   byModel: (RunStats & { modelInstanceId: string; modelId: string })[];
+  /** Settled runs that opened a thread, how many of them have usage measured, and what those cost in all. */
+  usage: { runs: number; measured: number; totalCostUsd: number | null };
 };
 
 /** Which runs `listRuns` returns, newest first. Every field narrows; none means the latest 100. */
@@ -816,8 +818,10 @@ export function makeStore(db: AppDatabase) {
         };
         // The preset's or rule's name, or a dispatch's (its version note); null once a preset or rule is deleted.
         const name = sql<string | null>`coalesce(${prompts.name}, ${rules.name}, case when ${runPrompts.owner} = 'dispatch' then ${promptVersions.note} end)`;
+        // The version runs use now; a dispatch's single version is never live.
+        const live = sql<boolean>`ifnull(coalesce(${prompts.liveVersion}, ${rules.livePromptVersion}) = ${runPrompts.version}, 0)`.mapWith(Boolean);
         const byPrompt = db
-          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, ...stats })
+          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, live, ...stats })
           .from(runPrompts)
           .innerJoin(runs, eq(runs.id, runPrompts.runId))
           .leftJoin(runUsage, eq(runUsage.runId, runs.id))
@@ -839,7 +843,13 @@ export function makeStore(db: AppDatabase) {
           .groupBy(runs.modelInstanceId, runs.modelId)
           .orderBy(desc(counts.total))
           .all();
-        return { all, byAuthor, bySource, byPrompt, byModel };
+        const usage = db
+          .select({ runs: count(), measured: count(runUsage.runId), totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)` })
+          .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
+          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"])))
+          .get() ?? { runs: 0, measured: 0, totalCostUsd: null };
+        return { all, byAuthor, bySource, byPrompt, byModel, usage };
       }),
   };
 }

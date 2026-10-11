@@ -3,7 +3,7 @@ import { HANDOFF_EVENT } from "./shared.ts";
 
 /**
  * How a finished review is read. Free of server dependencies: the store
- * derives PR statuses from it and the frontend shows the verdict type.
+ * derives PR statuses from it and the frontend shows verdicts with it.
  */
 
 export type Verdict = "approved" | "changes_requested" | "commented";

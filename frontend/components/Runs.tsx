@@ -2,8 +2,8 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { XIcon } from "lucide-react";
 import { use, useState, type ReactNode } from "react";
-import { Empty, ExternalLink, GroupLabel, RunStatus } from "@/components/Field";
-import { Count, Toolbar, ToolbarDivider } from "@/components/Toolbar";
+import { Dot, Empty, ExternalLink, GroupLabel, RunStatus } from "@/components/Field";
+import { Count, Figure, Toolbar, ToolbarDivider } from "@/components/Toolbar";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,13 +20,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { api, timeAgo } from "@/lib/api";
+import { tokenCount, usd } from "@/lib/format";
 import { ShellContext } from "@/lib/shell";
-import { runStatus, TONE_TEXT, type Tone } from "@/lib/status";
+import { runStatus, scoreTone, TONE_BG, TONE_TEXT, type Tone } from "@/lib/status";
 import { cn } from "@/lib/utils";
-import type { PromptRef, Run, RunRatingInput } from "../../src/rules.ts";
+import type { PromptRef, Run, RunRatingInput, RunUsage } from "../../src/rules.ts";
 import type { RunDetail, RunSummary } from "../../src/runHistory.ts";
-import { RUN_SOURCES, RUN_STATUSES, type RunSource } from "../../src/shared.ts";
+import { HANDOFF_EVENT, RUN_SOURCES, RUN_STATUSES, type RunSource } from "../../src/shared.ts";
 import type { Analytics } from "../../src/store.ts";
+import { reviewVerdict } from "../../src/verdict.ts";
 
 const ALL = "__all__";
 /** Runs fetched per filter; the status and unrated counts are within these. */
@@ -46,6 +48,13 @@ const PSEUDO_RULES = { dispatch: "Inbox dispatches", handoff: "Handoffs", manual
 const RATABLE = new Set<Run["status"]>(["done", "failed"]);
 const UNSETTLED = new Set<Run["status"]>(["queued", "started"]);
 const SCORES = Array.from({ length: 11 }, (_, score) => score);
+/** Token kinds in the order the usage bar stacks them, each with its tone. */
+const TOKEN_KINDS = [
+  { key: "inputTokens", label: "input", tone: "active" },
+  { key: "outputTokens", label: "output", tone: "ok" },
+  { key: "cacheCreationTokens", label: "cache write", tone: "warn" },
+  { key: "cacheReadTokens", label: "cache read", tone: "idle" },
+] as const satisfies ReadonlyArray<{ key: keyof RunUsage; label: string; tone: Tone }>;
 
 /**
  * The page's state, all in the URL so a filtered view can be linked. The
@@ -98,11 +107,11 @@ function historyQuery({ ruleId, source, model, prompt, since }: RunsSearch): str
 }
 
 /**
- * Every run with the trigger, model and prompt versions it started with.
- * Picking a row opens it beside the table to read its reply and rate it.
- * The toolbar's summary (scored runs, average score, average work time) is
- * over the listed runs, so filtering by one prompt version and then another
- * compares them.
+ * Every run with the trigger, model and prompt versions it started with, and
+ * what its thread cost. Picking a row opens it beside the table to read its
+ * reply and rate it. The toolbar's summary (scored runs, average score,
+ * average work time, cost of the measured runs) is over the listed runs, so
+ * filtering by one prompt version and then another compares them.
  */
 export function Runs() {
   const search = useSearch({ from: "/runs" });
@@ -134,6 +143,7 @@ export function Runs() {
   const count = (predicate: (run: RunSummary) => boolean) => runs.filter(predicate).length;
   const scores = visible.flatMap((run) => (run.rating === null ? [] : [run.rating]));
   const worked = visible.flatMap((run) => (run.elapsedMs === null ? [] : [run.elapsedMs]));
+  const costs = visible.flatMap((run) => (run.usage ? [run.usage.costUsd] : []));
 
   // The next ratable, unrated run below the open one, wrapping to the top.
   const index = visible.findIndex((run) => run.id === openId);
@@ -178,7 +188,8 @@ export function Runs() {
             {Object.entries(SINCE).map(([key, { label }]) => <SelectItem key={key} value={key}>{label}</SelectItem>)}
           </FilterSelect>
           <span className="ml-auto font-mono whitespace-nowrap text-muted-foreground" title="Over the runs listed">
-            <Figure>{scores.length}</Figure> scored · avg <Figure>{average(scores)?.toFixed(1) ?? "-"}</Figure> · worked <Figure>{duration(average(worked))}</Figure>
+            <Figure>{scores.length}</Figure> scored · avg <Figure>{average(scores)?.toFixed(1) ?? "-"}</Figure> · worked <Figure>{duration(average(worked))}</Figure> ·{" "}
+            <Figure>{costs.length > 0 ? usd(costs.reduce((sum, cost) => sum + cost, 0)) : "-"}</Figure> on {costs.length} measured
           </span>
         </Toolbar>
 
@@ -196,6 +207,8 @@ export function Runs() {
                 <TableHead>Model</TableHead>
                 <TableHead>Prompt</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="text-right">Cost</TableHead>
+                <TableHead className="text-right">Tokens</TableHead>
                 <TableHead className="text-right">Worked</TableHead>
                 <TableHead className="text-right">Score</TableHead>
               </TableRow>
@@ -216,6 +229,10 @@ export function Runs() {
                     {run.promptRefs.length > 1 && ` +${run.promptRefs.length - 1}`}
                   </TableCell>
                   <TableCell><RunStatus run={run} /></TableCell>
+                  <TableCell className={cn("text-right font-mono", !run.usage && "text-muted-foreground")} title={run.usage ? usd(run.usage.costUsd, true) : undefined}>
+                    {run.usage ? usd(run.usage.costUsd) : "-"}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-muted-foreground">{run.usage ? tokenCount(run.usage.totalTokens) : "-"}</TableCell>
                   <TableCell className="text-right font-mono">{duration(run.elapsedMs)}</TableCell>
                   <TableCell className="text-right font-mono"><Score run={run} /></TableCell>
                 </TableRow>
@@ -249,7 +266,7 @@ function FilterSelect({ value, all, onChange, children }: { value: string | unde
   );
 }
 
-/** One run beside the table: what started it, its reply, and the rating form. */
+/** One run beside the table: what started it, what it spent, its reply (folded), and the rating form. */
 function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabel: (ref: PromptRef) => string; onClose: () => void; onNext: (() => void) | null }) {
   const { data: run, error } = useQuery({
     queryKey: ["run", id],
@@ -258,6 +275,7 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
     refetchInterval: (query) => (query.state.data && !UNSETTLED.has(query.state.data.status) ? false : 5000),
   });
   const [showPrompt, setShowPrompt] = useState(false);
+  const [showReply, setShowReply] = useState(false);
 
   if (!run) {
     return (
@@ -309,12 +327,25 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
 
         {showPrompt && run.prompt && <pre className="max-h-64 overflow-auto rounded-md border bg-input/20 p-2 font-mono whitespace-pre-wrap text-muted-foreground">{run.prompt}</pre>}
 
+        <UsageSection run={run} />
+
         <section className="grid gap-1">
-          <GroupLabel>Reply</GroupLabel>
           {run.result ? (
-            <pre className="font-mono leading-relaxed whitespace-pre-wrap wrap-anywhere">{run.result}</pre>
+            <>
+              <button type="button" aria-expanded={showReply} className="group flex items-baseline justify-between gap-2 text-left" onClick={() => setShowReply((shown) => !shown)}>
+                <GroupLabel>Reply</GroupLabel>
+                <span className="text-muted-foreground group-hover:text-foreground">
+                  <ReplyVerdict run={run} />
+                  {run.result.split("\n").length} lines · {showReply ? "collapse" : "expand"}
+                </span>
+              </button>
+              {showReply && <pre className="font-mono leading-relaxed whitespace-pre-wrap wrap-anywhere">{run.result}</pre>}
+            </>
           ) : (
-            <p className="text-muted-foreground">{UNSETTLED.has(run.status) ? "Not replied yet." : "No reply."}</p>
+            <>
+              <GroupLabel>Reply</GroupLabel>
+              <p className="text-muted-foreground">{UNSETTLED.has(run.status) ? "Not replied yet." : "No reply."}</p>
+            </>
           )}
         </section>
 
@@ -322,6 +353,54 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
       </div>
     </div>
   );
+}
+
+/**
+ * What the run's thread spent: cost and tokens, a bar split by token kind,
+ * and the models that answered. A settled run with a thread but no usage yet
+ * says so; other runs have nothing to show.
+ */
+function UsageSection({ run }: { run: RunDetail }) {
+  const { usage } = run;
+  if (!usage) {
+    if (!run.threadId || UNSETTLED.has(run.status)) return null;
+    return (
+      <section className="grid gap-1">
+        <GroupLabel>Usage</GroupLabel>
+        <p className="text-muted-foreground">Not measured yet.</p>
+      </section>
+    );
+  }
+  const sessions = usage.sessionIds.length;
+  return (
+    <section className="grid gap-2">
+      <div className="flex items-baseline justify-between gap-2">
+        <GroupLabel>Usage</GroupLabel>
+        <span className="font-mono">{usd(usage.costUsd, true)} · {usage.totalTokens.toLocaleString()} tokens</span>
+      </div>
+      <div aria-hidden className="flex h-1.5 overflow-hidden rounded-sm bg-muted">
+        {TOKEN_KINDS.map((kind) => <i key={kind.key} className={TONE_BG[kind.tone]} style={{ width: `${(usage[kind.key] / Math.max(usage.totalTokens, 1)) * 100}%` }} />)}
+      </div>
+      <dl className="grid grid-cols-4 gap-2 font-mono">
+        {TOKEN_KINDS.map((kind) => (
+          <div key={kind.key}>
+            <dt className="text-muted-foreground"><Dot tone={kind.tone} />{kind.label}</dt>
+            <dd>{usage[kind.key].toLocaleString()}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="font-mono text-muted-foreground">{usage.models.join(", ")} · {sessions} {sessions === 1 ? "session" : "sessions"}</p>
+    </section>
+  );
+}
+
+/** A finished PR review's verdict, ahead of the reply's length; nothing for other runs or a reply without one. */
+function ReplyVerdict({ run }: { run: RunDetail }) {
+  if (run.status !== "done" || run.event === HANDOFF_EVENT || !run.context?.pr_number) return null;
+  const verdict = reviewVerdict(run.result);
+  if (verdict === "commented") return null;
+  const { label, tone } = runStatus({ status: run.status, verdict });
+  return <><span className={TONE_TEXT[tone]}>{label}</span> · </>;
 }
 
 function CloseButton({ onClose }: { onClose: () => void }) {
@@ -452,11 +531,6 @@ function Score({ run }: { run: Pick<RunSummary, "rating" | "feedback"> }) {
   return run.feedback ? <span className="text-muted-foreground" title={run.feedback}>note</span> : null;
 }
 
-const scoreTone = (rating: number): Tone => (rating >= 8 ? "ok" : rating >= 5 ? "warn" : "err");
-
-function Figure({ children }: { children: ReactNode }) {
-  return <span className="text-[13px] text-foreground">{children}</span>;
-}
 
 /** `owner/repo#12`, `FOU-12`, or the repo or event when the run is not about a PR or issue. */
 function target({ repo, ref, event }: Pick<RunSummary, "repo" | "ref" | "event">): string {

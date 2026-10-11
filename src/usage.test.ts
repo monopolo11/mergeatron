@@ -132,11 +132,11 @@ describe("recordUsage", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const runs = [yield* recordRun("d1"), yield* recordRun("d2")];
-        expect(yield* startBackfill()).toEqual({ pending: 2 });
+        expect(yield* startBackfill()).toEqual({ pending: 2, running: true });
         const background = yield* Background;
         yield* Effect.repeat(background.watching, { schedule: Schedule.spaced("5 millis"), until: (running) => running === 0 });
         expect([...(yield* store.runUsage(runs.map((run) => run.id))).values()].map((usage) => usage.costUsd)).toEqual([0.75, 0.75]);
-        expect(yield* startBackfill()).toEqual({ pending: 0 });
+        expect(yield* startBackfill()).toEqual({ pending: 0, running: false });
       }),
     ));
 

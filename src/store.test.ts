@@ -74,6 +74,7 @@ describe("Store.analytics", () => {
           byAuthor: [],
           bySource: [],
           byPrompt: [],
+          usage: { runs: 0, measured: 0, totalCostUsd: null },
           byModel: [],
         });
       }),
@@ -123,9 +124,9 @@ describe("run history", () => {
         const { byPrompt, byModel } = yield* store.analytics();
         const counts = { queued: 0, started: 0, done: 2, skipped: 0, failed: 0, ...unmeasured };
         expect(byPrompt).toEqual([
-          { ...edited, name: "Review PR", ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
-          { ...ref(2), name: "review", ...counts, total: 2, rated: 1, avgRating: 9, avgElapsedMs: null },
-          { ...ref(1), name: "review", ...counts, total: 1, done: 1, rated: 1, avgRating: 4, avgElapsedMs: null },
+          { ...edited, name: "Review PR", live: false, ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+          { ...ref(2), name: "review", live: false, ...counts, total: 2, rated: 1, avgRating: 9, avgElapsedMs: null },
+          { ...ref(1), name: "review", live: true, ...counts, total: 1, done: 1, rated: 1, avgRating: 4, avgElapsedMs: null },
         ]);
         expect(byModel).toEqual([
           { ...opus, ...counts, total: 2, rated: 2, avgRating: 6.5, avgElapsedMs: null },
@@ -163,9 +164,11 @@ describe("run history", () => {
         expect((yield* store.listRuns({ sort: "cost" })).map((r) => r.id)).toEqual([pricey.id, cheap.id]);
         expect((yield* getRun(cheap.id)).usage).toMatchObject({ costUsd: 0.5, outputTokens: 100 });
         expect(yield* store.runsWithoutUsage("2026-01-01T00:00:00.000Z")).toEqual([{ id: unmeasured.id, threadId: "t3" }]);
-        expect((yield* store.analytics()).byPrompt).toMatchObject([
+        const analytics = yield* store.analytics();
+        expect(analytics.byPrompt).toMatchObject([
           { total: 3, measured: 2, totalCostUsd: 2, avgCostUsd: 1, avgInputTokens: 10, avgOutputTokens: 200, avgCacheCreationTokens: 100, avgCacheReadTokens: 1000 },
         ]);
+        expect(analytics.usage).toEqual({ runs: 3, measured: 2, totalCostUsd: 2 });
       }),
     ));
 

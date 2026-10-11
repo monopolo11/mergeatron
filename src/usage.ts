@@ -177,16 +177,26 @@ const backfillUsage = Effect.fn("usage.backfill")(function* () {
   });
 });
 
+const BACKFILL = "usage-backfill";
+
+/** Runs a backfill would measure, and whether one is measuring them now. */
+export type BackfillStatus = { pending: number; running: boolean };
+
+export const backfillStatus = Effect.fn("usage.backfillStatus")(function* () {
+  const status: BackfillStatus = { pending: (yield* unmeasuredRuns).length, running: yield* (yield* Background).isWatching(BACKFILL) };
+  return status;
+});
+
 /**
  * Starts the backfill in the background, unless one is running already, and
- * returns how many runs it has to measure. Startup, the API and the MCP tool
- * share it.
+ * returns its status. Startup, the API and the MCP tool share it.
  */
 export const startBackfill = Effect.fn("usage.startBackfill")(function* () {
   const pending = (yield* unmeasuredRuns).length;
   if (pending > 0) {
     const job = backfillUsage().pipe(Effect.catchCause((cause) => log.warn("usage backfill failed", { error: errorMessage(Cause.squash(cause)) })));
-    yield* (yield* Background).watch("usage-backfill", job);
+    yield* (yield* Background).watch(BACKFILL, job);
   }
-  return { pending };
+  const status: BackfillStatus = { pending, running: pending > 0 };
+  return status;
 });

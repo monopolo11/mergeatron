@@ -27,7 +27,7 @@ import { Store } from "./src/store.ts";
 import { supervisorLayer } from "./src/supervisor.ts";
 import { T3 } from "./src/t3.ts";
 import { Updater } from "./src/update.ts";
-import { startBackfill, Usage } from "./src/usage.ts";
+import { backfillStatus, startBackfill, Usage } from "./src/usage.ts";
 
 const log = logger("server");
 const webhookLog = logger("webhook");
@@ -380,7 +380,8 @@ const api = HttpRouter.use((router) =>
         }),
       ),
     );
-    /** Measures settled runs without usage in the background (see src/usage.ts); answers how many it will try. */
+    /** How many settled runs lack usage and whether a backfill is measuring them; POST starts one (see src/usage.ts). */
+    yield* router.add("GET", "/api/runs/usage/backfill", route(Effect.map(backfillStatus(), json)));
     yield* router.add("POST", "/api/runs/usage/backfill", route(Effect.map(startBackfill(), (started) => json(started, 202))));
     yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
     yield* router.add("DELETE", "/api/runs/:id", route(Effect.as(Effect.flatMap(param("id"), deleteRun), HttpServerResponse.empty({ status: 204 }))));

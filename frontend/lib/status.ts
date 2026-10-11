@@ -45,6 +45,9 @@ export function runStatus({ status, verdict }: { status: Run["status"]; verdict?
   }
 }
 
+/** Tone of a 0 to 10 run score: 8 and up is good, under 5 is bad. */
+export const scoreTone = (rating: number): Tone => (rating >= 8 ? "ok" : rating >= 5 ? "warn" : "err");
+
 /** Label and tone for a PR's aggregate review status. */
 export const PR_STATUS = {
   reviewing: { label: "reviewing", tone: "active" },
