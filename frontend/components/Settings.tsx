@@ -25,6 +25,7 @@ import { TemplateEditor } from "@/components/TemplateEditor";
 import { TokenInput } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
+import type { VariableService } from "@/lib/composer";
 import { ShellContext, type Shell } from "@/lib/shell";
 import { saveLabel, useAutosaveForm, type AutosaveForm } from "@/lib/useAutosave";
 import { confirmDiscard, useUnsavedGuard } from "@/lib/unsaved";
@@ -174,6 +175,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                     fallback={DEFAULT_HANDOFF_PROMPT}
                     onChange={field.handleChange}
                     vars={HANDOFF_VARS}
+                    source="github"
                     hint="First message of the handoff thread."
                     rows="min-h-40"
                   />
@@ -246,10 +248,10 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
 }
 
 /** A prompt or message template as a labelled field: editor with variable chips, reset to default. */
-function TemplateField({ label, value, fallback, vars, onChange, hint, rows = "min-h-20" }: { label: string; value: string; fallback: string; vars: readonly string[]; onChange: (value: string) => void; hint?: string; rows?: string }) {
+function TemplateField({ label, value, fallback, vars, onChange, hint, rows = "min-h-20", source }: { label: string; value: string; fallback: string; vars: readonly string[]; onChange: (value: string) => void; hint?: string; rows?: string; source?: VariableService }) {
   return (
     <Field label={label} hint={hint}>
-      <TemplateEditor value={value} fallback={fallback} vars={vars} onChange={onChange} className={rows} />
+      <TemplateEditor value={value} fallback={fallback} vars={vars} onChange={onChange} className={rows} source={source} />
     </Field>
   );
 }

@@ -10,8 +10,9 @@ import { Field, RunStatus } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
 import { PromptEditor } from "@/components/PromptEditor";
 import { api } from "@/lib/api";
+import { eventsService } from "@/lib/composer";
 import { cn } from "@/lib/utils";
-import { itemContext, type InboxItem } from "../../src/inbox.ts";
+import { itemContext, itemEvent, type InboxItem } from "../../src/inbox.ts";
 import type { DispatchInput, ModelSelection, Prompt, Run } from "../../src/rules.ts";
 import { DEFAULT_MAX_CONCURRENT, WORKSPACE_MODES, type WorkspaceMode } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
@@ -108,7 +109,7 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
             <form.Field name="text">
               {(field) => (
                 <Field label="Message" hint="Template: variables render per item on the server.">
-                  <PromptEditor className={cn("min-h-36 leading-relaxed", mono)} value={field.state.value} onChange={(text) => { field.handleChange(text); setDirty(true); }} />
+                  <PromptEditor className={cn("min-h-36 leading-relaxed", mono)} value={field.state.value} source={eventsService(items.map(itemEvent))} onChange={(text) => { field.handleChange(text); setDirty(true); }} />
                   {first && text && (
                     <details className="text-xs">
                       <summary className="cursor-pointer text-muted-foreground">Preview for {first.identifier}</summary>

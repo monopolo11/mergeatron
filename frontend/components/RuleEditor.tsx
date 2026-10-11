@@ -29,6 +29,7 @@ import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components
 import { TokenInput, type TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
+import { eventsService } from "@/lib/composer";
 import type { RuleDraft } from "@/lib/shell";
 import { useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
@@ -515,6 +516,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 className={cn("min-h-52 leading-relaxed", mono, versions.viewed && !linked && "text-muted-foreground")}
                 value={shownPrompt}
                 readOnly={linked !== null || versions.viewed !== null}
+                source={eventsService(events)}
                 onChange={field.handleChange}
               />
               {!linked && !versions.viewed && (

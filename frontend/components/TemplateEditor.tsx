@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { PromptEditor, type PromptEditorHandle } from "@/components/PromptEditor";
 import { Button } from "@/components/ui/button";
+import type { VariableService } from "@/lib/composer";
 import { cn } from "@/lib/utils";
 
 const mono = "font-mono text-xs";
@@ -20,6 +21,7 @@ export function TemplateEditor({
   className,
   readOnly = false,
   skills = true,
+  source,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -33,6 +35,8 @@ export function TemplateEditor({
   readOnly?: boolean;
   /** Offer skills under `/` and `$` (see PromptEditor). */
   skills?: boolean;
+  /** The service shared variables show the logo of (see PromptEditor). */
+  source?: VariableService | null;
 }) {
   const ref = useRef<PromptEditorHandle>(null);
   const insert = (name: string) => ref.current?.insert(`{{${name}}}`);
@@ -45,6 +49,7 @@ export function TemplateEditor({
         value={value}
         readOnly={readOnly}
         skills={skills}
+        source={source}
         onChange={onChange}
         placeholder={placeholder}
       />

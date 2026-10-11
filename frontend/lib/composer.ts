@@ -1,10 +1,11 @@
+import { inboxSource, SLACK_EVENT_PREFIX, type InboxSource, type TemplateVar } from "../../src/shared.ts";
 import type { T3Provider, T3Skill } from "../../src/t3.ts";
 
 /**
  * Text logic behind the prompt editor, ported from T3 Code's composer
  * (`composer-logic.ts`, `inlineSkills.ts`, `providerSkillSearch.ts`). A prompt
  * is plain text; a skill in it is the token `$name`, which T3 dispatches in
- * each provider's native form.
+ * each provider's native form, and a template variable is `{{name}}`.
  */
 
 /** What the caret is typing: `/query` at the start of a line, or a `$query` token. */
@@ -40,6 +41,73 @@ export function splitSkills(line: string, skills: readonly T3Skill[]): Array<str
   }
   if (cursor < line.length) parts.push(line.slice(cursor));
   return parts;
+}
+
+/** `{{name}}` with no inner spaces, so a chip writes back exactly the text it replaced. */
+const VARIABLE_TOKEN = /\{\{([a-zA-Z0-9_]+)\}\}/g;
+
+/** Text split into plain runs and the `{{name}}` template variables it holds, in order. */
+export function splitVariables(text: string): Array<string | { variable: string }> {
+  const parts: Array<string | { variable: string }> = [];
+  let cursor = 0;
+  for (const match of text.matchAll(VARIABLE_TOKEN)) {
+    if (match.index > cursor) parts.push(text.slice(cursor, match.index));
+    parts.push({ variable: match[1]! });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
+/** A service whose logo a variable chip can show. */
+export type VariableService = InboxSource | "slack";
+
+/** Variables only GitHub fills, besides the `pr_` and `comment_` families. */
+const GITHUB_VARIABLES: ReadonlySet<string> = new Set([
+  "repo",
+  "repo_url",
+  "default_branch",
+  "action",
+  "requested_reviewer",
+  "issue_number",
+  "label",
+  "review_state",
+  "review_body",
+  "review_author",
+  "review_decision",
+] satisfies TemplateVar[]);
+
+/** Variables several sources fill: they take the logo of the source the prompt runs for. */
+const SHARED_VARIABLES: ReadonlySet<string> = new Set([
+  "sender",
+  "issue_identifier",
+  "issue_title",
+  "issue_url",
+  "issue_body",
+  "issue_author",
+  "labels",
+  "state",
+  "state_type",
+  "team",
+  "priority",
+  "branch",
+] satisfies TemplateVar[]);
+
+/**
+ * The service a variable comes from, for its chip's logo. A shared variable
+ * takes `source`, the one service the prompt runs for; the orchestrator's own
+ * variables and unknown names have none.
+ */
+export function variableService(name: string, source: VariableService | null = null): VariableService | null {
+  if (name.startsWith("slack_")) return "slack";
+  if (name.startsWith("pr_") || name.startsWith("comment_") || GITHUB_VARIABLES.has(name)) return "github";
+  return SHARED_VARIABLES.has(name) ? source : null;
+}
+
+/** The one service a set of events comes from (its inbox source, Slack, else a GitHub webhook); null when they mix. */
+export function eventsService(events: readonly string[]): VariableService | null {
+  const services = new Set(events.map((event) => inboxSource(event) ?? (event.startsWith(SLACK_EVENT_PREFIX) ? "slack" : "github")));
+  return services.size === 1 ? [...services][0]! : null;
 }
 
 /** Every provider's skills, once per name: the prompt does not pick a provider until it runs. */

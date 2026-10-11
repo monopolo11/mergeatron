@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { T3Provider, T3Skill } from "../../src/t3.ts";
-import { detectTrigger, providerSkills, searchSkills, skillLabel, splitSkills } from "./composer";
+import { detectTrigger, providerSkills, searchSkills, skillLabel, eventsService, splitSkills, splitVariables, variableService } from "./composer";
 
 const skill = (name: string, extra: Partial<T3Skill> = {}): T3Skill => ({ name, displayName: null, description: null, scope: "user", path: `/skills/${name}`, ...extra });
 
@@ -63,5 +63,36 @@ describe("searchSkills", () => {
   test("under / a skill also answers to skill:", () => {
     expect(names("slash", "skill:file")).toEqual(["file-pr"]);
     expect(names("slash", "ski")).toHaveLength(3);
+  });
+});
+
+describe("splitVariables", () => {
+  test("splits out {{name}} tokens and leaves spaced ones as text", () => {
+    expect(splitVariables("Review {{pr_url}} for {{ repo }}{{slack_ts}}")).toEqual(["Review ", { variable: "pr_url" }, " for {{ repo }}", { variable: "slack_ts" }]);
+  });
+});
+
+describe("variableService", () => {
+  test("names the one service that fills a variable", () => {
+    expect(variableService("pr_url", "linear")).toBe("github");
+    expect(variableService("review_decision")).toBe("github");
+    expect(variableService("slack_text")).toBe("slack");
+  });
+
+  test("shared variables take the prompt's source; the orchestrator's own take none", () => {
+    expect(variableService("issue_title", "sentry")).toBe("sentry");
+    expect(variableService("issue_title")).toBeNull();
+    expect(variableService("review_round", "linear")).toBeNull();
+    expect(variableService("unknown", "linear")).toBeNull();
+  });
+});
+
+describe("eventsService", () => {
+  test("is the events' one source, else null", () => {
+    expect(eventsService(["inbox.linear.issue"])).toBe("linear");
+    expect(eventsService(["pull_request.opened", "inbox.github.pull_request"])).toBe("github");
+    expect(eventsService(["slack.message"])).toBe("slack");
+    expect(eventsService(["inbox.sentry.issue", "pull_request.opened"])).toBeNull();
+    expect(eventsService([])).toBeNull();
   });
 });
