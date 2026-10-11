@@ -61,6 +61,7 @@ describe("recordUsage", () => {
     updatedAt: "2026-10-11T02:08:57.338Z",
   });
   const thread = (providerThreads: T3Thread["providerThreads"], subagents: T3Thread["subagents"] = []): T3Thread => ({
+    thread: { pullRequests: [] },
     runs: [],
     messages: [],
     turnItems: [],

@@ -238,6 +238,12 @@ export const runs = sqliteTable(
     ratedAt: text("rated_at"),
     /** The earlier run this one follows up: it addresses (fixes) that run's implementation. Set with the rating; cleared if that run is deleted. */
     followUpOf: text("follow_up_of"),
+    /**
+     * When T3 last answered for the PRs linked to its thread (see
+     * runPullRequests.ts), with them or with the thread gone. Null until then:
+     * startup reads settled runs that are still null.
+     */
+    pullRequestsCheckedAt: text("pull_requests_checked_at"),
     /** When the T3 thread opened; later than `createdAt` by any queue wait. Null if no thread ever opened. */
     startedAt: text("started_at"),
     /** When the run reached done, skipped or failed. */
@@ -364,6 +370,33 @@ export const runUsage = sqliteTable(
   },
   // Most expensive runs first (list_runs sort "cost").
   (table) => [index("run_usage_cost_idx").on(table.costUsd)],
+);
+
+/**
+ * PRs linked in T3 to a run's thread or to the tasks it delegated (see
+ * runPullRequests.ts): the PR a review was started on, and those the agent
+ * opened or worked on. Read when the run settles, at startup for settled
+ * runs never read (see `runs.pullRequestsCheckedAt`), and whenever the run is
+ * opened in the UI; title and state are T3's last GitHub sync, null until the
+ * first.
+ */
+export const runPullRequests = sqliteTable(
+  "run_pull_requests",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    /** `owner/name`. */
+    repository: text().notNull(),
+    number: integer().notNull(),
+    url: text().notNull(),
+    title: text(),
+    state: text({ enum: ["open", "closed", "merged"] }),
+    isDraft: integer("is_draft", { mode: "boolean" }).notNull().default(false),
+    /** When it was linked to the thread. */
+    linkedAt: text("linked_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.runId, table.repository, table.number] })],
 );
 
 /**

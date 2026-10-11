@@ -1,5 +1,5 @@
 import type { Verdict } from "../../src/completion.ts";
-import type { Run } from "../../src/rules.ts";
+import type { Run, RunPullRequest } from "../../src/rules.ts";
 import type { PullRequestStatus } from "../../src/store.ts";
 
 /**
@@ -42,6 +42,20 @@ export function runStatus({ status, verdict }: { status: Run["status"]; verdict?
       return { label: "skipped", tone: "warn" };
     case "failed":
       return { label: "failed", tone: "err" };
+  }
+}
+
+/** Label and tone for a PR's GitHub state as T3 last synced it; an open draft reads as a draft. Null before the first sync. */
+export function prState({ state, isDraft }: Pick<RunPullRequest, "state" | "isDraft">): StatusLabel | null {
+  switch (state) {
+    case null:
+      return null;
+    case "open":
+      return isDraft ? { label: "draft", tone: "idle" } : { label: "open", tone: "active" };
+    case "merged":
+      return { label: "merged", tone: "ok" };
+    case "closed":
+      return { label: "closed", tone: "err" };
   }
 }
 

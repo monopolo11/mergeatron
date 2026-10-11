@@ -115,6 +115,8 @@ export type T3RunStatus =
  * a completed run alone does not mean the thread is done.
  */
 export type T3Thread = {
+  /** The thread's own record; `pullRequests` are the PRs linked to it, by the orchestrator or by the agent. Older threads have none. */
+  thread: { pullRequests?: T3PullRequest[] };
   runs: Array<{ id: string; ordinal: number; status: T3RunStatus; startedAt: string | null; completedAt: string | null }>;
   /** A recent window (bounded snapshot) that always holds the latest run's messages. */
   messages: Array<{ id: string; runId: string | null; role: "user" | "assistant" | "system"; text: string; updatedAt: string }>;
@@ -127,6 +129,15 @@ export type T3Thread = {
   subagents: Array<{ origin: "provider_native" | "app_owned"; childThreadId: string | null; status: string; completionDelivery?: { state: string }; updatedAt: string }>;
   /** The agent's own conversations; for Claude Code, `nativeThreadRef.nativeId` is its session id (the name of its log file). */
   providerThreads: Array<{ pendingBackgroundTasks?: unknown[]; nativeThreadRef?: { driver: string; nativeId: string } | null; updatedAt: string }>;
+};
+
+/** A PR linked to a thread, trimmed from T3's thread pull request. `snapshot` is T3's last GitHub sync of it, null until the first. */
+export type T3PullRequest = {
+  repository: string;
+  number: number;
+  url: string;
+  linkedAt: string;
+  snapshot: { title: string; state: "open" | "closed" | "merged"; isDraft: boolean } | null;
 };
 
 export type StartThreadInput = {
@@ -377,3 +388,28 @@ export class T3 extends Context.Service<T3, T3Shape>()("T3") {
     }),
   );
 }
+
+/**
+ * A thread and, with `delegated`, the threads of the tasks it delegated
+ * through T3 (`app_owned` subagents, each in a child thread), at any depth,
+ * parents first. The agent's own subagents (`provider_native`) are not
+ * followed: they belong to the parent's provider session. A delegated thread
+ * deleted in T3 is skipped; any other failure fails the walk.
+ */
+export const threadTree = Effect.fn("t3.threadTree")(function* (threadId: string, delegated: boolean) {
+  const t3 = yield* T3;
+  const visited = new Set<string>();
+  const threads: T3Thread[] = [];
+  const visit = (id: string): Effect.Effect<void, T3HttpError> =>
+    Effect.gen(function* () {
+      if (visited.has(id)) return;
+      visited.add(id);
+      const thread = yield* t3.thread(id);
+      threads.push(thread);
+      if (!delegated) return;
+      const children = thread.subagents.flatMap((task) => (task.origin === "app_owned" && task.childThreadId ? [task.childThreadId] : []));
+      yield* Effect.forEach(children, (child) => visit(child).pipe(Effect.catchIf((error) => error.status === 404, () => Effect.void)), { discard: true });
+    });
+  yield* visit(threadId);
+  return threads;
+});

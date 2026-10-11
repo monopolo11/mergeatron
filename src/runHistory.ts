@@ -1,6 +1,6 @@
 import { Data, Effect } from "effect";
 import { logger } from "./log.ts";
-import type { PromptRef, Run, RunAction, RunUsage } from "./rules.ts";
+import type { PromptRef, Run, RunAction, RunPullRequest, RunUsage } from "./rules.ts";
 import { SETTLED, Store, type RunFilter, type RunRating } from "./store.ts";
 import { joinPrompts, renderTemplate } from "./template.ts";
 
@@ -17,16 +17,18 @@ export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonl
 
 /**
  * The run history behind the MCP tools: every run with the trigger, prompt
- * versions and model it started with, what its thread spent, and an optional
- * rating with a written review and a link to the run it follows up, so prompt versions and models can be compared
- * (see Store.analytics).
+ * versions and model it started with, what its thread spent, the PRs linked
+ * to its thread, and an optional rating with a written review and a link to
+ * the run it follows up, so prompt versions and models can be compared (see
+ * Store.analytics).
  */
 
 /**
  * A run with the prompt versions its first message is made of (see
- * `runPrompts`) and its tokens and estimated cost (see usage.ts), null until measured.
+ * `runPrompts`), its tokens and estimated cost (see usage.ts), null until
+ * measured, and the PRs linked to its thread as last read (see runPullRequests.ts).
  */
-type RunWithPrompts = Run & { promptRefs: PromptRef[]; usage: RunUsage | null };
+type RunWithPrompts = Run & { promptRefs: PromptRef[]; usage: RunUsage | null; pullRequests: RunPullRequest[] };
 
 /**
  * The PR or issue a run is about, from its context. `ref` is `#12` for PRs
@@ -44,13 +46,14 @@ export type RunSummary = Omit<RunWithPrompts, "context" | "result"> & RunSubject
  */
 export type RunDetail = RunWithPrompts & RunSubject & { action: RunAction | null; prompt: string | null };
 
-const withPromptRefs = (runs: Run[]) =>
+const withRelations = (runs: Run[]) =>
   Effect.gen(function* () {
     const store = yield* Store;
     const ids = runs.map((run) => run.id);
     const refs = yield* store.runPromptRefs(ids);
     const usage = yield* store.runUsage(ids);
-    return runs.map((run): RunWithPrompts => ({ ...run, promptRefs: refs.get(run.id) ?? [], usage: usage.get(run.id) ?? null }));
+    const pulls = yield* store.runPullRequests(ids);
+    return runs.map((run): RunWithPrompts => ({ ...run, promptRefs: refs.get(run.id) ?? [], usage: usage.get(run.id) ?? null, pullRequests: pulls.get(run.id) ?? [] }));
   });
 
 const subject = (context: Run["context"]): RunSubject => {
@@ -65,14 +68,14 @@ const subject = (context: Run["context"]): RunSubject => {
 const summarize = ({ context, result, ...run }: RunWithPrompts): RunSummary => ({ ...run, ...subject(context) });
 
 export const listRuns = Effect.fn("runs.list")(function* (filter: RunFilter) {
-  return (yield* withPromptRefs(yield* (yield* Store).listRuns(filter))).map(summarize);
+  return (yield* withRelations(yield* (yield* Store).listRuns(filter))).map(summarize);
 });
 
 export const getRun = Effect.fn("runs.get")(function* (id: string) {
   const store = yield* Store;
   const run = yield* store.getRun(id);
   if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
-  const [withPrompts] = yield* withPromptRefs([run]);
+  const [withPrompts] = yield* withRelations([run]);
   const bodies = withPrompts!.promptRefs.length > 0 ? yield* store.promptBodies(withPrompts!.promptRefs) : null;
   const detail: RunDetail = {
     ...withPrompts!,
@@ -91,7 +94,7 @@ export const rateRun = Effect.fn("runs.rate")(function* (id: string, rating: Run
   const run = yield* store.rateRun(id, rating);
   if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
   yield* log.info("run rated", { run: id, rating: rating.rating ?? undefined });
-  const [detail] = yield* withPromptRefs([run]);
+  const [detail] = yield* withRelations([run]);
   return summarize(detail!);
 });
 

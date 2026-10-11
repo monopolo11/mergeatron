@@ -23,9 +23,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, timeAgo } from "@/lib/api";
 import { tokenCount, usd } from "@/lib/format";
 import { ShellContext } from "@/lib/shell";
-import { runStatus, scoreTone, TONE_BG, TONE_TEXT, type Tone } from "@/lib/status";
+import { prState, runStatus, scoreTone, TONE_BG, TONE_TEXT, type Tone } from "@/lib/status";
 import { cn } from "@/lib/utils";
-import type { PromptRef, Run, RunRatingInput, RunUsage } from "../../src/rules.ts";
+import type { PromptRef, Run, RunPullRequest, RunRatingInput, RunUsage } from "../../src/rules.ts";
 import type { RunDetail, RunSummary } from "../../src/runHistory.ts";
 import { HANDOFF_EVENT, RUN_SOURCES, RUN_STATUSES, type RunSource } from "../../src/shared.ts";
 import type { Analytics } from "../../src/store.ts";
@@ -313,6 +313,7 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
           )}
           <dt>Status</dt>
           <dd className="wrap-anywhere"><RunStatus run={run}>{run.detail || null}</RunStatus></dd>
+          <RelatedPullRequests run={run} />
           <dt>Rule</dt>
           <dd>
             {run.ruleName} <span className="font-mono text-muted-foreground">· {run.event} · {run.source}</span>
@@ -372,6 +373,38 @@ function FollowedRun({ id }: { id: string }) {
     <Link to="/runs" search={{ ...search, run: id }} replace className="link block truncate" title={run?.title ?? id}>
       {run ? <><span className="font-mono text-muted-foreground">{target(run)}</span> {run.title}</> : <span className="font-mono">{id}</span>}
     </Link>
+  );
+}
+
+/**
+ * PRs linked to the run's thread in T3, as rows of the run's details. Read
+ * from T3 again when the run opens and when its status changes, so PRs linked
+ * later and merges show up; the stored list shows meanwhile. Nothing when
+ * there are none.
+ */
+function RelatedPullRequests({ run }: { run: RunDetail }) {
+  const { data: pulls = run.pullRequests } = useQuery({
+    queryKey: ["run", run.id, "pull-requests", run.status],
+    queryFn: () => api<RunPullRequest[]>(`/api/runs/${run.id}/pull-requests`),
+  });
+  if (pulls.length === 0) return null;
+  return (
+    <>
+      <dt>PRs</dt>
+      <dd className="grid min-w-0">
+        {pulls.map((pull) => {
+          const state = prState(pull);
+          // The run's own repository goes without saying.
+          const ref = `${pull.repository.toLowerCase() === run.repo.toLowerCase() ? "" : pull.repository}#${pull.number}`;
+          return (
+            <ExternalLink key={pull.url} href={pull.url} title={pull.title ?? undefined} className="truncate">
+              <span className="font-mono text-muted-foreground">{ref}</span>
+              {state && <span className={TONE_TEXT[state.tone]}> {state.label}</span>} {pull.title}
+            </ExternalLink>
+          );
+        })}
+      </dd>
+    </>
   );
 }
 

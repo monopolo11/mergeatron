@@ -19,6 +19,7 @@ import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
 import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, RunQuery, RunRatingInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { deleteRun, getRun, listRuns, rateRun } from "./src/runHistory.ts";
+import { startPullRequestBackfill, syncPullRequests } from "./src/runPullRequests.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
 import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
@@ -384,6 +385,8 @@ const api = HttpRouter.use((router) =>
     yield* router.add("GET", "/api/runs/usage/backfill", route(Effect.map(backfillStatus(), json)));
     yield* router.add("POST", "/api/runs/usage/backfill", route(Effect.map(startBackfill(), (started) => json(started, 202))));
     yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
+    /** PRs linked to the run's thread, read from T3 again (see src/runPullRequests.ts). */
+    yield* router.add("GET", "/api/runs/:id/pull-requests", route(Effect.map(Effect.flatMap(param("id"), syncPullRequests), json)));
     yield* router.add("DELETE", "/api/runs/:id", route(Effect.as(Effect.flatMap(param("id"), deleteRun), HttpServerResponse.empty({ status: 204 }))));
     yield* router.add(
       "PUT",
@@ -532,6 +535,7 @@ const startupLayer = Layer.effectDiscard(
     yield* Effect.forEach(yield* store.queuedRuleIds(), startQueued, { discard: true });
     yield* poller.start;
     yield* startBackfill();
+    yield* startPullRequestBackfill();
     yield* log.info("GitHub -> T3 Code orchestrator started", {
       url: `http://localhost:${config.port}/`,
       t3: t3.origin,

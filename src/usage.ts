@@ -6,7 +6,7 @@ import { execOk } from "./exec.ts";
 import { logger } from "./log.ts";
 import type { Run, RunUsage } from "./rules.ts";
 import { Store } from "./store.ts";
-import { T3, type T3HttpError } from "./t3.ts";
+import { threadTree } from "./t3.ts";
 
 const log = logger("usage");
 
@@ -105,30 +105,13 @@ const addUsage = (a: SessionUsage, b: SessionUsage): SessionUsage => ({
 
 /**
  * Provider session ids of a thread and, with `delegated`, of the T3 tasks it
- * delegated (`app_owned` subagents, each in a child thread with its own
- * sessions), at any depth. The agent's own subagents (`provider_native`) are
- * not followed: their logs sit under the parent's session, which ccusage
- * already counts. A delegated thread deleted in T3 is skipped; any other
- * failure fails the whole measurement (see recordUsage).
+ * delegated (see threadTree). The agent's own subagents log under the
+ * parent's session, which ccusage already counts.
  */
 const threadSessions = (threadId: string, delegated: boolean) =>
-  Effect.gen(function* () {
-    const t3 = yield* T3;
-    const visited = new Set<string>();
-    const sessions = new Set<string>();
-    const visit = (id: string): Effect.Effect<void, T3HttpError> =>
-      Effect.gen(function* () {
-        if (visited.has(id)) return;
-        visited.add(id);
-        const thread = yield* t3.thread(id);
-        for (const provider of thread.providerThreads) if (provider.nativeThreadRef) sessions.add(provider.nativeThreadRef.nativeId);
-        if (!delegated) return;
-        const children = thread.subagents.flatMap((task) => (task.origin === "app_owned" && task.childThreadId ? [task.childThreadId] : []));
-        yield* Effect.forEach(children, (child) => visit(child).pipe(Effect.catchIf((error) => error.status === 404, () => Effect.void)), { discard: true });
-      });
-    yield* visit(threadId);
-    return [...sessions];
-  });
+  Effect.map(threadTree(threadId, delegated), (threads) => [
+    ...new Set(threads.flatMap((thread) => thread.providerThreads.flatMap((provider) => (provider.nativeThreadRef ? [provider.nativeThreadRef.nativeId] : [])))),
+  ]);
 
 /**
  * Measures a run's thread and stores it, replacing an earlier measurement:

@@ -55,9 +55,9 @@ export function Empty({ children, className }: { children: ReactNode; className?
 }
 
 /** Link that opens in a new tab: PRs, issues and T3 threads. */
-export function ExternalLink({ href, className, children }: { href: string; className?: string; children: ReactNode }) {
+export function ExternalLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
   return (
-    <a href={href} target="_blank" rel="noreferrer" className={cn("link", className)}>
+    <a href={href} title={title} target="_blank" rel="noreferrer" className={cn("link", className)}>
       {children}
     </a>
   );

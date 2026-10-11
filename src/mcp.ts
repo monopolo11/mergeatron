@@ -12,6 +12,7 @@ import { createVersion, listPrompts, promoteVersion, readPrompt } from "./prompt
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
 import { createRule, deleteRule, updateRule, type RuleCreate, type RulePatch } from "./ruleAdmin.ts";
 import { getRun, listRuns, rateRun, runAnalytics } from "./runHistory.ts";
+import { syncPullRequests } from "./runPullRequests.ts";
 import { startBackfill } from "./usage.ts";
 import { INBOX_REASONS, PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES, SUGGESTED_EVENTS, WORKSPACE_MODES } from "./shared.ts";
 import { Store } from "./store.ts";
@@ -262,7 +263,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "list_runs",
       {
         description:
-          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), what it spent (usage: tokens by kind and estimated costUsd, subagents included; null until measured when the run settles), and its rating, written review and the run it follows up (followUpOf). Leaves out the context and reply; read those with get_run.",
+          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), what it spent (usage: tokens by kind and estimated costUsd, subagents included; null until measured when the run settles), the PRs linked to its T3 thread as last read (pullRequests: the PR a review ran on and those the agent opened, with title and open/closed/merged state), and its rating, written review and the run it follows up (followUpOf). Leaves out the context and reply; read those with get_run.",
         inputSchema: {
           rule_id: z.string().optional().describe("Only runs of this rule; dispatch, handoff and manual are the ids of runs without a stored rule"),
           status: z.enum(RUN_STATUSES).optional(),
@@ -299,11 +300,11 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "get_run",
       {
         description:
-          "Read one run in full: its trigger and template variables (context), what it was set to start with (action: the rule's project, workspace, requested model, preset and limit at the time), the first message (prompt, rendered from its prompt versions and context), the model used, what the thread spent (usage: tokens by kind, estimated costUsd, every model that answered and the Claude Code session ids measured), the thread's final reply (result) and its rating.",
+          "Read one run in full: its trigger and template variables (context), what it was set to start with (action: the rule's project, workspace, requested model, preset and limit at the time), the first message (prompt, rendered from its prompt versions and context), the model used, what the thread spent (usage: tokens by kind, estimated costUsd, every model that answered and the Claude Code session ids measured), the PRs linked to its T3 thread, read again from T3 (pullRequests: the PR a review ran on and those the agent opened, with title and open/closed/merged state), the thread's final reply (result) and its rating.",
         inputSchema: { run_id: runId },
         annotations: { readOnlyHint: true },
       },
-      ({ run_id }) => result("get_run", getRun(run_id)),
+      ({ run_id }) => result("get_run", Effect.andThen(syncPullRequests(run_id), getRun(run_id))),
     );
 
     server.registerTool(

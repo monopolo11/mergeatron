@@ -421,7 +421,8 @@ how many are scored, their average score and average work time, and what the
 measured ones cost, so filtering by one prompt version and then another
 compares them.
 
-Picking a run opens it beside the table: trigger, model, prompt versions (the
+Picking a run opens it beside the table: trigger, the PRs linked to its
+thread (see [Related PRs](#related-prs)), model, prompt versions (the
 rendered message on **show**), timing, usage (cost, tokens split by kind, the
 models that answered), the reply (folded to its verdict and length; click to
 read it), and a 0 to 10 score with
@@ -455,6 +456,21 @@ Usage shows up on the runs from the MCP tools and the API: `list_runs` and
 "cost"` lists the most expensive measured runs first, and `run_analytics` adds
 measured counts, total and average cost and average tokens by kind to each
 prompt version and model, so a version can be judged on rating and cost together.
+
+### Related PRs
+
+A run's related PRs are the ones linked in T3 to its thread, or to the tasks
+it delegated through T3: the PR a review ran on (the orchestrator links it when
+the thread starts) and the PRs the agent opened or worked on (agents link them
+with T3's `link_pull_request`). Each comes with T3's last GitHub sync of its
+title and state: open, draft, merged or closed. They are read when the run
+settles and stored on the run (table `run_pull_requests`), so they outlive the
+thread, and read again whenever the run is opened in the UI
+(`GET /api/runs/:id/pull-requests`) or with the MCP `get_run`, so PRs linked
+later and merges show up; `list_runs` carries the stored list as
+`pullRequests`. At startup, settled runs whose PRs were never read are read in
+the background: after updating to this version that fills in every earlier
+run, and later it retries runs whose read failed when they settled.
 
 ## Analytics
 

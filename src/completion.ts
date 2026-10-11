@@ -7,6 +7,7 @@ import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3RunStatus, type T3Thread } from "./t3.ts";
+import { recordPullRequests } from "./runPullRequests.ts";
 import { recordUsage, Usage } from "./usage.ts";
 import { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
 
@@ -161,7 +162,8 @@ export const resumeWatchers: Effect.Effect<void, never, CompletionServices> = Ef
 /**
  * Records the outcome and, for Slack runs, posts the reply. A review then
  * flips 👀 to the verdict's reaction; a handoff only posts its document.
- * What the thread spent is measured in the background (see usage.ts). The
+ * What the thread spent is measured, and the PRs linked to it read, in the
+ * background (see usage.ts, runPullRequests.ts). The
  * supervisor then advances the rule's queue and checks whether the PR is stuck.
  */
 const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
@@ -184,6 +186,8 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
         Effect.catchCause((cause) => log.warn("usage not recorded", { run: runId, error: errorMessage(Cause.squash(cause)) })),
       ),
     );
+    // Opening the run in the UI reads them again, so a miss here is not lost.
+    yield* background.fork(recordPullRequests(run).pipe(Effect.catchCause((cause) => log.warn("pull requests not recorded", { run: runId, error: errorMessage(Cause.squash(cause)) }))));
     const review = run.event !== HANDOFF_EVENT;
     const origin = slackOrigin(run.context);
     if (origin) {

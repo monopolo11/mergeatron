@@ -31,6 +31,7 @@ const reply = (id: string, runId: string, text: string, offsetMs = 0): T3Thread[
 /** A thread whose first run ended "standing by" while a subagent runs. */
 function thread(overrides: Partial<T3Thread> = {}): T3Thread {
   return {
+    thread: { pullRequests: [] },
     runs: [run(1, "completed")],
     messages: [
       { id: "u1", runId: "run1", role: "user", text: "review it", updatedAt: at(-60_000) },

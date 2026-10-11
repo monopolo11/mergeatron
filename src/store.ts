@@ -2,7 +2,7 @@ import { and, count, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull,
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runUsage, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -16,6 +16,7 @@ import {
   type RuleUpdate,
   type Run,
   type RunAction,
+  type RunPullRequest,
   type RunUsage,
   type Settings,
 } from "./rules.ts";
@@ -119,8 +120,8 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
-/** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, or when it is rated. */
-type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs";
+/** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, when it is rated, or when its PRs are read. */
+type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt";
 
 /** Statuses that end a run. */
 export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
@@ -551,6 +552,34 @@ export function makeStore(db: AppDatabase) {
       Effect.sync((): Map<string, RunUsage> => {
         const rows = runIds.length === 0 ? [] : db.select().from(runUsage).where(inArray(runUsage.runId, runIds)).all();
         return new Map(rows.map(({ runId, ...usage }) => [runId, usage]));
+      }),
+
+    /** Stores the PRs linked to a run's thread (see runPullRequests.ts), replacing the earlier list, and when they were checked. */
+    saveRunPullRequests: (runId: string, pulls: RunPullRequest[], checkedAt: string) =>
+      Effect.sync(() =>
+        db.transaction((tx) => {
+          tx.delete(runPullRequests).where(eq(runPullRequests.runId, runId)).run();
+          if (pulls.length > 0) tx.insert(runPullRequests).values(pulls.map((pull) => ({ runId, ...pull }))).run();
+          tx.update(runs).set({ pullRequestsCheckedAt: checkedAt }).where(eq(runs.id, runId)).run();
+        }),
+      ),
+
+    /** Runs that ended with a thread and whose PRs were never checked, oldest first: what `backfillPullRequests` reads. */
+    runsWithUncheckedPullRequests: () =>
+      Effect.sync(() =>
+        db
+          .select({ id: runs.id, threadId: runs.threadId })
+          .from(runs)
+          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"]), isNull(runs.pullRequestsCheckedAt)))
+          .orderBy(runs.createdAt)
+          .all(),
+      ),
+
+    /** PRs linked to each run's thread, in the order they were linked; runs without any are left out. */
+    runPullRequests: (runIds: string[]) =>
+      Effect.sync((): Map<string, RunPullRequest[]> => {
+        const rows = runIds.length === 0 ? [] : db.select().from(runPullRequests).where(inArray(runPullRequests.runId, runIds)).orderBy(runPullRequests.linkedAt).all();
+        return new Map([...Map.groupBy(rows, (row) => row.runId)].map(([runId, rows]) => [runId, rows.map(({ runId: _, ...pull }) => pull)]));
       }),
 
     /** Runs that ended with a thread, at or after `since`, and have no usage yet, oldest first: what `backfillUsage` measures. */

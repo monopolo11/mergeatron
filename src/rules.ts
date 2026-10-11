@@ -1,5 +1,5 @@
 import { Effect, Schema, SchemaGetter } from "effect";
-import type { promptVersions, prompts, reviewRequests, rules, runUsage, runs, settings } from "./db/schema.ts";
+import type { promptVersions, prompts, reviewRequests, rules, runPullRequests, runUsage, runs, settings } from "./db/schema.ts";
 import { parseLabels } from "./labelQuery.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -24,6 +24,8 @@ export type Rule = typeof rules.$inferSelect;
 export type Run = typeof runs.$inferSelect;
 /** Tokens and estimated cost of a run's thread, without the run id. */
 export type RunUsage = Omit<typeof runUsage.$inferSelect, "runId">;
+/** A PR linked to a run's thread in T3, without the run id. */
+export type RunPullRequest = Omit<typeof runPullRequests.$inferSelect, "runId">;
 export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
