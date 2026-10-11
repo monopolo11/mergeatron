@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api, timeAgo } from "@/lib/api";
 import { tokenCount, usd } from "@/lib/format";
@@ -302,6 +303,14 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
 
       <div className="grid gap-4 p-3 text-xs">
         <dl className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-1 [&_dt]:text-muted-foreground">
+          <dt>Run</dt>
+          <dd className="font-mono wrap-anywhere select-all">{run.id}</dd>
+          {run.followUpOf && (
+            <>
+              <dt>Follows up</dt>
+              <dd className="min-w-0"><FollowedRun id={run.followUpOf} /></dd>
+            </>
+          )}
           <dt>Status</dt>
           <dd className="wrap-anywhere"><RunStatus run={run}>{run.detail || null}</RunStatus></dd>
           <dt>Rule</dt>
@@ -352,6 +361,17 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
         <RatingForm key={run.id} run={run} onNext={onNext} />
       </div>
     </div>
+  );
+}
+
+/** The earlier run a run follows up, as a link that opens it beside the table. Falls back to the id while it loads. */
+function FollowedRun({ id }: { id: string }) {
+  const search = useSearch({ from: "/runs" });
+  const { data: run } = useQuery({ queryKey: ["run", id], queryFn: () => api<RunDetail>(`/api/runs/${id}`) });
+  return (
+    <Link to="/runs" search={{ ...search, run: id }} replace className="link block truncate" title={run?.title ?? id}>
+      {run ? <><span className="font-mono text-muted-foreground">{target(run)}</span> {run.title}</> : <span className="font-mono">{id}</span>}
+    </Link>
   );
 }
 
@@ -457,13 +477,15 @@ function DeleteRun({ id, onDeleted }: { id: string; onDeleted: () => void }) {
 }
 
 /**
- * A 0 to 10 score and written feedback; either one alone saves, and saving
- * again replaces the rating. ⌘⏎ saves and opens the next unrated run.
+ * A 0 to 10 score and written feedback, and the id of the earlier run this one
+ * follows up (a run that fixes a previous implementation); a score or feedback
+ * alone saves, and saving again replaces the rating. ⌘⏎ saves and opens the next unrated run.
  */
 function RatingForm({ run, onNext }: { run: RunDetail; onNext: (() => void) | null }) {
   const queryClient = useQueryClient();
   const [rating, setRating] = useState(run.rating);
   const [feedback, setFeedback] = useState(run.feedback ?? "");
+  const [followUpOf, setFollowUpOf] = useState(run.followUpOf ?? "");
   const save = useMutation({
     mutationFn: (input: RunRatingInput) => api<RunSummary>(`/api/runs/${run.id}/rating`, { method: "PUT", body: JSON.stringify(input) }),
     onSuccess: () => {
@@ -473,11 +495,12 @@ function RatingForm({ run, onNext }: { run: RunDetail; onNext: (() => void) | nu
   });
 
   const written = feedback.trim();
-  const changed = rating !== run.rating || written !== (run.feedback ?? "");
+  const followed = followUpOf.trim();
+  const changed = rating !== run.rating || written !== (run.feedback ?? "") || followed !== (run.followUpOf ?? "");
   const canSave = changed && (rating !== null || written !== "") && !save.isPending;
   /** Saves when there is something new, then moves on when asked; with nothing to save, just moves on. */
   const submit = (thenNext: boolean) => {
-    if (canSave) save.mutate({ rating, feedback: written || null }, { onSuccess: () => thenNext && onNext?.() });
+    if (canSave) save.mutate({ rating, feedback: written || null, followUpOf: followed || null }, { onSuccess: () => thenNext && onNext?.() });
     else if (thenNext && !changed) onNext?.();
   };
 
@@ -511,6 +534,13 @@ function RatingForm({ run, onNext }: { run: RunDetail; onNext: (() => void) | nu
             submit(true);
           }
         }}
+      />
+      <Input
+        value={followUpOf}
+        placeholder="Follows up run (id of the run it fixes)"
+        className="h-7 font-mono text-xs"
+        aria-label="Run this one follows up"
+        onChange={(e) => setFollowUpOf(e.target.value)}
       />
       <div className="flex items-center gap-2">
         <Button size="xs" disabled={!canSave} onClick={() => submit(false)}>Save</Button>

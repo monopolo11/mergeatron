@@ -39,6 +39,7 @@ const EXPECTED = new Set([
   "ChannelNotAllowedError",
   "PromptNotFoundError",
   "RunNotFoundError",
+  "InvalidFollowUpError",
   "RuleNotFoundError",
   "SchemaError",
 ]);
@@ -261,7 +262,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "list_runs",
       {
         description:
-          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), what it spent (usage: tokens by kind and estimated costUsd, subagents included; null until measured when the run settles), and its rating and written review. Leaves out the context and reply; read those with get_run.",
+          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), what it spent (usage: tokens by kind and estimated costUsd, subagents included; null until measured when the run settles), and its rating, written review and the run it follows up (followUpOf). Leaves out the context and reply; read those with get_run.",
         inputSchema: {
           rule_id: z.string().optional().describe("Only runs of this rule; dispatch, handoff and manual are the ids of runs without a stored rule"),
           status: z.enum(RUN_STATUSES).optional(),
@@ -309,15 +310,16 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "rate_run",
       {
         description:
-          "Rate a run: a written review of how it went, with an optional score from 0 (useless) to 10 (perfect). Rating again replaces the earlier rating. Ratings feed run_analytics, to compare prompt versions and models.",
+          "Rate a run: a written review of how it went, with an optional score from 0 (useless) to 10 (perfect). Set follow_up_of when this run follows up an earlier one, i.e. addresses (fixes) that run's implementation. Rating again replaces the earlier rating, link included. Ratings feed run_analytics, to compare prompt versions and models.",
         inputSchema: {
           run_id: runId,
           feedback: z.string().trim().min(1).describe("Written review: what was good or bad about the run, in Markdown"),
           rating: z.number().int().min(0).max(10).optional().describe("Score from 0 to 10"),
+          follow_up_of: z.string().trim().min(1).optional().describe("Id of the earlier run this one follows up (addresses its implementation), from list_runs"),
         },
         annotations: { destructiveHint: false, idempotentHint: true },
       },
-      ({ run_id, feedback, rating }) => result("rate_run", rateRun(run_id, { feedback, rating: rating ?? null })),
+      ({ run_id, feedback, rating, follow_up_of }) => result("rate_run", rateRun(run_id, { feedback, rating: rating ?? null, followUpOf: follow_up_of ?? null })),
     );
 
     server.registerTool(

@@ -9,13 +9,16 @@ const log = logger("runs");
 /** The run asked for does not exist. */
 export class RunNotFoundError extends Data.TaggedError("RunNotFoundError")<{ readonly message: string }> {}
 
+/** A run cannot follow itself up. */
+export class InvalidFollowUpError extends Data.TaggedError("InvalidFollowUpError")<{ readonly message: string }> {}
+
 /** The run is queued or its thread is still working, so it holds a slot in its rule's queue. */
 export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonly message: string }> {}
 
 /**
  * The run history behind the MCP tools: every run with the trigger, prompt
  * versions and model it started with, what its thread spent, and an optional
- * rating with a written review, so prompt versions and models can be compared
+ * rating with a written review and a link to the run it follows up, so prompt versions and models can be compared
  * (see Store.analytics).
  */
 
@@ -80,9 +83,12 @@ export const getRun = Effect.fn("runs.get")(function* (id: string) {
   return detail;
 });
 
-/** Rates a run, replacing an earlier rating. */
+/** Rates a run, replacing an earlier rating. `followUpOf` must be another existing run. */
 export const rateRun = Effect.fn("runs.rate")(function* (id: string, rating: RunRating) {
-  const run = yield* (yield* Store).rateRun(id, rating);
+  const store = yield* Store;
+  if (rating.followUpOf === id) return yield* Effect.fail(new InvalidFollowUpError({ message: "A run cannot follow itself up." }));
+  if (rating.followUpOf && !(yield* store.getRun(rating.followUpOf))) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${rating.followUpOf}.` }));
+  const run = yield* store.rateRun(id, rating);
   if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
   yield* log.info("run rated", { run: id, rating: rating.rating ?? undefined });
   const [detail] = yield* withPromptRefs([run]);

@@ -49,9 +49,14 @@ describe("RunRatingInput", () => {
 
   test("takes a score without feedback, and feedback without a score", () => {
     const scored = decode({ rating: 7 });
-    expect(Result.isSuccess(scored) && scored.success).toEqual({ rating: 7, feedback: null });
+    expect(Result.isSuccess(scored) && scored.success).toEqual({ rating: 7, feedback: null, followUpOf: null });
     const written = decode({ feedback: " missed the DST bug " });
-    expect(Result.isSuccess(written) && written.success).toEqual({ rating: null, feedback: "missed the DST bug" });
+    expect(Result.isSuccess(written) && written.success).toEqual({ rating: null, feedback: "missed the DST bug", followUpOf: null });
+  });
+
+  test("takes the run it follows up, trimmed", () => {
+    const followUp = decode({ rating: 7, followUpOf: " run-1 " });
+    expect(Result.isSuccess(followUp) && followUp.success).toMatchObject({ followUpOf: "run-1" });
   });
 
   test("needs one of them, and a score from 0 to 10", () => {

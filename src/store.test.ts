@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { linear, pr, rule } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Run, type RunUsage } from "./rules.ts";
-import { deleteRun, getRun, RunActiveError, RunNotFoundError } from "./runHistory.ts";
+import { deleteRun, getRun, InvalidFollowUpError, RunActiveError, RunNotFoundError, rateRun } from "./runHistory.ts";
 import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
 import { Store, type RunInput } from "./store.ts";
 import { failureOf, runWith, testLayer } from "./testing.ts";
@@ -109,10 +109,10 @@ describe("run history", () => {
         const v2b = yield* store.recordRun(run({ status: "done", promptRefs: [ref(2), edited], ...fable }));
         yield* store.recordRun(run({ status: "skipped" }));
 
-        expect(yield* store.rateRun(v1.id, { rating: 4, feedback: "missed the bug" })).toMatchObject({ rating: 4, feedback: "missed the bug" });
-        yield* store.rateRun(v2.id, { rating: 9, feedback: "found it" });
-        yield* store.rateRun(v2b.id, { rating: null, feedback: "no score, just notes" });
-        expect(yield* store.rateRun("gone", { rating: 1, feedback: "x" })).toBeNull();
+        expect(yield* store.rateRun(v1.id, { rating: 4, feedback: "missed the bug", followUpOf: null })).toMatchObject({ rating: 4, feedback: "missed the bug", followUpOf: null });
+        yield* store.rateRun(v2.id, { rating: 9, feedback: "found it", followUpOf: null });
+        yield* store.rateRun(v2b.id, { rating: null, feedback: "no score, just notes", followUpOf: null });
+        expect(yield* store.rateRun("gone", { rating: 1, feedback: "x", followUpOf: null })).toBeNull();
 
         const ids = (runs: { id: string }[]) => runs.map((r) => r.id);
         expect(ids(yield* store.listRuns({ prompt: { owner: "preset", id: p1.id } }))).toEqual([v2b.id, v2.id, v1.id]);
@@ -207,6 +207,25 @@ describe("run history", () => {
         expect(yield* failureOf(deleteRun(started.id))).toBeInstanceOf(RunActiveError);
         expect(yield* store.getRun(started.id)).not.toBeNull();
         expect(yield* failureOf(deleteRun(done.id))).toBeInstanceOf(RunNotFoundError);
+      }),
+    ));
+
+  test("a follow-up run links to the run it addresses, which must exist and not be itself", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const original = yield* store.recordRun(run({ status: "done" }));
+        const fix = yield* store.recordRun(run({ status: "done" }));
+        const rating = { rating: 8, feedback: "fixed it" };
+
+        expect(yield* rateRun(fix.id, { ...rating, followUpOf: original.id })).toMatchObject({ followUpOf: original.id });
+        expect(yield* failureOf(rateRun(fix.id, { ...rating, followUpOf: fix.id }))).toBeInstanceOf(InvalidFollowUpError);
+        expect(yield* failureOf(rateRun(fix.id, { ...rating, followUpOf: "gone" }))).toBeInstanceOf(RunNotFoundError);
+        expect((yield* getRun(fix.id)).followUpOf).toBe(original.id);
+
+        yield* deleteRun(original.id);
+        expect((yield* getRun(fix.id)).followUpOf).toBeNull();
       }),
     ));
 

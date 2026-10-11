@@ -176,10 +176,11 @@ export const RunQuery = Schema.Struct({
   limit: Schema.optional(intFromString.check(Schema.isBetween({ minimum: 1, maximum: 500 }))),
 });
 
-/** A rating from the runs page: a 0 to 10 score, written feedback, or both. Rating again replaces it. */
+/** A rating from the runs page: a 0 to 10 score, written feedback, or both, and the earlier run this one follows up. Rating again replaces it. */
 export const RunRatingInput = Schema.Struct({
   rating: Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10 }))).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   feedback: cleanedOrNull((text) => text),
+  followUpOf: optionalName,
 }).check(Schema.makeFilter((input) => (input.rating !== null || input.feedback !== null ? undefined : "Give a score, feedback or both.")));
 export type RunRatingInput = typeof RunRatingInput.Type;
 
@@ -209,5 +210,5 @@ export type RowChecks = [
   Extends<SettingsInput["polling"], PollingSettings>,
   Extends<RuleInput["filters"], RuleFilters>,
   Extends<SettingsInput["sentryFilters"], SentryFilters>,
-  Extends<RunRatingInput, Pick<Run, "rating" | "feedback">>,
+  Extends<RunRatingInput, Pick<Run, "rating" | "feedback" | "followUpOf">>,
 ];

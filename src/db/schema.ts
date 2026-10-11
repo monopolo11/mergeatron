@@ -236,6 +236,8 @@ export const runs = sqliteTable(
     /** Written review of the run that goes with the rating. */
     feedback: text(),
     ratedAt: text("rated_at"),
+    /** The earlier run this one follows up: it addresses (fixes) that run's implementation. Set with the rating; cleared if that run is deleted. */
+    followUpOf: text("follow_up_of"),
     /** When the T3 thread opened; later than `createdAt` by any queue wait. Null if no thread ever opened. */
     startedAt: text("started_at"),
     /** When the run reached done, skipped or failed. */
@@ -252,6 +254,7 @@ export const runs = sqliteTable(
     // Time-range scans, newest first.
     index("runs_created_at_idx").on(table.createdAt),
     index("runs_model_idx").on(table.modelId, table.modelInstanceId),
+    foreignKey({ columns: [table.followUpOf], foreignColumns: [table.id] }).onDelete("set null"),
   ],
 );
 

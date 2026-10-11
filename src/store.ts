@@ -120,7 +120,7 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
 /** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, or when it is rated. */
-type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs";
+type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs";
 
 /** Statuses that end a run. */
 export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
@@ -141,8 +141,8 @@ export type RunInput = Omit<Run, "id" | "createdAt" | RunOutcome> &
 /** A change to a run. `settledAt` and `elapsedMs` are the store's to set; `promptRefs` replace the run's prompt versions. */
 export type RunPatch = Partial<Omit<Run, "id" | "createdAt" | "settledAt" | "elapsedMs">> & { promptRefs?: PromptRef[] };
 
-/** A rating: 0 to 10 or none, with the written review that goes with it. */
-export type RunRating = Pick<Run, "rating" | "feedback">;
+/** A rating: 0 to 10 or none, with the written review that goes with it and the earlier run this one follows up. */
+export type RunRating = Pick<Run, "rating" | "feedback" | "followUpOf">;
 
 /**
  * Typed access to rules, prompt presets and their versions, global settings,

@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `follow_up_of` text REFERENCES runs(id) ON DELETE set null;

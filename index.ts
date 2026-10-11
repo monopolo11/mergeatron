@@ -52,7 +52,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, RunActiveError: 409, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
