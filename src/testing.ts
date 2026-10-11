@@ -6,6 +6,7 @@ import { PullRequests, type PullRequestsShape } from "./pulls.ts";
 import { SlackClient, type SlackClientShape } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, T3HttpError, type T3Shape } from "./t3.ts";
+import { Usage, type UsageShape } from "./usage.ts";
 
 /**
  * Fakes and layers for tests: an in-memory store, background supervision,
@@ -44,8 +45,14 @@ export const fakePulls = (overrides: Partial<PullRequestsShape> = {}): PullReque
   ...overrides,
 });
 
+/** Finds no session logs, so runs record no usage unless a test gives some. */
+export const fakeUsage = (overrides: Partial<UsageShape> = {}): UsageShape => ({
+  session: () => Effect.succeed(null),
+  ...overrides,
+});
+
 /** Fresh services per use: in-memory store, supervision, the line logger, and the fakes (Slack off unless given). */
-export const testLayer = (fakes: { t3?: T3Shape; slack?: SlackClientShape; pulls?: PullRequestsShape } = {}) =>
+export const testLayer = (fakes: { t3?: T3Shape; slack?: SlackClientShape; pulls?: PullRequestsShape; usage?: UsageShape } = {}) =>
   Layer.mergeAll(
     loggerLayer,
     Store.layerMemory,
@@ -54,6 +61,7 @@ export const testLayer = (fakes: { t3?: T3Shape; slack?: SlackClientShape; pulls
     Layer.succeed(T3, fakes.t3 ?? fakeT3()),
     Layer.succeed(SlackClient, fakes.slack ?? SlackClient.disabled),
     Layer.succeed(PullRequests, fakes.pulls ?? fakePulls()),
+    Layer.succeed(Usage, fakes.usage ?? fakeUsage()),
   );
 
 export type TestServices = Layer.Success<ReturnType<typeof testLayer>>;

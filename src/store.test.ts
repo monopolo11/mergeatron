@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { linear, pr, rule } from "./inbox.test.ts";
-import { DEFAULT_SETTINGS, type Run } from "./rules.ts";
-import { deleteRun, RunActiveError, RunNotFoundError } from "./runHistory.ts";
+import { DEFAULT_SETTINGS, type Run, type RunUsage } from "./rules.ts";
+import { deleteRun, getRun, RunActiveError, RunNotFoundError } from "./runHistory.ts";
 import { DEFAULT_POLLING, HANDOFF_EVENT } from "./shared.ts";
 import { Store, type RunInput } from "./store.ts";
 import { failureOf, runWith, testLayer } from "./testing.ts";
@@ -82,6 +82,15 @@ describe("Store.analytics", () => {
 
 describe("run history", () => {
   const preset = (version: number) => ({ owner: "preset" as const, id: "p1", version });
+  const unmeasured = {
+    measured: 0,
+    totalCostUsd: null,
+    avgCostUsd: null,
+    avgInputTokens: null,
+    avgOutputTokens: null,
+    avgCacheCreationTokens: null,
+    avgCacheReadTokens: null,
+  };
   const opus = { modelInstanceId: "claudeAgent", modelId: "claude-opus-5-5" };
   const fable = { modelInstanceId: "claudeAgent", modelId: "claude-fable-5-1" };
 
@@ -112,7 +121,7 @@ describe("run history", () => {
         expect(yield* store.listRuns({ rated: false })).toHaveLength(1);
 
         const { byPrompt, byModel } = yield* store.analytics();
-        const counts = { queued: 0, started: 0, done: 2, skipped: 0, failed: 0 };
+        const counts = { queued: 0, started: 0, done: 2, skipped: 0, failed: 0, ...unmeasured };
         expect(byPrompt).toEqual([
           { ...edited, name: "Review PR", ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
           { ...ref(2), name: "review", ...counts, total: 2, rated: 1, avgRating: 9, avgElapsedMs: null },
@@ -121,6 +130,41 @@ describe("run history", () => {
         expect(byModel).toEqual([
           { ...opus, ...counts, total: 2, rated: 2, avgRating: 6.5, avgElapsedMs: null },
           { ...fable, ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+        ]);
+      }),
+    ));
+
+  test("lists measured runs by cost, averages usage per prompt version, and finds runs left to measure", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const p1 = yield* store.createPrompt({ name: "review", body: "x" });
+        const refs = [{ ...preset(1), id: p1.id }];
+        const cheap = yield* store.recordRun(run({ status: "done", threadId: "t1", promptRefs: refs, ...opus }));
+        const pricey = yield* store.recordRun(run({ status: "done", threadId: "t2", promptRefs: refs, ...opus }));
+        const unmeasured = yield* store.recordRun(run({ status: "failed", threadId: "t3", promptRefs: refs, ...opus }));
+        yield* store.recordRun(run({ status: "skipped" }));
+        const usage = (costUsd: number, outputTokens: number): RunUsage => ({
+          inputTokens: 10,
+          outputTokens,
+          cacheCreationTokens: 100,
+          cacheReadTokens: 1000,
+          totalTokens: 1110 + outputTokens,
+          costUsd,
+          models: ["claude-opus-5-5"],
+          sessionIds: ["s1"],
+          collectedAt: "2026-10-11T00:00:00.000Z",
+        });
+        yield* store.saveRunUsage(cheap.id, usage(0.5, 100));
+        yield* store.saveRunUsage(pricey.id, usage(1, 200));
+        yield* store.saveRunUsage(pricey.id, usage(1.5, 300)); // measured again: replaces
+
+        expect((yield* store.listRuns({ sort: "cost" })).map((r) => r.id)).toEqual([pricey.id, cheap.id]);
+        expect((yield* getRun(cheap.id)).usage).toMatchObject({ costUsd: 0.5, outputTokens: 100 });
+        expect(yield* store.runsWithoutUsage("2026-01-01T00:00:00.000Z")).toEqual([{ id: unmeasured.id, threadId: "t3" }]);
+        expect((yield* store.analytics()).byPrompt).toMatchObject([
+          { total: 3, measured: 2, totalCostUsd: 2, avgCostUsd: 1, avgInputTokens: 10, avgOutputTokens: 200, avgCacheCreationTokens: 100, avgCacheReadTokens: 1000 },
         ]);
       }),
     ));

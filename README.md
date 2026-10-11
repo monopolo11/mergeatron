@@ -428,6 +428,28 @@ API is `GET /api/runs/history` (the filters as `ruleId`, `source`, `model`,
 `promptOwner`, `promptId`, `promptVersion`, `since`, `limit`), `GET /api/runs/:id`
 and `PUT /api/runs/:id/rating` with `{ rating, feedback }`.
 
+### Usage and cost
+
+When a run settles, the orchestrator measures what its thread spent with
+[ccusage](https://github.com/ccusage/ccusage), run through `bun x ccusage@20`
+(fetched on first use, nothing to install). T3 names the Claude Code session
+behind each thread; ccusage reads that session's log in `~/.claude/projects`,
+subagents included, and the run stores input, output, cache creation and cache
+read tokens, the estimated cost in USD (list prices, not your bill) and every
+model that answered (table `run_usage`). Tasks the thread delegated through T3
+run in threads of their own and count too, however deep; turn off **Count
+delegated tasks** in **Settings → Defaults** to measure the run's own thread
+only. Runs from the last 30 days that have no
+usage yet (older runs, or a measurement that failed) are measured at startup;
+older logs are usually gone, since Claude Code prunes them after 30 days. Threads on other
+providers record nothing.
+
+Usage shows up on the runs from the MCP tools and the API: `list_runs` and
+`get_run` carry it as `usage` (null until measured), `list_runs` with `sort:
+"cost"` lists the most expensive measured runs first, and `run_analytics` adds
+measured counts, total and average cost and average tokens by kind to each
+prompt version and model, so a version can be judged on rating and cost together.
+
 ## Analytics
 
 **Analytics** in the header swaps the editor for run counts: totals, runs per PR

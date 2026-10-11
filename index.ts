@@ -27,6 +27,7 @@ import { Store } from "./src/store.ts";
 import { supervisorLayer } from "./src/supervisor.ts";
 import { T3 } from "./src/t3.ts";
 import { Updater } from "./src/update.ts";
+import { backfillUsage, Usage } from "./src/usage.ts";
 
 const log = logger("server");
 const webhookLog = logger("webhook");
@@ -35,7 +36,7 @@ const webhookLog = logger("webhook");
  * The service is one Effect layer graph, launched with BunRuntime.runMain:
  *
  *   platform (HTTP client, WebSocket constructor, child processes) + AppConfig
- *     └─ services: Database → Store, T3, SlackClient, PullRequests, Background, RunEvents, Updater
+ *     └─ services: Database → Store, T3, SlackClient, PullRequests, Background, RunEvents, Updater, Usage
  *          └─ Sentry
  *               └─ Poller, SlackSocket
  *                    └─ HTTP API, MCP API, supervisor, startup, telemetry
@@ -513,17 +514,22 @@ const slackSocketLayer = Layer.effect(
   }),
 );
 
-/** Seeds presets, re-attaches watchers and queues left by the previous process, starts polling, and says hello. */
+/**
+ * Seeds presets, re-attaches watchers and queues left by the previous process,
+ * starts polling, measures runs that settled without usage, and says hello.
+ */
 const startupLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* AppConfig;
     const store = yield* Store;
     const t3 = yield* T3;
     const poller = yield* Poller;
+    const background = yield* Background;
     yield* store.ensureDefaultPrompts();
     yield* resumeWatchers;
     yield* Effect.forEach(yield* store.queuedRuleIds(), startQueued, { discard: true });
     yield* poller.start;
+    yield* background.fork(backfillUsage().pipe(Effect.catchCause((cause) => log.warn("usage backfill failed", { error: errorMessage(Cause.squash(cause)) }))));
     yield* log.info("GitHub -> T3 Code orchestrator started", {
       url: `http://localhost:${config.port}/`,
       t3: t3.origin,
@@ -567,6 +573,7 @@ const servicesLayer = Layer.mergeAll(
   Background.layer,
   RunEvents.layer,
   Updater.layer,
+  Usage.layer,
 ).pipe(Layer.provideMerge(Layer.mergeAll(AppConfig.layer, platformLayer)));
 const appLayer = Layer.mergeAll(Poller.layer, slackSocketLayer).pipe(Layer.provideMerge(Sentry.layer), Layer.provideMerge(servicesLayer));
 

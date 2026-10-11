@@ -1,8 +1,8 @@
-import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql, type AnyColumn } from "drizzle-orm";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runUsage, runs, settings } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -16,6 +16,7 @@ import {
   type RuleUpdate,
   type Run,
   type RunAction,
+  type RunUsage,
   type Settings,
 } from "./rules.ts";
 import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type PromptOwner, type PromptVersionOwner, type PromptVersionSource, type RunSource } from "./shared.ts";
@@ -37,9 +38,22 @@ export type RunCounts = { total: number; queued: number; started: number; done: 
 
 /**
  * Run counts plus how many were rated, their mean rating (0 to 10) and the
- * mean time threads worked; null when no run had one.
+ * mean time threads worked; then how many had their usage measured (see
+ * `runUsage`), their summed and mean estimated cost in USD and mean tokens
+ * by kind. Sums and means are null when no run had one.
  */
-export type RunStats = RunCounts & { rated: number; avgRating: number | null; avgElapsedMs: number | null };
+export type RunStats = RunCounts & {
+  rated: number;
+  avgRating: number | null;
+  avgElapsedMs: number | null;
+  measured: number;
+  totalCostUsd: number | null;
+  avgCostUsd: number | null;
+  avgInputTokens: number | null;
+  avgOutputTokens: number | null;
+  avgCacheCreationTokens: number | null;
+  avgCacheReadTokens: number | null;
+};
 
 export type Analytics = {
   all: RunCounts;
@@ -68,6 +82,8 @@ export type RunFilter = {
   rated?: boolean;
   /** ISO timestamp: runs created at or after it. */
   since?: string;
+  /** `recent` (default): newest first. `cost`: measured runs only, most expensive first. */
+  sort?: "recent" | "cost";
   limit?: number;
 };
 
@@ -409,6 +425,15 @@ export function makeStore(db: AppDatabase) {
                 ),
             ),
         );
+        if (filter.sort === "cost")
+          return db
+            .select(getTableColumns(runs))
+            .from(runs)
+            .innerJoin(runUsage, eq(runUsage.runId, runs.id))
+            .where(where)
+            .orderBy(desc(runUsage.costUsd), desc(runs.createdAt))
+            .limit(limit)
+            .all();
         return db.select().from(runs).where(where).orderBy(desc(runs.createdAt), desc(sql`rowid`)).limit(limit).all();
       }),
 
@@ -424,7 +449,7 @@ export function makeStore(db: AppDatabase) {
             .get() ?? null,
       ),
 
-    /** Deletes a run; its prompt versions and action go with it (the foreign keys cascade). False when there is no such run. */
+    /** Deletes a run; its prompt versions, action and usage go with it (the foreign keys cascade). False when there is no such run. */
     deleteRun: (id: string) => Effect.sync(() => db.delete(runs).where(eq(runs.id, id)).returning({ id: runs.id }).get() !== undefined),
 
     /** True when this delivery was already handled for the rule (GitHub retries deliveries). */
@@ -512,6 +537,31 @@ export function makeStore(db: AppDatabase) {
       }),
 
     getRun: (id: string) => Effect.sync((): Run | null => db.select().from(runs).where(eq(runs.id, id)).get() ?? null),
+
+    /** Stores what a run's thread spent (see usage.ts), replacing an earlier measurement. */
+    saveRunUsage: (runId: string, usage: RunUsage) =>
+      Effect.sync(() => {
+        db.insert(runUsage).values({ runId, ...usage }).onConflictDoUpdate({ target: runUsage.runId, set: usage }).run();
+      }),
+
+    /** Usage of each run; runs not measured are left out. */
+    runUsage: (runIds: string[]) =>
+      Effect.sync((): Map<string, RunUsage> => {
+        const rows = runIds.length === 0 ? [] : db.select().from(runUsage).where(inArray(runUsage.runId, runIds)).all();
+        return new Map(rows.map(({ runId, ...usage }) => [runId, usage]));
+      }),
+
+    /** Runs that ended with a thread, at or after `since`, and have no usage yet, oldest first: what `backfillUsage` measures. */
+    runsWithoutUsage: (since: string) =>
+      Effect.sync(() =>
+        db
+          .select({ id: runs.id, threadId: runs.threadId })
+          .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
+          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"]), gte(runs.settledAt, since), isNull(runUsage.runId)))
+          .orderBy(runs.settledAt)
+          .all(),
+      ),
 
     /** What a rule-driven run was set to start with; null for handoffs and connection tests. */
     getRunAction: (runId: string) =>
@@ -749,18 +799,28 @@ export function makeStore(db: AppDatabase) {
           .orderBy(desc(counts.total), runs.source)
           .all();
 
-        const rated = {
+        const avgInt = (column: AnyColumn) => sql<number | null>`cast(round(avg(${column})) as integer)`;
+        // Selected over runs left-joined to their usage (one row per run at most).
+        const stats = {
           ...counts,
           rated: count(runs.rating),
           avgRating: sql<number | null>`round(avg(${runs.rating}), 2)`,
           avgElapsedMs: sql<number | null>`cast(round(avg(${runs.elapsedMs})) as integer)`,
+          measured: count(runUsage.runId),
+          totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)`,
+          avgCostUsd: sql<number | null>`round(avg(${runUsage.costUsd}), 4)`,
+          avgInputTokens: avgInt(runUsage.inputTokens),
+          avgOutputTokens: avgInt(runUsage.outputTokens),
+          avgCacheCreationTokens: avgInt(runUsage.cacheCreationTokens),
+          avgCacheReadTokens: avgInt(runUsage.cacheReadTokens),
         };
         // The preset's or rule's name, or a dispatch's (its version note); null once a preset or rule is deleted.
         const name = sql<string | null>`coalesce(${prompts.name}, ${rules.name}, case when ${runPrompts.owner} = 'dispatch' then ${promptVersions.note} end)`;
         const byPrompt = db
-          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, ...rated })
+          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, ...stats })
           .from(runPrompts)
           .innerJoin(runs, eq(runs.id, runPrompts.runId))
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
           .innerJoin(
             promptVersions,
             and(eq(promptVersions.owner, runPrompts.owner), eq(promptVersions.ownerId, runPrompts.ownerId), eq(promptVersions.version, runPrompts.version)),
@@ -772,8 +832,9 @@ export function makeStore(db: AppDatabase) {
           .all();
 
         const byModel = db
-          .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, ...rated })
+          .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, ...stats })
           .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
           .where(isNotNull(runs.modelId))
           .groupBy(runs.modelInstanceId, runs.modelId)
           .orderBy(desc(counts.total))

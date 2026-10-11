@@ -39,7 +39,7 @@ function thread(overrides: Partial<T3Thread> = {}): T3Thread {
       reply("a3", "run1", "  "),
     ],
     turnItems: [],
-    subagents: [{ status: "running", updatedAt: at(-20_000) }],
+    subagents: [{ origin: "provider_native", childThreadId: null, status: "running", updatedAt: at(-20_000) }],
     providerThreads: [{ pendingBackgroundTasks: [], updatedAt: at(0) }],
     ...overrides,
   };
@@ -54,12 +54,12 @@ describe("threadOutcome", () => {
   test("waits while background work is pending, however long the thread is quiet", () => {
     const later = T0 + 30 * 60_000;
     expect(threadOutcome(thread(), later)).toBeNull();
-    expect(threadOutcome(thread({ subagents: [{ status: "completed", completionDelivery: { state: "pending" }, updatedAt: at(0) }] }), later)).toBeNull();
+    expect(threadOutcome(thread({ subagents: [{ origin: "provider_native", childThreadId: null, status: "completed", completionDelivery: { state: "pending" }, updatedAt: at(0) }] }), later)).toBeNull();
     expect(threadOutcome(thread({ subagents: [], providerThreads: [{ pendingBackgroundTasks: [{ taskId: "b1" }], updatedAt: at(0) }] }), later)).toBeNull();
   });
 
   test("waits for the quiet window after the last task reports, then settles on the last non-empty reply", () => {
-    const done = thread({ subagents: [{ status: "completed", completionDelivery: { state: "delivered" }, updatedAt: at(5_000) }] });
+    const done = thread({ subagents: [{ origin: "provider_native", childThreadId: null, status: "completed", completionDelivery: { state: "delivered" }, updatedAt: at(5_000) }] });
     expect(threadOutcome(done, T0 + 5_000 + QUIET_MS - 1)).toBeNull();
     expect(threadOutcome(done, T0 + 5_000 + QUIET_MS)).toEqual({
       status: "done",
@@ -72,7 +72,7 @@ describe("threadOutcome", () => {
     const verdict = thread({
       runs: [run(1, "completed"), run(2, "completed", 600_000), run(3, "rolled_back", 610_000)],
       messages: [reply("a2", "run1", "Standing by."), reply("b1", "run2", "Review published: APPROVED", 600_000)],
-      subagents: [{ status: "completed", updatedAt: at(590_000) }],
+      subagents: [{ origin: "provider_native", childThreadId: null, status: "completed", updatedAt: at(590_000) }],
     });
     expect(threadOutcome(verdict, T0 + 600_000 + QUIET_MS)?.result).toBe("Review published: APPROVED");
   });

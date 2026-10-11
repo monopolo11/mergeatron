@@ -149,6 +149,15 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                   </Field>
                 )}
               </form.Field>
+              <form.Field name="usageIncludesDelegatedTasks">
+                {(field) => (
+                  <Field label="Count delegated tasks" hint="A run's tokens and cost include the T3 tasks its thread delegates to other threads.">
+                    <div className="flex h-8 items-center">
+                      <Switch size="sm" checked={field.state.value} onCheckedChange={field.handleChange} />
+                    </div>
+                  </Field>
+                )}
+              </form.Field>
             </div>
           )}
 

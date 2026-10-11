@@ -22,7 +22,7 @@ import { SlackClient } from "./slack.ts";
  * rounds, and mark those threads merged (see reviewRequests.ts), read and
  * version the prompts rules and dispatches use (see promptVersions.ts),
  * list, create, edit and delete rules (see ruleAdmin.ts), and read, rate and
- * compare past runs (see runHistory.ts).
+ * compare past runs with what they spent (see runHistory.ts, usage.ts).
  * Stateless Streamable HTTP, one server per request;
  * index.ts serves it on loopback. Tool inputs stay zod schemas: that is what
  * the MCP SDK accepts and turns into the JSON Schema it advertises.
@@ -260,7 +260,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "list_runs",
       {
         description:
-          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), and its rating and written review. Leaves out the context and reply; read those with get_run.",
+          "List runs newest first: each thread a rule, dispatch, handoff or connection test started, with its trigger (event, source), status, the prompt versions its message is made of (promptRefs) and the model it started with, when it arrived (createdAt), its thread opened (startedAt) and it ended (settledAt), how long the thread worked (elapsedMs), what it spent (usage: tokens by kind and estimated costUsd, subagents included; null until measured when the run settles), and its rating and written review. Leaves out the context and reply; read those with get_run.",
         inputSchema: {
           rule_id: z.string().optional().describe("Only runs of this rule; dispatch, handoff and manual are the ids of runs without a stored rule"),
           status: z.enum(RUN_STATUSES).optional(),
@@ -271,11 +271,12 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
           model: z.string().optional().describe("Model id, e.g. claude-opus-5-5"),
           rated: z.boolean().optional().describe("true: rated runs only. false: runs not rated yet"),
           since: z.string().optional().describe("ISO timestamp: runs created at or after it"),
+          sort: z.enum(["recent", "cost"]).optional().describe("recent (default): newest first. cost: measured runs only, most expensive first"),
           limit: z.number().int().min(1).max(500).optional().describe("Default 50"),
         },
         annotations: { readOnlyHint: true },
       },
-      ({ rule_id, status, source, prompt_owner, prompt_id, prompt_version, model, rated, since, limit }) =>
+      ({ rule_id, status, source, prompt_owner, prompt_id, prompt_version, model, rated, since, sort, limit }) =>
         result(
           "list_runs",
           listRuns({
@@ -286,6 +287,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
             model,
             rated,
             since,
+            sort,
             limit: limit ?? 50,
           }),
         ),
@@ -295,7 +297,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "get_run",
       {
         description:
-          "Read one run in full: its trigger and template variables (context), what it was set to start with (action: the rule's project, workspace, requested model, preset and limit at the time), the first message (prompt, rendered from its prompt versions and context), the model used, the thread's final reply (result) and its rating.",
+          "Read one run in full: its trigger and template variables (context), what it was set to start with (action: the rule's project, workspace, requested model, preset and limit at the time), the first message (prompt, rendered from its prompt versions and context), the model used, what the thread spent (usage: tokens by kind, estimated costUsd, every model that answered and the Claude Code session ids measured), the thread's final reply (result) and its rating.",
         inputSchema: { run_id: runId },
         annotations: { readOnlyHint: true },
       },
@@ -321,7 +323,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "run_analytics",
       {
         description:
-          "Run counts by status: overall, per PR author, per trigger source, per prompt version (byPrompt) and per model (byModel), the last two with how many runs were rated, their average rating and average elapsedMs. Use it to compare prompt versions before promoting one.",
+          "Run counts by status: overall, per PR author, per trigger source, per prompt version (byPrompt) and per model (byModel), the last two with how many runs were rated, their average rating and average elapsedMs, and how many had usage measured with their total and average estimated cost in USD and average tokens by kind (input, output, cache creation, cache read). Use it to compare prompt versions before promoting one: quality (rating) against cost.",
         inputSchema: {},
         annotations: { readOnlyHint: true },
       },

@@ -1,6 +1,6 @@
 import { Data, Effect } from "effect";
 import { logger } from "./log.ts";
-import type { PromptRef, Run, RunAction } from "./rules.ts";
+import type { PromptRef, Run, RunAction, RunUsage } from "./rules.ts";
 import { SETTLED, Store, type RunFilter, type RunRating } from "./store.ts";
 import { joinPrompts, renderTemplate } from "./template.ts";
 
@@ -14,12 +14,16 @@ export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonl
 
 /**
  * The run history behind the MCP tools: every run with the trigger, prompt
- * versions and model it started with, and an optional rating with a written
- * review, so prompt versions and models can be compared (see Store.analytics).
+ * versions and model it started with, what its thread spent, and an optional
+ * rating with a written review, so prompt versions and models can be compared
+ * (see Store.analytics).
  */
 
-/** A run with the prompt versions its first message is made of (see `runPrompts`). */
-type RunWithPrompts = Run & { promptRefs: PromptRef[] };
+/**
+ * A run with the prompt versions its first message is made of (see
+ * `runPrompts`) and its tokens and estimated cost (see usage.ts), null until measured.
+ */
+type RunWithPrompts = Run & { promptRefs: PromptRef[]; usage: RunUsage | null };
 
 /**
  * The PR or issue a run is about, from its context. `ref` is `#12` for PRs
@@ -39,8 +43,11 @@ export type RunDetail = RunWithPrompts & RunSubject & { action: RunAction | null
 
 const withPromptRefs = (runs: Run[]) =>
   Effect.gen(function* () {
-    const refs = yield* (yield* Store).runPromptRefs(runs.map((run) => run.id));
-    return runs.map((run): RunWithPrompts => ({ ...run, promptRefs: refs.get(run.id) ?? [] }));
+    const store = yield* Store;
+    const ids = runs.map((run) => run.id);
+    const refs = yield* store.runPromptRefs(ids);
+    const usage = yield* store.runUsage(ids);
+    return runs.map((run): RunWithPrompts => ({ ...run, promptRefs: refs.get(run.id) ?? [], usage: usage.get(run.id) ?? null }));
   });
 
 const subject = (context: Run["context"]): RunSubject => {

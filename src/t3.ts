@@ -120,8 +120,13 @@ export type T3Thread = {
   messages: Array<{ id: string; runId: string | null; role: "user" | "assistant" | "system"; text: string; updatedAt: string }>;
   /** Same window as `messages`; a failed run records its reason as an `error` item. */
   turnItems: Array<{ runId: string | null; type: string; ordinal: number; failure?: { message: string } }>;
-  subagents: Array<{ status: string; completionDelivery?: { state: string }; updatedAt: string }>;
-  providerThreads: Array<{ pendingBackgroundTasks?: unknown[]; updatedAt: string }>;
+  /**
+   * `provider_native`: the agent's own subagents (Claude Code's Task tool), logged under its session.
+   * `app_owned`: tasks delegated through T3, each running in `childThreadId`, a thread of its own.
+   */
+  subagents: Array<{ origin: "provider_native" | "app_owned"; childThreadId: string | null; status: string; completionDelivery?: { state: string }; updatedAt: string }>;
+  /** The agent's own conversations; for Claude Code, `nativeThreadRef.nativeId` is its session id (the name of its log file). */
+  providerThreads: Array<{ pendingBackgroundTasks?: unknown[]; nativeThreadRef?: { driver: string; nativeId: string } | null; updatedAt: string }>;
 };
 
 export type StartThreadInput = {

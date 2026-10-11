@@ -1,11 +1,13 @@
-import { Clock, Duration, Effect, Metric, Option, Queue, Schedule } from "effect";
+import { Cause, Clock, Duration, Effect, Metric, Option, Queue, Schedule } from "effect";
 import { Background, RunEvents } from "./background.ts";
+import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3RunStatus, type T3Thread } from "./t3.ts";
+import { recordUsage, Usage } from "./usage.ts";
 import { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
 
 export { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
@@ -13,7 +15,7 @@ export { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.t
 const log = logger("completion");
 
 /** Everything a watcher needs; the handler and the poller run inside the same set. */
-export type CompletionServices = Store | T3 | SlackClient | Background | RunEvents;
+export type CompletionServices = Store | T3 | SlackClient | Background | RunEvents | Usage;
 
 const POLL = Duration.seconds(5);
 /** A review that has run this long is not going to report back; fail it and stop polling. */
@@ -158,7 +160,8 @@ export const resumeWatchers: Effect.Effect<void, never, CompletionServices> = Ef
 
 /**
  * Records the outcome and, for Slack runs, posts the reply. A review then
- * flips 👀 to the verdict's reaction; a handoff only posts its document. The
+ * flips 👀 to the verdict's reaction; a handoff only posts its document.
+ * What the thread spent is measured in the background (see usage.ts). The
  * supervisor then advances the rule's queue and checks whether the PR is stuck.
  */
 const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
@@ -166,6 +169,7 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
     const store = yield* Store;
     const slack = yield* SlackClient;
     const events = yield* RunEvents;
+    const background = yield* Background;
     const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
     yield* log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
     yield* Metric.update(Metric.withAttributes(runsSettled, { status: outcome.status }), 1);
@@ -173,6 +177,13 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
     yield* store.updateRun(runId, outcome);
     const run = yield* store.getRun(runId);
     if (!run) return;
+    yield* background.fork(
+      recordUsage(run).pipe(
+        // Measurement is all or nothing, so ride out a hiccup (T3 restarting, ccusage's first download) rather than wait for the next startup's backfill.
+        Effect.retry({ schedule: Schedule.spaced("30 seconds"), times: 2, while: (error) => !(error._tag === "T3HttpError" && error.status === 404) }),
+        Effect.catchCause((cause) => log.warn("usage not recorded", { run: runId, error: errorMessage(Cause.squash(cause)) })),
+      ),
+    );
     const review = run.event !== HANDOFF_EVENT;
     const origin = slackOrigin(run.context);
     if (origin) {

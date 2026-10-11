@@ -1,4 +1,4 @@
-import { foreignKey, index, integer, primaryKey, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { foreignKey, index, integer, primaryKey, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -100,6 +100,8 @@ export const settings = sqliteTable("settings", {
   slackUserId: text("slack_user_id"),
   /** React with `:skip:` instead of ⏩ when a Slack message is seen but not reviewed. */
   skipReaction: integer("skip_reaction", { mode: "boolean" }).notNull().default(false),
+  /** A run's usage also counts the T3 tasks its thread delegated, which run in threads of their own (see usage.ts). */
+  usageIncludesDelegatedTasks: integer("usage_includes_delegated_tasks", { mode: "boolean" }).notNull().default(true),
   /** Messages the MCP review tools post; see REVIEW_MESSAGE_VARS. */
   reviewRequestMessage: text("review_request_message").notNull().default(DEFAULT_REVIEW_REQUEST_MESSAGE),
   secondPassMessage: text("second_pass_message").notNull().default(DEFAULT_SECOND_PASS_MESSAGE),
@@ -329,6 +331,36 @@ export const runActions = sqliteTable(
     index("run_actions_preset_idx").on(table.presetId),
     index("run_actions_model_idx").on(table.modelId, table.modelInstanceId),
   ],
+);
+
+/**
+ * What a run's thread spent, as ccusage reads it from the agent's local
+ * session logs (see usage.ts): tokens by kind and the estimated cost, summed
+ * over the thread's provider sessions, subagents included. Measured when the
+ * run settles; no row means it was not measured (no thread, no logs found).
+ */
+export const runUsage = sqliteTable(
+  "run_usage",
+  {
+    runId: text("run_id")
+      .primaryKey()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    cacheCreationTokens: integer("cache_creation_tokens").notNull(),
+    cacheReadTokens: integer("cache_read_tokens").notNull(),
+    /** The four kinds above added up. */
+    totalTokens: integer("total_tokens").notNull(),
+    /** Estimated from list prices by ccusage, not what was billed. */
+    costUsd: real("cost_usd").notNull(),
+    /** Every model that answered, main agent and subagents, e.g. `claude-opus-5-5`. */
+    models: text({ mode: "json" }).$type<string[]>().notNull(),
+    /** Provider session ids measured (Claude Code session ids). */
+    sessionIds: text("session_ids", { mode: "json" }).$type<string[]>().notNull(),
+    collectedAt: text("collected_at").notNull(),
+  },
+  // Most expensive runs first (list_runs sort "cost").
+  (table) => [index("run_usage_cost_idx").on(table.costUsd)],
 );
 
 /**

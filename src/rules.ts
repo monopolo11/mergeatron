@@ -1,5 +1,5 @@
 import { Effect, Schema, SchemaGetter } from "effect";
-import type { promptVersions, prompts, reviewRequests, rules, runs, settings } from "./db/schema.ts";
+import type { promptVersions, prompts, reviewRequests, rules, runUsage, runs, settings } from "./db/schema.ts";
 import { parseLabels } from "./labelQuery.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -22,6 +22,8 @@ import {
 
 export type Rule = typeof rules.$inferSelect;
 export type Run = typeof runs.$inferSelect;
+/** Tokens and estimated cost of a run's thread, without the run id. */
+export type RunUsage = Omit<typeof runUsage.$inferSelect, "runId">;
 export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
@@ -111,6 +113,7 @@ export const SettingsInput = Schema.Struct({
   reviewChannel: cleanedOrNull((channel) => channel),
   slackUserId: cleanedOrNull((user) => user.replace(/^<?@?([^>|]+).*$/, "$1")),
   skipReaction: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  usageIncludesDelegatedTasks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   reviewRequestMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_REVIEW_REQUEST_MESSAGE))),
   secondPassMessage: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SECOND_PASS_MESSAGE))),
   polling: Schema.Struct({
@@ -189,6 +192,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reviewChannel: null,
   slackUserId: null,
   skipReaction: false,
+  usageIncludesDelegatedTasks: true,
   reviewRequestMessage: DEFAULT_REVIEW_REQUEST_MESSAGE,
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,
