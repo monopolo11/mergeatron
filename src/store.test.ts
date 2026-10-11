@@ -53,8 +53,8 @@ describe("Store.analytics", () => {
         const analytics = yield* store.analytics();
         expect(analytics.all).toEqual({ total: 5, queued: 0, started: 2, done: 1, skipped: 1, failed: 1 });
         expect(analytics.byAuthor).toEqual([
-          { author: "alice", total: 2, queued: 0, started: 1, done: 0, skipped: 0, failed: 1 },
-          { author: "bob", total: 2, queued: 0, started: 0, done: 1, skipped: 1, failed: 0 },
+          { author: "alice", total: 2, queued: 0, started: 1, done: 0, skipped: 0, failed: 1, totalCostUsd: null },
+          { author: "bob", total: 2, queued: 0, started: 0, done: 1, skipped: 1, failed: 0, totalCostUsd: null },
         ]);
         expect(analytics.bySource).toEqual([
           { source: "github", total: 3, queued: 0, started: 1, done: 0, skipped: 1, failed: 1 },
@@ -169,6 +169,7 @@ describe("run history", () => {
           { total: 3, measured: 2, totalCostUsd: 2, avgCostUsd: 1, avgInputTokens: 10, avgOutputTokens: 200, avgCacheCreationTokens: 100, avgCacheReadTokens: 1000 },
         ]);
         expect(analytics.usage).toEqual({ runs: 3, measured: 2, totalCostUsd: 2 });
+        expect(analytics.byAuthor).toMatchObject([{ author: "alice", total: 4, totalCostUsd: 2 }]);
       }),
     ));
 

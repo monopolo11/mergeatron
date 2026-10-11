@@ -87,6 +87,7 @@ export function Analytics() {
           <CountsTable
             title="By author"
             keyHeader="Author"
+            cost
             rows={data.byAuthor.map((row) => ({ key: row.author, label: row.author, ...row }))}
             empty="No reviews with an author yet. Connection tests are not counted here."
           />
@@ -182,9 +183,10 @@ function cacheReadShare({ avgInputTokens, avgCacheCreationTokens, avgCacheReadTo
   return input === 0 ? null : avgCacheReadTokens / input;
 }
 
-type CountsRow = RunCounts & { key: string; label: string };
+type CountsRow = RunCounts & { key: string; label: string; totalCostUsd?: number | null };
 
-function CountsTable({ title, keyHeader, rows, empty }: { title: string; keyHeader: string; rows: CountsRow[]; empty?: string }) {
+/** Run counts per group; `cost` adds the estimated cost of the runs with usage measured, so rows need `totalCostUsd`. */
+function CountsTable({ title, keyHeader, rows, empty, cost }: { title: string; keyHeader: string; rows: CountsRow[]; empty?: string; cost?: boolean }) {
   return (
     <section className="grid gap-2">
       <Heading>{title}</Heading>
@@ -201,6 +203,7 @@ function CountsTable({ title, keyHeader, rows, empty }: { title: string; keyHead
               <TableHead className="text-right">Done</TableHead>
               <TableHead className="text-right">Skipped</TableHead>
               <TableHead className="text-right">Failed</TableHead>
+              {cost && <TableHead className="text-right">Cost</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -213,6 +216,7 @@ function CountsTable({ title, keyHeader, rows, empty }: { title: string; keyHead
                 <TableFigure value={row.done} tone="ok" />
                 <TableFigure value={row.skipped} tone="warn" />
                 <TableFigure value={row.failed} tone="err" />
+                {cost && <StatCell value={row.totalCostUsd ?? null} format={(total) => usd(total)} />}
               </TableRow>
             ))}
           </TableBody>

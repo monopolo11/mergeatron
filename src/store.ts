@@ -57,8 +57,8 @@ export type RunStats = RunCounts & {
 
 export type Analytics = {
   all: RunCounts;
-  /** Connection tests carry no author and are left out of this list. */
-  byAuthor: (RunCounts & { author: string })[];
+  /** Connection tests carry no author and are left out of this list. Cost is summed over the runs with usage measured, null when none. */
+  byAuthor: (RunCounts & { author: string; totalCostUsd: number | null })[];
   bySource: (RunCounts & { source: RunSource })[];
   /**
    * Per prompt version, to compare versions. A dispatch of stacked presets
@@ -788,8 +788,9 @@ export function makeStore(db: AppDatabase) {
         };
         const all = db.select(counts).from(runs).get() ?? { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 };
         const byAuthor = db
-          .select({ author: sql<string>`${runs.author}`, ...counts })
+          .select({ author: sql<string>`${runs.author}`, ...counts, totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)` })
           .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
           .where(sql`${runs.author} is not null`)
           .groupBy(runs.author)
           .orderBy(desc(counts.total), runs.author)
