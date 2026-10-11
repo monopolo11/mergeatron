@@ -440,9 +440,11 @@ model that answered (table `run_usage`). Tasks the thread delegated through T3
 run in threads of their own and count too, however deep; turn off **Count
 delegated tasks** in **Settings → Defaults** to measure the run's own thread
 only. Runs from the last 30 days that have no
-usage yet (older runs, or a measurement that failed) are measured at startup;
-older logs are usually gone, since Claude Code prunes them after 30 days. Threads on other
-providers record nothing.
+usage yet (older runs, or a measurement that failed) are measured at startup,
+and on demand with `POST /api/runs/usage/backfill` or the MCP `backfill_usage`
+tool, in the background, one run at a time; a backfill already running is not
+started twice. Older logs are usually gone, since Claude Code prunes them after
+30 days. Threads on other providers record nothing.
 
 Usage shows up on the runs from the MCP tools and the API: `list_runs` and
 `get_run` carry it as `usage` (null until measured), `list_runs` with `sort:

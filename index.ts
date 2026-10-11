@@ -27,7 +27,7 @@ import { Store } from "./src/store.ts";
 import { supervisorLayer } from "./src/supervisor.ts";
 import { T3 } from "./src/t3.ts";
 import { Updater } from "./src/update.ts";
-import { backfillUsage, Usage } from "./src/usage.ts";
+import { startBackfill, Usage } from "./src/usage.ts";
 
 const log = logger("server");
 const webhookLog = logger("webhook");
@@ -380,6 +380,8 @@ const api = HttpRouter.use((router) =>
         }),
       ),
     );
+    /** Measures settled runs without usage in the background (see src/usage.ts); answers how many it will try. */
+    yield* router.add("POST", "/api/runs/usage/backfill", route(Effect.map(startBackfill(), (started) => json(started, 202))));
     yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
     yield* router.add("DELETE", "/api/runs/:id", route(Effect.as(Effect.flatMap(param("id"), deleteRun), HttpServerResponse.empty({ status: 204 }))));
     yield* router.add(
@@ -524,12 +526,11 @@ const startupLayer = Layer.effectDiscard(
     const store = yield* Store;
     const t3 = yield* T3;
     const poller = yield* Poller;
-    const background = yield* Background;
     yield* store.ensureDefaultPrompts();
     yield* resumeWatchers;
     yield* Effect.forEach(yield* store.queuedRuleIds(), startQueued, { discard: true });
     yield* poller.start;
-    yield* background.fork(backfillUsage().pipe(Effect.catchCause((cause) => log.warn("usage backfill failed", { error: errorMessage(Cause.squash(cause)) }))));
+    yield* startBackfill();
     yield* log.info("GitHub -> T3 Code orchestrator started", {
       url: `http://localhost:${config.port}/`,
       t3: t3.origin,

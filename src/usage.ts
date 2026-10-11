@@ -1,5 +1,7 @@
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Cause, Context, Data, Effect, Layer, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
+import { Background } from "./background.ts";
+import { errorMessage } from "./errors.ts";
 import { execOk } from "./exec.ts";
 import { logger } from "./log.ts";
 import type { Run, RunUsage } from "./rules.ts";
@@ -157,15 +159,15 @@ export const recordUsage = Effect.fn("usage.record")(function* (run: Pick<Run, "
   return measured;
 });
 
+/** Settled runs that have no usage yet and whose logs may still exist (see LOG_RETENTION_DAYS), oldest first. */
+const unmeasuredRuns = Effect.flatMap(Store, (store) => store.runsWithoutUsage(new Date(Date.now() - LOG_RETENTION_DAYS * 86_400_000).toISOString()));
+
 /**
  * Measures settled runs that have no usage yet, one at a time: runs from
- * before usage was recorded, and runs whose measuring failed. Only runs
- * whose logs may still exist (see LOG_RETENTION_DAYS) are tried.
+ * before usage was recorded, and runs whose measuring failed.
  */
-export const backfillUsage = Effect.fn("usage.backfill")(function* () {
-  const since = new Date(Date.now() - LOG_RETENTION_DAYS * 86_400_000).toISOString();
-  const pending = yield* (yield* Store).runsWithoutUsage(since);
-  if (pending.length === 0) return;
+const backfillUsage = Effect.fn("usage.backfill")(function* () {
+  const pending = yield* unmeasuredRuns;
   // Threads deleted in T3 and pruned logs are expected here: count them instead of logging each.
   const outcomes = yield* Effect.forEach(pending, (run) => Effect.result(recordUsage(run)));
   yield* log.info("usage backfilled", {
@@ -173,4 +175,18 @@ export const backfillUsage = Effect.fn("usage.backfill")(function* () {
     recorded: outcomes.filter((outcome) => outcome._tag === "Success" && outcome.success !== null).length,
     failed: outcomes.filter((outcome) => outcome._tag === "Failure").length,
   });
+});
+
+/**
+ * Starts the backfill in the background, unless one is running already, and
+ * returns how many runs it has to measure. Startup, the API and the MCP tool
+ * share it.
+ */
+export const startBackfill = Effect.fn("usage.startBackfill")(function* () {
+  const pending = (yield* unmeasuredRuns).length;
+  if (pending > 0) {
+    const job = backfillUsage().pipe(Effect.catchCause((cause) => log.warn("usage backfill failed", { error: errorMessage(Cause.squash(cause)) })));
+    yield* (yield* Background).watch("usage-backfill", job);
+  }
+  return { pending };
 });

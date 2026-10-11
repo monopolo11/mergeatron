@@ -12,6 +12,7 @@ import { createVersion, listPrompts, promoteVersion, readPrompt } from "./prompt
 import { markMerged, requestReview, requestSecondPass, reviewStatus, type ReviewServices } from "./reviewRequests.ts";
 import { createRule, deleteRule, updateRule, type RuleCreate, type RulePatch } from "./ruleAdmin.ts";
 import { getRun, listRuns, rateRun, runAnalytics } from "./runHistory.ts";
+import { startBackfill } from "./usage.ts";
 import { INBOX_REASONS, PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES, SUGGESTED_EVENTS, WORKSPACE_MODES } from "./shared.ts";
 import { Store } from "./store.ts";
 import { SlackClient } from "./slack.ts";
@@ -328,6 +329,17 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         annotations: { readOnlyHint: true },
       },
       () => result("run_analytics", runAnalytics()),
+    );
+
+    server.registerTool(
+      "backfill_usage",
+      {
+        description:
+          "Measure the usage (tokens, estimated cost) of settled runs from the last 30 days that have none yet, such as runs from before usage was recorded. Runs in the background, one run at a time, about a second each; returns how many runs it will try. Read the results with list_runs or run_analytics once it is done. Safe to repeat: a backfill already running is not started twice.",
+        inputSchema: {},
+        annotations: { destructiveHint: false, idempotentHint: true },
+      },
+      () => result("backfill_usage", startBackfill()),
     );
 
     server.registerTool(

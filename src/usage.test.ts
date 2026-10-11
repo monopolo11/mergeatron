@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Schedule } from "effect";
+import { Background } from "./background.ts";
 import { Store } from "./store.ts";
 import { T3HttpError, type T3Thread } from "./t3.ts";
 import { fakeT3, fakeUsage, runWith, testLayer } from "./testing.ts";
-import { parseSession, recordUsage, type SessionUsage } from "./usage.ts";
+import { parseSession, recordUsage, startBackfill, type SessionUsage } from "./usage.ts";
 
 /** Trimmed from `ccusage session --id <id> --json` (ccusage 20): a main-agent message and a subagent's. */
 const CCUSAGE_OUTPUT = JSON.stringify({
@@ -81,11 +82,11 @@ describe("recordUsage", () => {
       usage: fakeUsage({ session: (id) => Effect.succeed(sessions[id] ?? null) }),
     });
   /** A run on t1, stored so its usage has a row to belong to. */
-  const recordRun = Effect.flatMap(Store, (store) =>
+  const recordRun = (deliveryId = "d1") => Effect.flatMap(Store, (store) =>
     store.recordRun({
       ruleId: "r1",
       ruleName: "review",
-      deliveryId: "d1",
+      deliveryId,
       event: "pull_request.review_requested",
       repo: "acme/widgets",
       source: "github",
@@ -103,7 +104,7 @@ describe("recordUsage", () => {
     runWith(
       layer(),
       Effect.gen(function* () {
-        const run = yield* recordRun;
+        const run = yield* recordRun();
         yield* recordUsage(run);
         expect((yield* (yield* Store).runUsage([run.id])).get(run.id)).toMatchObject({
           outputTokens: 20,
@@ -121,7 +122,21 @@ describe("recordUsage", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         yield* store.saveSettings({ ...(yield* store.getSettings()), usageIncludesDelegatedTasks: false });
-        expect(yield* recordUsage(yield* recordRun)).toMatchObject({ costUsd: 0.5, sessionIds: ["s1"] });
+        expect(yield* recordUsage(yield* recordRun())).toMatchObject({ costUsd: 0.5, sessionIds: ["s1"] });
+      }),
+    ));
+
+  test("the backfill measures every settled run that has no usage yet", () =>
+    runWith(
+      layer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const runs = [yield* recordRun("d1"), yield* recordRun("d2")];
+        expect(yield* startBackfill()).toEqual({ pending: 2 });
+        const background = yield* Background;
+        yield* Effect.repeat(background.watching, { schedule: Schedule.spaced("5 millis"), until: (running) => running === 0 });
+        expect([...(yield* store.runUsage(runs.map((run) => run.id))).values()].map((usage) => usage.costUsd)).toEqual([0.75, 0.75]);
+        expect(yield* startBackfill()).toEqual({ pending: 0 });
       }),
     ));
 
@@ -129,7 +144,7 @@ describe("recordUsage", () => {
     runWith(
       testLayer({ t3: fakeT3({ thread: () => Effect.succeed(thread([provider("gone")])) }) }),
       Effect.gen(function* () {
-        const run = yield* recordRun;
+        const run = yield* recordRun();
         expect(yield* recordUsage(run)).toBeNull();
         expect((yield* (yield* Store).runUsage([run.id])).size).toBe(0);
       }),
