@@ -20,11 +20,11 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
 import { firstAvailableModel } from "@/components/DispatchDialog";
 import { Empty, ExternalLink, Field, GroupLabel, RunStatus } from "@/components/Field";
 import { LabelsInput } from "@/components/LabelsInput";
 import { ModelPicker } from "@/components/ModelPicker";
+import { PromptEditor, type PromptEditorHandle } from "@/components/PromptEditor";
 import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
 import { TokenInput, type TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
@@ -86,7 +86,7 @@ export function RuleEditor(props: RuleEditorProps) {
 function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDelete, onRunsChanged, history }: RuleEditorProps & { history: PromptHistory }) {
   // `enabled` is the list switch's, not the form's: saving the form must never write a stale copy back.
   const { id, createdAt, updatedAt, enabled, livePromptVersion, ...stored } = rule;
-  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const promptRef = useRef<PromptEditorHandle>(null);
   const versions = usePromptVersions(history);
 
   const [saved, setSaved] = useState<RuleDraft>({ ...stored, prompt: versions.baseBody });
@@ -195,16 +195,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
       (isWebhook || isSlack || inboxIssue || !name.startsWith("issue_")),
   );
 
-  const insertText = (text: string) => {
-    const textarea = promptRef.current;
-    if (!textarea) return form.setFieldValue("prompt", draft.prompt + text);
-    const { selectionStart, selectionEnd } = textarea;
-    form.setFieldValue("prompt", draft.prompt.slice(0, selectionStart) + text + draft.prompt.slice(selectionEnd));
-    requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(selectionStart + text.length, selectionStart + text.length);
-    });
-  };
+  const insertText = (text: string) => promptRef.current?.insert(text);
 
   return (
     <div>
@@ -519,12 +510,12 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 )}
                 {!linked && <VersionSelect versions={versions} onEditFrom={field.handleChange} />}
               </div>
-              <Textarea
+              <PromptEditor
                 ref={promptRef}
                 className={cn("min-h-52 leading-relaxed", mono, versions.viewed && !linked && "text-muted-foreground")}
                 value={shownPrompt}
                 readOnly={linked !== null || versions.viewed !== null}
-                onChange={(e) => field.handleChange(e.target.value)}
+                onChange={field.handleChange}
               />
               {!linked && !versions.viewed && (
                 <div className="mt-1 flex flex-wrap items-center gap-x-1 gap-y-0.5">

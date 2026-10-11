@@ -259,7 +259,7 @@ function MessageSection({ title, hint, value, fallback, onChange }: { title: str
   return (
     <section className="grid gap-2 border-t pt-5">
       <Heading>{title}</Heading>
-      <TemplateEditor value={value} fallback={fallback} vars={REVIEW_MESSAGE_VARS} onChange={onChange} className="min-h-28" />
+      <TemplateEditor value={value} fallback={fallback} vars={REVIEW_MESSAGE_VARS} onChange={onChange} className="min-h-28" skills={false} />
       <span className="text-xs text-muted-foreground">{hint}</span>
     </section>
   );

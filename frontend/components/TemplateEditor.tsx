@@ -1,14 +1,15 @@
 import { useRef } from "react";
+import { PromptEditor, type PromptEditorHandle } from "@/components/PromptEditor";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 const mono = "font-mono text-xs";
 
 /**
- * Textarea for a prompt or message template, with the variables it can use
+ * Editor for a prompt or message template, with the variables it can use
  * as chips that insert at the cursor, and a reset when a default is given.
- * Used by dispatch presets, the handoff prompt and the Slack messages.
+ * Used by dispatch presets, the handoff prompt and the Slack messages (with
+ * `skills` off: no agent reads those).
  */
 export function TemplateEditor({
   value,
@@ -18,6 +19,7 @@ export function TemplateEditor({
   placeholder,
   className,
   readOnly = false,
+  skills = true,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -29,29 +31,21 @@ export function TemplateEditor({
   className?: string;
   /** Shows the text muted with no chips, e.g. an older prompt version. */
   readOnly?: boolean;
+  /** Offer skills under `/` and `$` (see PromptEditor). */
+  skills?: boolean;
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  const insert = (name: string) => {
-    const token = `{{${name}}}`;
-    const textarea = ref.current;
-    if (!textarea) return onChange(value + token);
-    const { selectionStart, selectionEnd } = textarea;
-    onChange(value.slice(0, selectionStart) + token + value.slice(selectionEnd));
-    requestAnimationFrame(() => {
-      textarea.focus();
-      textarea.setSelectionRange(selectionStart + token.length, selectionStart + token.length);
-    });
-  };
+  const ref = useRef<PromptEditorHandle>(null);
+  const insert = (name: string) => ref.current?.insert(`{{${name}}}`);
 
   return (
     <>
-      <Textarea
+      <PromptEditor
         ref={ref}
         className={cn("min-h-20 leading-relaxed", mono, readOnly && "text-muted-foreground", className)}
         value={value}
         readOnly={readOnly}
-        onChange={(e) => onChange(e.target.value)}
+        skills={skills}
+        onChange={onChange}
         placeholder={placeholder}
       />
       {!readOnly && <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">

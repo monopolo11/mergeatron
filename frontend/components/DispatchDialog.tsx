@@ -6,9 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import { Field, RunStatus } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
+import { PromptEditor } from "@/components/PromptEditor";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { itemContext, type InboxItem } from "../../src/inbox.ts";
@@ -108,7 +108,7 @@ export function DispatchDialog({ items, onClose, onDispatched }: { items: InboxI
             <form.Field name="text">
               {(field) => (
                 <Field label="Message" hint="Template: variables render per item on the server.">
-                  <Textarea className={cn("min-h-36 leading-relaxed", mono)} value={field.state.value} onChange={(e) => { field.handleChange(e.target.value); setDirty(true); }} />
+                  <PromptEditor className={cn("min-h-36 leading-relaxed", mono)} value={field.state.value} onChange={(text) => { field.handleChange(text); setDirty(true); }} />
                   {first && text && (
                     <details className="text-xs">
                       <summary className="cursor-pointer text-muted-foreground">Preview for {first.identifier}</summary>

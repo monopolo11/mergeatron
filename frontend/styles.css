@@ -74,3 +74,17 @@
     @apply bg-background text-foreground text-[13px] antialiased;
   }
 }
+
+/* PromptEditor: the ProseMirror root fills the box so a click anywhere in it places the caret. */
+.prompt-editor > .ProseMirror {
+  flex: 1;
+  outline: none;
+  overflow-wrap: anywhere;
+}
+.prompt-editor p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted-foreground);
+}

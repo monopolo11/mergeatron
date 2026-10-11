@@ -53,6 +53,18 @@ export type T3Provider = {
   enabled: boolean;
   status: string;
   models: T3Model[];
+  /** Skills a user can start from a prompt, written as `$name` (T3 dispatches them per provider). */
+  skills: T3Skill[];
+};
+
+/** A provider skill, trimmed from `ServerProviderSkill` to what the prompt editor shows. */
+export type T3Skill = {
+  name: string;
+  displayName: string | null;
+  description: string | null;
+  /** Where it was installed: `user`, `project`, `system`… */
+  scope: string | null;
+  path: string;
 };
 
 type ServerConfig = {
@@ -63,6 +75,16 @@ type ServerConfig = {
     enabled: boolean;
     status: string;
     models: Array<{ slug: string; name: string; isDefault?: boolean; isLegacy?: boolean }>;
+    skills?: Array<{
+      name: string;
+      displayName?: string;
+      description?: string;
+      shortDescription?: string;
+      scope?: string;
+      path: string;
+      enabled: boolean;
+      userInvocable?: boolean;
+    }>;
   }>;
 };
 
@@ -245,6 +267,16 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
           isDefault: model.isDefault === true,
           isLegacy: model.isLegacy === true,
         })),
+        // Disabled skills do not run, and `userInvocable: false` ones reject a user's pick.
+        skills: (provider.skills ?? [])
+          .filter((skill) => skill.enabled && skill.userInvocable !== false)
+          .map((skill) => ({
+            name: skill.name,
+            displayName: skill.displayName ?? null,
+            description: skill.shortDescription ?? skill.description ?? null,
+            scope: skill.scope ?? null,
+            path: skill.path,
+          })),
       })),
     ),
     PROVIDERS_CACHE,
