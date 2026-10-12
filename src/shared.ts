@@ -34,6 +34,7 @@ export type RunSource = (typeof RUN_SOURCES)[number];
  * has a thread running, `done`/`failed` once its first turn settles.
  */
 export const RUN_STATUSES = ["queued", "started", "done", "skipped", "failed"] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** What owns an editable versioned prompt: a dispatch preset, or a rule's own prompt. */
 export const PROMPT_OWNERS = ["preset", "rule"] as const;

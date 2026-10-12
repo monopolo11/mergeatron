@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { use } from "react";
 import { useScope, type Facet } from "@/components/FilterBar";
 import { api } from "@/lib/api";
+import { runStatus } from "@/lib/status";
 import { resolveWindow, scopeKey, scopeQuery, validateScope, type RunFacet } from "@/lib/scope";
 import { ShellContext } from "@/lib/shell";
 import type { PromptRef } from "../../src/rules.ts";
@@ -12,7 +13,7 @@ export const SOURCE_LABELS: Record<RunSource, string> = { github: "GitHub webhoo
 /** Runs without a stored rule, by the id they are recorded under. */
 export const PSEUDO_RULES: Record<string, string> = { dispatch: "Inbox dispatches", handoff: "Handoffs", manual: "Connection tests" };
 
-const LABELS: Record<RunFacet, string> = { rule: "Rule", source: "Source", model: "Model", prompt: "Prompt", author: "Author", repo: "Repo" };
+const LABELS: Record<RunFacet, string> = { runStatus: "Status", rule: "Rule", source: "Source", model: "Model", prompt: "Prompt", author: "Author", repo: "Repo" };
 
 /** `owner:id:version`, the prompt facet's value for one version. */
 export const promptKey = ({ owner, id, version }: PromptRef) => `${owner}:${id}:${version}`;
@@ -39,6 +40,7 @@ export function useRunFacets(keys: readonly RunFacet[]) {
   const promptLabel = (ref: PromptRef) => `${promptNames.get(promptKey(ref)) ?? ref.owner} v${ref.version}`;
 
   const options: Record<RunFacet, Facet["options"]> = {
+    runStatus: (data?.statuses ?? []).map(({ value, count }) => ({ value, count, text: runStatus({ status: value }).label })),
     rule: (data?.rules ?? []).map(({ value, label, count }) => ({ value, count, text: ruleNames.get(value) ?? PSEUDO_RULES[value] ?? label ?? value })),
     source: (data?.sources ?? []).map(({ value, count }) => ({ value, count, text: SOURCE_LABELS[value] })),
     model: (data?.models ?? []).map(({ value, count }) => ({ value, count, text: value })),
@@ -68,6 +70,7 @@ export function useRunFacets(keys: readonly RunFacet[]) {
         key === "prompt"
           ? { label: "Live versions only", token: "live versions", on: !!search.live, count: data?.liveRuns, onChange: (on) => setScope({ live: on || undefined }) }
           : undefined,
+      negate: key === "runStatus" ? { on: !!search.notRunStatus, onChange: (on) => setScope(validateScope({ ...search, notRunStatus: on || undefined })) } : undefined,
       // One navigation for the values and the live switch together.
       onClear: () => setScope(validateScope({ ...search, [key]: undefined, live: key === "prompt" ? undefined : search.live })),
     }),

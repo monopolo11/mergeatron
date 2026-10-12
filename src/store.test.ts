@@ -104,6 +104,10 @@ describe("Store run scope", () => {
         expect(ids(yield* store.listRuns({ livePrompts: true, prompts: [ref(2)] }))).toEqual([draft.id, live.id, old.id]);
         expect(ids(yield* store.listRuns({ authors: ["bob", "carol"] }))).toEqual([live.id]);
         expect(ids(yield* store.listRuns({ repos: ["acme/gadgets"] }))).toEqual([draft.id]);
+        expect(ids(yield* store.listRuns({ statuses: ["failed"] }))).toEqual([draft.id]);
+        // Negated, the statuses are the ones left out.
+        expect(ids(yield* store.listRuns({ statuses: ["failed"], notStatuses: true }))).toEqual([live.id, old.id]);
+        expect(ids(yield* store.listRuns({ statuses: [], notStatuses: true }))).toEqual([draft.id, live.id, old.id]);
         expect(ids(yield* store.listRuns({ from: t2 }))).toEqual(t1 === t2 ? [draft.id, live.id, old.id] : [draft.id, live.id]);
 
         const analytics = yield* store.analytics({ livePrompts: true });
@@ -120,6 +124,10 @@ describe("Store run scope", () => {
         const facets = yield* store.runFacets({ to: "2000-01-01T00:00:00.000Z" });
         expect(facets.rules).toEqual([]);
         expect((yield* store.runFacets()).liveRuns).toBe(2);
+        expect((yield* store.runFacets()).statuses).toEqual([
+          { value: "done", count: 5 },
+          { value: "failed", count: 1 },
+        ]);
         expect((yield* store.runFacets()).repos).toEqual([
           { value: "acme/widgets", count: 5 },
           { value: "acme/gadgets", count: 1 },

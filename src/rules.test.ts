@@ -76,6 +76,8 @@ describe("RunQuery", () => {
       sources: ["slack"],
       livePrompts: true,
     });
+    const statuses = Schema.decodeUnknownResult(RunQuery)({ runStatus: "skipped,bogus", notRunStatus: "1" });
+    expect(Result.isSuccess(statuses) && runScope(statuses.success)).toMatchObject({ statuses: ["skipped"], notStatuses: true });
     expect(Result.isFailure(Schema.decodeUnknownResult(RunQuery)({ limit: "501" }))).toBe(true);
   });
 });

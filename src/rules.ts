@@ -13,6 +13,7 @@ import {
   INBOX_REASONS,
   PROMPT_VERSION_OWNERS,
   RUN_SOURCES,
+  RUN_STATUSES,
   RUNTIME_MODES,
   WORKSPACE_MODES,
   inboxSource,
@@ -180,6 +181,8 @@ export const RunScopeQuery = Schema.Struct({
   live: Schema.optional(Schema.Literals(["1"])),
   author: Schema.optional(nonEmpty),
   repo: Schema.optional(nonEmpty),
+  runStatus: Schema.optional(nonEmpty),
+  notRunStatus: Schema.optional(Schema.Literals(["1"])),
 });
 
 /** `/api/runs/history`: the scope plus how many runs to return. */
@@ -198,7 +201,7 @@ const csv = (value: string | undefined) => value?.split(",").map((part) => part.
 const isOneOf = <T extends string>(options: readonly T[]) => (value: string): value is T => options.some((option) => option === value);
 
 /** Decodes RunScopeQuery into a RunScope; unknown sources and malformed prompts are dropped. */
-export function runScope({ from, to, rule, source, model, prompt, live, author, repo }: typeof RunScopeQuery.Type): RunScope {
+export function runScope({ from, to, rule, source, model, prompt, live, author, repo, runStatus, notRunStatus }: typeof RunScopeQuery.Type): RunScope {
   return {
     from,
     to,
@@ -214,6 +217,8 @@ export function runScope({ from, to, rule, source, model, prompt, live, author, 
     livePrompts: live === "1" || undefined,
     authors: csv(author),
     repos: csv(repo),
+    statuses: csv(runStatus)?.filter(isOneOf(RUN_STATUSES)),
+    notStatuses: notRunStatus === "1" || undefined,
   };
 }
 

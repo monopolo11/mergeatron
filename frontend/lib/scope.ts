@@ -1,4 +1,4 @@
-import { RUN_SOURCES, type RunSource } from "../../src/shared.ts";
+import { RUN_SOURCES, RUN_STATUSES, type RunSource, type RunStatus } from "../../src/shared.ts";
 
 /*
  * The date range and run filters every page reads from the URL. They live in
@@ -23,23 +23,25 @@ export type RangePreset = keyof typeof RANGE_PRESETS;
 export const DEFAULT_RANGE: RangePreset = "14d";
 
 /** Run facets a page can filter on, in the order the filter menu lists them. */
-export const RUN_FACETS = ["rule", "source", "model", "prompt", "author", "repo"] as const;
+export const RUN_FACETS = ["runStatus", "rule", "source", "model", "prompt", "author", "repo"] as const;
 export type RunFacet = (typeof RUN_FACETS)[number];
 
 /**
  * The shared search params. `range` is a preset; `from`/`to` (`YYYY-MM-DD`,
  * both days included) replace it with a custom range. Facets hold any-of
- * value lists; `live` keeps runs on a live prompt version.
+ * value lists; `live` keeps runs on a live prompt version; `notRunStatus`
+ * makes `runStatus` the statuses to leave out ("all runs not skipped").
  */
 export type ScopeSearch = {
   range?: RangePreset;
   from?: string;
   to?: string;
   live?: true;
-} & { [Facet in RunFacet]?: Facet extends "source" ? RunSource[] : string[] };
+  notRunStatus?: true;
+} & { [Facet in RunFacet]?: Facet extends "source" ? RunSource[] : Facet extends "runStatus" ? RunStatus[] : string[] };
 
 /** The search params the root route keeps when navigating between pages. */
-export const SCOPE_KEYS = ["range", "from", "to", "live", ...RUN_FACETS] as const satisfies (keyof ScopeSearch)[];
+export const SCOPE_KEYS = ["range", "from", "to", "live", "notRunStatus", ...RUN_FACETS] as const satisfies (keyof ScopeSearch)[];
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 /** A real calendar day in `YYYY-MM-DD`: the parts round-trip, so no month 13 or Feb 30. */
@@ -59,11 +61,14 @@ export function validateScope(search: Record<string, unknown>): ScopeSearch {
   const range = Object.keys(RANGE_PRESETS).find((key): key is RangePreset => key === search.range);
   const date = (value: unknown) => (isDay(value) ? value : undefined);
   const sources = strings(search.source)?.filter((value): value is RunSource => RUN_SOURCES.some((source) => source === value));
+  const statuses = strings(search.runStatus)?.filter((value): value is RunStatus => RUN_STATUSES.some((status) => status === value));
   return {
     range,
     from: date(search.from),
     to: date(search.to),
     live: search.live === true ? true : undefined,
+    runStatus: statuses?.length ? statuses : undefined,
+    notRunStatus: statuses?.length && search.notRunStatus === true ? true : undefined,
     rule: strings(search.rule),
     source: sources?.length ? sources : undefined,
     model: strings(search.model),
@@ -107,6 +112,7 @@ export function scopeQuery(search: ScopeSearch, window: Window, extra: Record<st
     from: window.from ?? undefined,
     to: window.to ?? undefined,
     live: search.live ? "1" : undefined,
+    notRunStatus: search.runStatus?.length && search.notRunStatus ? "1" : undefined,
     ...Object.fromEntries(RUN_FACETS.map((facet) => [facet, search[facet]?.join(",")])),
     ...extra,
   };

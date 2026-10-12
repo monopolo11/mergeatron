@@ -81,7 +81,8 @@ export type PromptKey = { owner: PromptVersionOwner; id: string; version?: numbe
 /**
  * The runs a page looks at: created in `[from, to)` and, per facet, matching
  * any of the listed values. A missing or empty field does not narrow.
- * `livePrompts` adds every preset's and rule's live version to `prompts`.
+ * `livePrompts` adds every preset's and rule's live version to `prompts`;
+ * `notStatuses` turns `statuses` into the ones to leave out.
  */
 export type RunScope = {
   /** ISO timestamps. */
@@ -96,6 +97,8 @@ export type RunScope = {
   livePrompts?: boolean;
   authors?: readonly string[];
   repos?: readonly string[];
+  statuses?: readonly Run["status"][];
+  notStatuses?: boolean;
 };
 
 /** Which runs `listRuns` returns, newest first. Every field narrows; none means the latest 100. */
@@ -118,6 +121,7 @@ export type RunFacets = {
   models: FacetValue[];
   authors: FacetValue[];
   repos: FacetValue[];
+  statuses: FacetValue<Run["status"]>[];
   prompts: (PromptRef & { name: string | null; live: boolean; count: number })[];
   /** Runs whose message used a live prompt version. */
   liveRuns: number;
@@ -226,6 +230,7 @@ export function makeStore(db: AppDatabase) {
       anyOf(runs.modelId, scope.models),
       anyOf(runs.author, scope.authors),
       anyOf(runs.repo, scope.repos),
+      scope.statuses?.length ? (scope.notStatuses ? notInArray : inArray)(runs.status, [...scope.statuses]) : undefined,
       prompt && runsWithPrompt(prompt),
     );
   };
@@ -992,6 +997,7 @@ export function makeStore(db: AppDatabase) {
           models: group(runs.modelId),
           authors: group(runs.author),
           repos: group(runs.repo),
+          statuses: group(runs.status) as FacetValue<Run["status"]>[],
           prompts: promptGroups({ count: total }, where).all(),
           liveRuns: db.select({ count: total }).from(runs).where(scopeWhere({ from, to, livePrompts: true })).get()?.count ?? 0,
         };

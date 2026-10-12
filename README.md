@@ -496,17 +496,18 @@ shows how many settled runs are measured; **Measure** starts the backfill for th
 Runs, Reviews, Analytics and the rule counts read one range and one set of
 filters from the URL (`range` as `24h`, `7d`, `14d` (the default), `30d`,
 `90d`, `month` or `all`, or `from` and `to` days), kept when switching pages.
-**+ Filter** adds a filter by rule, source, model, prompt, author or repo; each
+**+ Filter** adds a filter by status, rule, source, model, prompt, author or repo; each
 takes several values (any of) with their run counts in the range, and shows as
-a token that reopens or clears it. The prompt filter's **Live versions only**
+a token that reopens or clears it. The status filter's **Exclude selected**
+flips it to "is not" (all runs not skipped). The prompt filter's **Live versions only**
 follows promotions: it means every preset's and rule's live version, whichever
 that is now. Reviews offers rule, repo and author; the inbox has its own
 source, kind and reason filters and shares repo.
 
 The run endpoints take the same scope as search params: `from` and `to` (ISO
-timestamps), comma-separated `rule`, `source`, `model`, `prompt` (`owner:id`
+timestamps), comma-separated `runStatus`, `rule`, `source`, `model`, `prompt` (`owner:id`
 for every version, `owner:id:version` for one), `author` and `repo`, and
-`live=1`. `GET /api/runs/facets?from&to` lists the values each filter offers
+`live=1` and `notRunStatus=1` (leave the `runStatus` values out). `GET /api/runs/facets?from&to` lists the values each filter offers
 with run counts.
 
 ## Updating

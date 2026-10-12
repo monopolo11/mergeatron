@@ -26,6 +26,8 @@ export type Facet = {
   /** Clears the values and the toggle at once; without it, clearing sets no values. */
   onClear?: () => void;
   toggle?: { label: string; token: string; on: boolean; count?: number; onChange: (on: boolean) => void };
+  /** Turns the picked values into ones to leave out: the token reads "is not" / "is none of". */
+  negate?: { on: boolean; onChange: (on: boolean) => void };
 };
 
 /** The scope search params and a setter that merges a patch into the URL, keeping the rest. */
@@ -78,15 +80,16 @@ export function FilterBar({ facets = [], children }: { facets?: Facet[]; childre
   );
 }
 
-/** A token's text: `Model is opus`, `Model is any of opus, sonnet`, `Prompt is live versions`. */
+/** A token's text: `Model is opus`, `Model is any of opus, sonnet`, `Status is not skipped`, `Prompt is live versions`. */
 function TokenText({ facet }: { facet: Facet }) {
   const texts = facet.selected.map((value) => facet.options.find((option) => option.value === value)?.text ?? value);
   const parts = [facet.toggle?.on ? facet.toggle.token : null, texts.length > 2 ? `${texts.length} ${facet.label.toLowerCase()}s` : texts.join(", ")].filter(Boolean);
-  const any = texts.length > 1 || (facet.toggle?.on && texts.length > 0);
+  const many = texts.length > 1 || (facet.toggle?.on && texts.length > 0);
+  const relation = facet.negate?.on ? (many ? "is none of" : "is not") : many ? "is any of" : "is";
   return (
     <>
       {facet.label}
-      <span className="text-muted-foreground">{any ? "is any of" : "is"}</span>
+      <span className="text-muted-foreground">{relation}</span>
       <span className="truncate">{parts.join(", ")}</span>
     </>
   );
@@ -144,6 +147,17 @@ function FacetMenu({ facets, start, open, onOpenChange, children }: { facets: Fa
                       {facet.label}
                     </CommandItem>
                   </CommandGroup>
+                )}
+                {facet.negate && (
+                  <>
+                    <CommandGroup>
+                      <CommandItem value="Exclude selected" onSelect={() => facet.negate!.onChange(!facet.negate!.on)}>
+                        <Check on={facet.negate.on} />
+                        Exclude selected
+                      </CommandItem>
+                    </CommandGroup>
+                    <CommandSeparator />
+                  </>
                 )}
                 {facet.toggle && (
                   <>
