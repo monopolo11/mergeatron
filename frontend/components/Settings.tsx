@@ -72,7 +72,7 @@ export function SettingsPage() {
   const shell = use(ShellContext)!;
   if (!shell.settings) {
     return (
-      <div className="grid h-full grid-cols-[240px_1fr] overflow-hidden">
+      <div className="grid h-full grid-cols-[240px_1fr] overflow-clip">
         <aside className="border-r">
           <Toolbar title="Settings" />
         </aside>
@@ -91,7 +91,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
   const pick = (id: SectionId) => void navigate({ to: "/settings", hash: id, replace: true });
 
   return (
-    <div className="grid h-full grid-cols-[240px_1fr] overflow-hidden">
+    <div className="grid h-full grid-cols-[240px_1fr] overflow-clip">
       <aside className="overflow-auto border-r">
         <Toolbar title="Settings" />
         <nav>

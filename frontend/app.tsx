@@ -147,7 +147,7 @@ function App() {
   return (
     <ShellContext value={{ status, projects, providers, settings, saveSettings, update, updateError, recheckUpdate, rules, selected, selectRule, runs, webhookUrl, createRule, saveRule, toggleRule, deleteRule, refreshRuns }}>
       <TooltipProvider delayDuration={200}>
-        <div className={cn("grid h-screen grid-cols-[184px_minmax(0,1fr)] overflow-hidden", liveOpen && "xl:grid-cols-[184px_minmax(0,1fr)_340px]")}>
+        <div className={cn("grid h-screen grid-cols-[184px_minmax(0,1fr)] overflow-clip", liveOpen && "xl:grid-cols-[184px_minmax(0,1fr)_340px]")}>
           <Sidebar status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={onRunsPage ? undefined : toggleRuns} />
           <main className="min-w-0 overflow-auto">
             <Outlet />
@@ -168,7 +168,7 @@ function RulesMain() {
   const { rules, selected, selectRule, projects, providers, runs, settings, webhookUrl, createRule, saveRule, toggleRule, deleteRule, refreshRuns } = use(ShellContext)!;
   const { data: facets } = useRunFacets([]);
   return (
-    <div className="grid h-full grid-cols-[240px_1fr] overflow-hidden">
+    <div className="grid h-full grid-cols-[240px_1fr] overflow-clip">
       <RulesList rules={rules} selectedId={selected?.id ?? null} runCounts={new Map(facets?.rules.map((row) => [row.value, row.count]))} onSelect={selectRule} onToggle={(rule) => void toggleRule(rule)} onCreate={() => void createRule()} />
       <div className="@container min-w-0 overflow-auto">
         {selected ? (

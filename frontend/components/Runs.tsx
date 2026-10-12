@@ -107,7 +107,7 @@ export function Runs() {
   const next = [...visible.slice(index + 1), ...visible.slice(0, Math.max(index, 0))].find((run) => run.ratedAt === null && RATABLE.has(run.status));
 
   return (
-    <div className={cn("relative grid h-full overflow-hidden", openId && "lg:grid-cols-[minmax(0,1fr)_420px]")}>
+    <div className={cn("relative grid h-full overflow-clip", openId && "lg:grid-cols-[minmax(0,1fr)_420px]")}>
       {/* The table is the container its secondary columns answer to: narrow beside the open run or on a portrait tablet. */}
       <div className="@container min-w-0 overflow-auto">
         <PageHeader
