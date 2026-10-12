@@ -431,6 +431,8 @@ export const reviewRequests = sqliteTable(
     permalink: text(),
     /** 1 for the first request, +1 per second pass. */
     round: integer().notNull().default(1),
+    /** Slack tags of the latest round, reused when a second pass names no one. */
+    mentions: text().notNull().default(""),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

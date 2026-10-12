@@ -1,0 +1,1 @@
+ALTER TABLE `review_requests` ADD `mentions` text DEFAULT '' NOT NULL;

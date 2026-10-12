@@ -56,9 +56,11 @@ describe("review requests", () => {
 
         const second = yield* requestSecondPass({ prUrl: PR, note: "Fixed the null check" });
         expect(second).toMatchObject({ thread_ts: "1.0", round: 2 });
-        expect(posts[1]).toEqual({ channel: "C1", text: "Round 2: second pass requested\nFixed the null check", thread: "1.0" });
+        // No mentions: the last round's reviewers are tagged again.
+        expect(posts[1]).toEqual({ channel: "C1", text: "Round 2: second pass requested <@U0ALICE01>\nFixed the null check", thread: "1.0" });
 
-        expect((yield* requestSecondPass({ prUrl: PR })).round).toBe(3);
+        expect((yield* requestSecondPass({ prUrl: PR, mentions: ["U0BOB0001"] })).round).toBe(3);
+        expect(posts[2]?.text).toBe("Round 3: second pass requested <@U0BOB0001>");
 
         const runs = (yield* (yield* Store).listRuns()).toReversed();
         expect(runs.map((run) => [run.event, run.context?.review_round, run.context?.slack_thread_ts])).toEqual([

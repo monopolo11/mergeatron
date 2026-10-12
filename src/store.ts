@@ -831,13 +831,13 @@ export function makeStore(db: AppDatabase) {
           .get();
       }),
 
-    /** Starts the next review round and returns the updated request. */
-    nextReviewRound: (id: string) =>
+    /** Starts the next review round, tagging `mentions`, and returns the updated request. */
+    nextReviewRound: (id: string, mentions: string) =>
       Effect.sync(
         (): ReviewRequest =>
           db
             .update(reviewRequests)
-            .set({ round: sql`${reviewRequests.round} + 1`, updatedAt: new Date().toISOString() })
+            .set({ round: sql`${reviewRequests.round} + 1`, mentions, updatedAt: new Date().toISOString() })
             .where(eq(reviewRequests.id, id))
             .returning()
             .get()!,

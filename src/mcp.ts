@@ -49,7 +49,7 @@ const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<
 const mentions = z
   .array(z.string())
   .optional()
-  .describe("People to tag: Slack user ids (U…), user group ids (S…), or here/channel");
+  .describe("People to tag: Slack user ids (U…), user group ids (S…), or here/channel. A second pass without them tags whoever the last round did");
 const note = z.string().optional().describe("Extra Markdown shown in the message, e.g. what changed since the last round");
 const promptOwner = z.enum(PROMPT_OWNERS).describe("preset: a dispatch preset. rule: a rule's own prompt");
 const promptId = z.string().describe("Id of the preset or rule, from list_prompts");

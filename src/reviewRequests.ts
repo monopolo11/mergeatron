@@ -64,7 +64,7 @@ export const requestReview = Effect.fn("review.request")(function* (ask: ReviewA
   const text = renderReviewMessage(settings.reviewRequestMessage, ctx, { round: 1, mentions, note: ask.note });
   const posted = yield* slack.post(channel, text);
   const permalink = yield* slack.permalink(posted.channel, posted.ts).pipe(Effect.orElseSucceed(() => null));
-  const request = yield* store.createReviewRequest({ repo: pr.repo, prNumber: pr.number, prUrl: pr.url, channel: posted.channel, threadTs: posted.ts, permalink });
+  const request = yield* store.createReviewRequest({ repo: pr.repo, prNumber: pr.number, prUrl: pr.url, channel: posted.channel, threadTs: posted.ts, permalink, mentions });
 
   const automated = yield* startReview("slack.message", { ...ctx, slack_channel: posted.channel, slack_ts: posted.ts, slack_text: text, review_round: "1" });
   return round(request, automated);
@@ -73,7 +73,7 @@ export const requestReview = Effect.fn("review.request")(function* (ask: ReviewA
 /**
  * Asks for another review in the PR's tracked thread and starts the next
  * round. Runs even when the PR's reviews are paused, like a human's
- * "second pass" mention.
+ * "second pass" mention. Without `mentions` it tags whoever the last round did.
  */
 export const requestSecondPass = Effect.fn("review.secondPass")(function* (ask: ReviewAsk) {
   const store = yield* Store;
@@ -85,10 +85,10 @@ export const requestSecondPass = Effect.fn("review.secondPass")(function* (ask: 
   const settings = yield* store.getSettings();
 
   const ctx = yield* pulls.details({ repo: pr.repo, pr_url: request.prUrl, pr_number: pr.number });
-  const mentions = yield* slackMentions(ask.mentions);
+  const mentions = ask.mentions?.length ? yield* slackMentions(ask.mentions) : request.mentions;
   const text = renderReviewMessage(settings.secondPassMessage, ctx, { round: request.round + 1, mentions, note: ask.note });
   const posted = yield* slack.post(request.channel, text, request.threadTs);
-  const updated = yield* store.nextReviewRound(request.id);
+  const updated = yield* store.nextReviewRound(request.id, mentions);
 
   const automated = yield* startReview(SECOND_PASS_EVENT, {
     ...ctx,
