@@ -239,6 +239,8 @@ export const runs = sqliteTable(
     modelInstanceId: text("model_instance_id"),
     /** Model the thread started with, e.g. `claude-opus-5-5`. Null until a thread starts. */
     modelId: text("model_id"),
+    /** Reasoning level the thread started with, e.g. `high`; null when the model's default or no thread. */
+    reasoning: text(),
     /** How good the run was, 0 to 10, from a person or an agent. Null until rated or when only feedback was given. */
     rating: integer(),
     /** Written review of the run that goes with the rating. */

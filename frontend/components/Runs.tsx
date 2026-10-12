@@ -173,7 +173,7 @@ export function Runs() {
                     </Link>
                   </TableCell>
                   <TableCell>{ruleNames.get(run.ruleId) ?? run.ruleName}</TableCell>
-                  <TableCell className="font-mono">{run.modelId}</TableCell>
+                  <TableCell className="font-mono">{run.modelId}{run.reasoning && <span className="text-muted-foreground"> · {run.reasoning}</span>}</TableCell>
                   <TableCell className="font-mono text-muted-foreground" title={run.promptRefs.map(promptLabel).join(" + ")}>
                     {run.promptRefs[0] && promptLabel(run.promptRefs[0])}
                     {run.promptRefs.length > 1 && ` +${run.promptRefs.length - 1}`}
@@ -253,7 +253,7 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
             {run.ruleName} <span className="font-mono text-muted-foreground">· {run.event} · {run.source}</span>
           </dd>
           <dt>Model</dt>
-          <dd className="font-mono">{run.modelId ? `${run.modelInstanceId} / ${run.modelId}` : <span className="text-muted-foreground">no thread</span>}</dd>
+          <dd className="font-mono">{run.modelId ? `${run.modelInstanceId} / ${run.modelId}${run.reasoning ? ` / ${run.reasoning}` : ""}` : <span className="text-muted-foreground">no thread</span>}</dd>
           <dt>Prompt</dt>
           <dd className="font-mono">
             {run.promptRefs.map(promptLabel).join(" + ") || <span className="text-muted-foreground">none</span>}

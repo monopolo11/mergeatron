@@ -337,7 +337,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "run_analytics",
       {
         description:
-          "Run counts by status: overall, per PR author, per trigger source, per prompt version (byPrompt) and per model (byModel), the last two with how many runs were rated, their average rating and average elapsedMs, and how many had usage measured with their total and average estimated cost in USD and average tokens by kind (input, output, cache creation, cache read). Use it to compare prompt versions before promoting one: quality (rating) against cost.",
+          "Run counts by status: overall, per PR author, per trigger source, per prompt version (byPrompt) and per model and reasoning level (byModel; reasoning null means its default), the last two with how many runs were rated, their average rating and average elapsedMs, and how many had usage measured with their total and average estimated cost in USD and average tokens by kind (input, output, cache creation, cache read). Use it to compare prompt versions before promoting one: quality (rating) against cost.",
         inputSchema: {},
         annotations: { readOnlyHint: true },
       },

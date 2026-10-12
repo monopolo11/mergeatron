@@ -184,8 +184,26 @@ describe("run history", () => {
           { ...ref(1), name: "review", live: true, ...counts, total: 1, done: 1, rated: 1, avgRating: 4, avgElapsedMs: null },
         ]);
         expect(byModel).toEqual([
-          { ...opus, ...counts, total: 2, rated: 2, avgRating: 6.5, avgElapsedMs: null },
-          { ...fable, ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+          { ...opus, reasoning: null, ...counts, total: 2, rated: 2, avgRating: 6.5, avgElapsedMs: null },
+          { ...fable, reasoning: null, ...counts, total: 1, done: 1, rated: 0, avgRating: null, avgElapsedMs: null },
+        ]);
+      }),
+    ));
+
+  test("analytics splits a model's runs by the reasoning level its thread started with", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.recordRun(run({ status: "done", ...opus, reasoning: "high" }));
+        yield* store.recordRun(run({ status: "done", ...opus, reasoning: "high" }));
+        yield* store.recordRun(run({ status: "done", ...opus, reasoning: "low" }));
+        yield* store.recordRun(run({ status: "done", ...opus }));
+        const levels = (yield* store.analytics()).byModel.map(({ modelId, reasoning, total }) => ({ modelId, reasoning, total }));
+        expect(levels).toEqual([
+          { modelId: opus.modelId, reasoning: "high", total: 2 },
+          { modelId: opus.modelId, reasoning: null, total: 1 },
+          { modelId: opus.modelId, reasoning: "low", total: 1 },
         ]);
       }),
     ));

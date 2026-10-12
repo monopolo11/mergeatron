@@ -9,6 +9,15 @@ export const SERVICE_LABEL = "com.mergeatron.service";
 /** Label before the rename to mergeatron; `bun service.ts migrate` replaces an agent installed under it. */
 export const LEGACY_SERVICE_LABEL = "com.t3.review-orchestrator";
 
+/** Ids of the model option holding the reasoning level: `effort` for Claude, `reasoningEffort` for Codex. */
+const REASONING_OPTION_IDS = ["effort", "reasoningEffort"];
+
+/** The reasoning level in a model selection's options, e.g. `high`; null when none is set (the model's default). */
+export function reasoningOf(options: readonly { id: string; value: string | boolean }[] | undefined): string | null {
+  const level = options?.find((option) => REASONING_OPTION_IDS.includes(option.id))?.value;
+  return typeof level === "string" ? level : null;
+}
+
 export const WORKSPACE_MODES = ["worktree", "local"] as const;
 export type WorkspaceMode = (typeof WORKSPACE_MODES)[number];
 

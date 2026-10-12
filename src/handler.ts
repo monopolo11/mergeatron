@@ -6,7 +6,7 @@ import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
 import type { PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
-import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, type RunSource } from "./shared.ts";
+import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, reasoningOf, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3Error, type T3Project } from "./t3.ts";
@@ -228,7 +228,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
 
 /** A started thread also records what it started with, for the run history; every field is a RunPatch field. */
 type StartResult =
-  | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[]; context?: WebhookContext } & Pick<Run, "modelInstanceId" | "modelId">)
+  | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[]; context?: WebhookContext } & Pick<Run, "modelInstanceId" | "modelId" | "reasoning">)
   | { status: "skipped"; detail: string; threadId: null; threadUrl: null };
 
 /** Records how a thread start went and watches it; anything but `started` frees capacity for a queued run. */
@@ -435,6 +435,7 @@ export const openThread = (
       ...thread,
       modelInstanceId: model.instanceId,
       modelId: model.model,
+      reasoning: reasoningOf(model.options),
       startedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
     };
   });

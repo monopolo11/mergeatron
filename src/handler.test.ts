@@ -131,6 +131,7 @@ describe("handleDelivery", () => {
         expect(yield* lastRun).toMatchObject({
           modelInstanceId: DEFAULT_SETTINGS.model.instanceId,
           modelId: DEFAULT_SETTINGS.model.model,
+          reasoning: null,
           startedAt: expect.any(String),
           settledAt: null,
         });

@@ -69,8 +69,8 @@ export type Analytics = {
    * counts under each. `name` is the preset's or rule's, null once deleted.
    */
   byPrompt: (RunStats & PromptRef & { name: string | null; live: boolean })[];
-  /** Per model a thread started with; runs that never started one have none. */
-  byModel: (RunStats & { modelInstanceId: string; modelId: string })[];
+  /** Per model and reasoning level a thread started with (null: the model's default); runs that never started one have none. */
+  byModel: (RunStats & { modelInstanceId: string; modelId: string; reasoning: string | null })[];
   /** Settled runs that opened a thread, how many of them have usage measured, and what those cost in all. */
   usage: { runs: number; measured: number; totalCostUsd: number | null };
 };
@@ -158,7 +158,7 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
 /** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, when it is rated, or when its PRs are read. */
-type RunOutcome = "modelInstanceId" | "modelId" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt";
+type RunOutcome = "modelInstanceId" | "modelId" | "reasoning" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt";
 
 /** Statuses that end a run. */
 export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
@@ -902,7 +902,7 @@ export function makeStore(db: AppDatabase) {
 
     /**
      * Aggregates over the runs in scope: totals, per day, per PR/issue author,
-     * per trigger source, per prompt version and per model. Days are calendar
+     * per trigger source, per prompt version and per model with its reasoning level. Days are calendar
      * days at `utcOffsetMinutes` (the browser's offset; UTC by default). With
      * `livePrompts`, the prompt table keeps only live versions.
      */
@@ -963,12 +963,12 @@ export function makeStore(db: AppDatabase) {
           .all();
         const byPrompt = promptGroups(stats, and(where, promptCondition(scope))).all();
         const byModel = db
-          .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, ...stats })
+          .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, reasoning: runs.reasoning, ...stats })
           .from(runs)
           .leftJoin(runUsage, eq(runUsage.runId, runs.id))
           .where(and(where, isNotNull(runs.modelId)))
-          .groupBy(runs.modelInstanceId, runs.modelId)
-          .orderBy(desc(counts.total))
+          .groupBy(runs.modelInstanceId, runs.modelId, runs.reasoning)
+          .orderBy(desc(counts.total), runs.modelId, runs.reasoning)
           .all();
         const usage = db
           .select({ runs: count(), measured: count(runUsage.runId), totalCostUsd })

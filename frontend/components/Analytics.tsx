@@ -120,9 +120,9 @@ export function Analytics() {
                 cost
                 rows={data.byModel.map((row) => ({
                   ...row,
-                  key: `${row.modelInstanceId}/${row.modelId}`,
-                  label: row.modelId,
-                  title: `${row.modelInstanceId} / ${row.modelId}`,
+                  key: `${row.modelInstanceId}/${row.modelId}/${row.reasoning}`,
+                  label: row.reasoning ? `${row.modelId} · ${row.reasoning}` : row.modelId,
+                  title: `${row.modelInstanceId} / ${row.modelId} / ${row.reasoning ?? "default reasoning"}`,
                   picked: picked("model", row.modelId),
                   onPick: () => toggleFilter("model", row.modelId),
                 }))}
