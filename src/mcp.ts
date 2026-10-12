@@ -90,7 +90,17 @@ const ruleFields = z.object({
   maxConcurrent: z.number().int().min(0).describe("Threads running at once; further matches queue. 0 means no limit. Default 3"),
   projectId: z.string().nullable().describe("T3 project to open threads in; null matches by the repository's git remote"),
   workspace: z.enum(WORKSPACE_MODES).describe("worktree (default): a new worktree per thread. local: the project's checkout"),
-  model: z.object({ instanceId: z.string(), model: z.string() }).nullable().describe("Provider instance and model; null uses the project's default, then Settings'"),
+  model: z
+    .object({
+      instanceId: z.string(),
+      model: z.string(),
+      options: z
+        .array(z.object({ id: z.string().min(1), value: z.union([z.string().min(1), z.boolean()]) }))
+        .optional()
+        .describe('Model options as T3 takes them, e.g. [{ "id": "effort", "value": "high" }] for a Claude reasoning level ("reasoningEffort" for Codex). Omitted uses the model\'s defaults'),
+    })
+    .nullable()
+    .describe("Provider instance, model and options; null uses the project's default, then Settings'"),
   presetId: z.string().nullable().describe("Run this preset's live prompt instead of the rule's own; ids from list_prompts"),
 });
 const rulePatch = ruleFields.partial().extend({

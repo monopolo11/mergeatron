@@ -43,7 +43,18 @@ export type T3Model = {
   name: string;
   isDefault: boolean;
   isLegacy: boolean;
+  /** Settings the model offers, sent as `ModelSelection.options`; the first select is its reasoning level. */
+  options: T3ModelOption[];
 };
+
+/**
+ * A setting a model offers, trimmed from T3's `ProviderOptionDescriptor`:
+ * its reasoning level (`effort` for Claude, `reasoningEffort` for Codex),
+ * fast mode, context window…
+ */
+export type T3ModelOption =
+  | { id: string; type: "select"; choices: Array<{ id: string; label: string; isDefault: boolean }> }
+  | { id: string; type: "boolean" };
 
 /** A configured provider instance and the models T3 currently offers for it. */
 export type T3Provider = {
@@ -67,6 +78,11 @@ export type T3Skill = {
   path: string;
 };
 
+/** `ProviderOptionDescriptor`: a setting a model offers, such as its reasoning level or fast mode. */
+type OptionDescriptor =
+  | { id: string; type: "select"; options: Array<{ id: string; label: string; isDefault?: boolean }> }
+  | { id: string; type: "boolean" };
+
 type ServerConfig = {
   providers: Array<{
     instanceId: string;
@@ -74,7 +90,13 @@ type ServerConfig = {
     displayName?: string;
     enabled: boolean;
     status: string;
-    models: Array<{ slug: string; name: string; isDefault?: boolean; isLegacy?: boolean }>;
+    models: Array<{
+      slug: string;
+      name: string;
+      isDefault?: boolean;
+      isLegacy?: boolean;
+      capabilities?: { optionDescriptors?: OptionDescriptor[] } | null;
+    }>;
     skills?: Array<{
       name: string;
       displayName?: string;
@@ -87,6 +109,15 @@ type ServerConfig = {
     }>;
   }>;
 };
+
+const modelOptionOf = (descriptor: OptionDescriptor): T3ModelOption =>
+  descriptor.type === "select"
+    ? {
+        id: descriptor.id,
+        type: "select",
+        choices: descriptor.options.map((choice) => ({ id: choice.id, label: choice.label, isDefault: choice.isDefault === true })),
+      }
+    : { id: descriptor.id, type: "boolean" };
 
 export type T3Environment = {
   environmentId: string;
@@ -282,6 +313,7 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
           name: model.name,
           isDefault: model.isDefault === true,
           isLegacy: model.isLegacy === true,
+          options: (model.capabilities?.optionDescriptors ?? []).map(modelOptionOf),
         })),
         // Disabled skills do not run, and `userInvocable: false` ones reject a user's pick.
         skills: (provider.skills ?? [])

@@ -590,7 +590,13 @@ export function makeStore(db: AppDatabase) {
             if (action) {
               const { promptRefs: _, model, ...settings } = action;
               tx.insert(runActions)
-                .values({ ...settings, runId: row.id, modelInstanceId: model?.instanceId ?? null, modelId: model?.model ?? null })
+                .values({
+                  ...settings,
+                  runId: row.id,
+                  modelInstanceId: model?.instanceId ?? null,
+                  modelId: model?.model ?? null,
+                  modelOptions: model?.options ?? null,
+                })
                 .run();
             }
             return row;
@@ -679,14 +685,15 @@ export function makeStore(db: AppDatabase) {
       Effect.sync((): RunAction | null => {
         const row = db.select().from(runActions).where(eq(runActions.runId, runId)).get();
         if (!row) return null;
-        const { runId: _, modelInstanceId, modelId, ...settings } = row;
+        const { runId: _, modelInstanceId, modelId, modelOptions, ...settings } = row;
         const promptRefs = db
           .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version })
           .from(runPrompts)
           .where(eq(runPrompts.runId, runId))
           .orderBy(runPrompts.position)
           .all();
-        return { ...settings, model: modelInstanceId && modelId ? { instanceId: modelInstanceId, model: modelId } : null, promptRefs };
+        const model = modelInstanceId && modelId ? { instanceId: modelInstanceId, model: modelId, ...(modelOptions && { options: modelOptions }) } : null;
+        return { ...settings, model, promptRefs };
       }),
 
     /** Runs of a rule in one status; `started` against the rule's concurrency limit. */

@@ -22,7 +22,15 @@ import {
   type SentryFilters,
 } from "../shared.ts";
 
-export type ModelSelection = { instanceId: string; model: string };
+/**
+ * A model option in T3's own shape, e.g. `{ id: "effort", value: "high" }`.
+ * The reasoning level is the model's first select option (`effort` for
+ * Claude, `reasoningEffort` for Codex), as in T3's own picker.
+ */
+export type ModelOption = { id: string; value: string | boolean };
+
+/** Provider instance, model and options, passed to T3 as its `modelSelection`. No options means the model's defaults. */
+export type ModelSelection = { instanceId: string; model: string; options?: ModelOption[] };
 
 /** One prompt version, as a run records what its first message came from. */
 export type PromptRef = { owner: PromptVersionOwner; id: string; version: number };
@@ -331,6 +339,8 @@ export const runActions = sqliteTable(
     /** Model asked for; null falls back to the project, then the global default. The model used is on the run. */
     modelInstanceId: text("model_instance_id"),
     modelId: text("model_id"),
+    /** Options of the model asked for, such as its reasoning level; null means its defaults. */
+    modelOptions: text("model_options", { mode: "json" }).$type<ModelOption[]>(),
     /** Preset whose live version replaces the run's prompt at start; null once the preset is deleted. */
     presetId: text("preset_id").references(() => prompts.id, { onDelete: "set null" }),
     maxConcurrent: integer("max_concurrent").notNull(),

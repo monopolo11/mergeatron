@@ -244,6 +244,18 @@ describe("run history", () => {
       }),
     ));
 
+  test("a queued run keeps the reasoning level of the model it asked for", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const model = { instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] };
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model, presetId: null, maxConcurrent: 1, promptRefs: [] };
+        const queued = yield* store.recordRun(run({ status: "queued", action }));
+        expect((yield* store.getRunAction(queued.id))?.model).toEqual(model);
+      }),
+    ));
+
   test("deleting a settled run takes its prompt versions and action with it; queued and working runs stay", () =>
     runWith(
       testLayer(),

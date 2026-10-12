@@ -1,0 +1,1 @@
+ALTER TABLE `run_actions` ADD `model_options` text;

@@ -32,7 +32,7 @@ export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
 export type PromptVersion = typeof promptVersions.$inferSelect;
-export type { ModelSelection, PromptRef, RunAction } from "./db/schema.ts";
+export type { ModelOption, ModelSelection, PromptRef, RunAction } from "./db/schema.ts";
 
 /**
  * Payloads accepted from the UI, as Effect schemas. Decoding trims names,
@@ -56,7 +56,12 @@ const cleanedOrNull = (clean: (value: string) => string) =>
     Schema.withDecodingDefault(Effect.succeed(null)),
   );
 
-const ModelSelectionSchema = Schema.Struct({ instanceId: nonEmpty, model: nonEmpty });
+const ModelOptionSchema = Schema.Struct({ id: nonEmpty, value: Schema.Union([nonEmpty, Schema.Boolean]) });
+const ModelSelectionSchema = Schema.Struct({
+  instanceId: nonEmpty,
+  model: nonEmpty,
+  options: Schema.optionalKey(Schema.Array(ModelOptionSchema).pipe(Schema.mutable)),
+});
 
 const RuleFiltersSchema = Schema.Struct({
   reasons: Schema.Array(Schema.Literals(INBOX_REASONS)).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
