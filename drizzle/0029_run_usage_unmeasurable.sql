@@ -1,0 +1,1 @@
+ALTER TABLE `runs` ADD `usage_unmeasurable_at` text;

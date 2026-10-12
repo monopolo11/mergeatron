@@ -147,15 +147,23 @@ const unmeasuredRuns = Effect.flatMap(Store, (store) => store.runsWithoutUsage(n
 
 /**
  * Measures settled runs that have no usage yet, one at a time: runs from
- * before usage was recorded, and runs whose measuring failed.
+ * before usage was recorded, and runs whose measuring failed. Runs with
+ * nothing to measure (no session, no log) are marked, so they are not
+ * counted as pending or tried again.
  */
 const backfillUsage = Effect.fn("usage.backfill")(function* () {
   const pending = yield* unmeasuredRuns;
   // Threads deleted in T3 and pruned logs are expected here: count them instead of logging each.
   const outcomes = yield* Effect.forEach(pending, (run) => Effect.result(recordUsage(run)));
+  const unmeasurable = pending.filter((_, i) => {
+    const outcome = outcomes[i]!;
+    return outcome._tag === "Success" && outcome.success === null;
+  });
+  yield* (yield* Store).markUsageUnmeasurable(unmeasurable.map((run) => run.id));
   yield* log.info("usage backfilled", {
     runs: pending.length,
     recorded: outcomes.filter((outcome) => outcome._tag === "Success" && outcome.success !== null).length,
+    unmeasurable: unmeasurable.length,
     failed: outcomes.filter((outcome) => outcome._tag === "Failure").length,
   });
 });

@@ -254,6 +254,12 @@ export const runs = sqliteTable(
      * startup reads settled runs that are still null.
      */
     pullRequestsCheckedAt: text("pull_requests_checked_at"),
+    /**
+     * When a backfill found nothing to measure for this run (T3 names no
+     * session, or ccusage has no log for it): the backfill stops trying it.
+     * Null until then, and for measured runs.
+     */
+    usageUnmeasurableAt: text("usage_unmeasurable_at"),
     /** When the T3 thread opened; later than `createdAt` by any queue wait. Null if no thread ever opened. */
     startedAt: text("started_at"),
     /** When the run reached done, skipped or failed. */

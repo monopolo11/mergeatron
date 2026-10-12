@@ -141,6 +141,20 @@ describe("recordUsage", () => {
       }),
     ));
 
+  test("the backfill stops counting runs with no session to measure", () =>
+    runWith(
+      testLayer({ t3: fakeT3({ thread: () => Effect.succeed(thread([provider("gone")])) }) }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const run = yield* recordRun();
+        expect(yield* startBackfill()).toEqual({ pending: 1, running: true });
+        const background = yield* Background;
+        yield* Effect.repeat(background.watching, { schedule: Schedule.spaced("5 millis"), until: (running) => running === 0 });
+        expect((yield* store.runUsage([run.id])).size).toBe(0);
+        expect(yield* startBackfill()).toEqual({ pending: 0, running: false });
+      }),
+    ));
+
   test("stores nothing when no session is found", () =>
     runWith(
       testLayer({ t3: fakeT3({ thread: () => Effect.succeed(thread([provider("gone")])) }) }),

@@ -158,7 +158,7 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
 /** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, when it is rated, or when its PRs are read. */
-type RunOutcome = "modelInstanceId" | "modelId" | "reasoning" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt";
+type RunOutcome = "modelInstanceId" | "modelId" | "reasoning" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt" | "usageUnmeasurableAt";
 
 /** Statuses that end a run. */
 export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);
@@ -668,17 +668,23 @@ export function makeStore(db: AppDatabase) {
         return new Map([...Map.groupBy(rows, (row) => row.runId)].map(([runId, rows]) => [runId, rows.map(({ runId: _, ...pull }) => pull)]));
       }),
 
-    /** Runs that ended with a thread, at or after `since`, and have no usage yet, oldest first: what `backfillUsage` measures. */
+    /** Runs that ended with a thread, at or after `since`, and have no usage yet and were not found unmeasurable, oldest first: what `backfillUsage` measures. */
     runsWithoutUsage: (since: string) =>
       Effect.sync(() =>
         db
           .select({ id: runs.id, threadId: runs.threadId })
           .from(runs)
           .leftJoin(runUsage, eq(runUsage.runId, runs.id))
-          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"]), gte(runs.settledAt, since), isNull(runUsage.runId)))
+          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"]), gte(runs.settledAt, since), isNull(runUsage.runId), isNull(runs.usageUnmeasurableAt)))
           .orderBy(runs.settledAt)
           .all(),
       ),
+
+    /** Stops `runsWithoutUsage` returning these runs: their thread has no session usage can be read from. */
+    markUsageUnmeasurable: (runIds: string[]) =>
+      Effect.sync(() => {
+        if (runIds.length > 0) db.update(runs).set({ usageUnmeasurableAt: new Date().toISOString() }).where(inArray(runs.id, runIds)).run();
+      }),
 
     /** What a rule-driven run was set to start with; null for handoffs and connection tests. */
     getRunAction: (runId: string) =>
