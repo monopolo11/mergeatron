@@ -3,13 +3,12 @@ import { Background } from "./background.ts";
 import { changesRequestedStreak, watchCompletion } from "./completion.ts";
 import { errorMessage } from "./errors.ts";
 import type { WebhookContext } from "./github.ts";
-import { openThread, resolveProject } from "./handler.ts";
+import { findProject, openThread } from "./handler.ts";
 import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
-import { T3 } from "./t3.ts";
 import { renderTemplate } from "./template.ts";
 
 const log = logger("handoff");
@@ -88,10 +87,9 @@ export const handoffIfStuck = Effect.fn("handoff.ifStuck")(function* (review: Ru
 const startHandoff = (review: Run, ctx: WebhookContext, rounds: Run[]) =>
   Effect.gen(function* () {
     const store = yield* Store;
-    const t3 = yield* T3;
     const rule = yield* store.getRule(review.ruleId);
     if (!rule) return yield* Effect.fail(new HandoffError({ message: `rule "${review.ruleName}" no longer exists` }));
-    const project = resolveProject(rule, yield* t3.projects(), ctx.repo);
+    const project = yield* findProject(rule, ctx.repo);
     if (!project) return yield* Effect.fail(new HandoffError({ message: `no T3 project for ${ctx.repo}` }));
     return yield* openThread(rule, project, ctx, {
       title: `Handoff: ${ctx.pr_title ?? ctx.pr_url ?? ctx.repo}`,

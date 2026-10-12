@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
 import { CommandError } from "./exec.ts";
-import { handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch, runRules } from "./handler.ts";
+import { findProject, handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch, runRules } from "./handler.ts";
 import { itemContext, itemEvent } from "./inbox.ts";
 import { linear } from "./inbox.test.ts";
 import { DEFAULT_SETTINGS, type Rule } from "./rules.ts";
@@ -96,6 +96,14 @@ describe("resolveProject", () => {
     expect(hostsRepository(projects[0]!, "acme/widgets")).toBe(true);
     expect(hostsRepository(projects[1]!, "acme/widgets")).toBe(false);
     expect(hostsRepository({ ...projects[0]!, repositoryIdentity: { canonicalKey: "x", owner: "acme", name: "widgets" } }, "acme/widgets")).toBe(false);
+  });
+
+  test("findProject reads again while T3 has not resolved a remote yet", async () => {
+    let reads = 0;
+    const t3 = fakeT3({ projects: () => Effect.sync(() => (reads++ === 0 ? [{ ...projects[0]!, repositoryIdentity: null }] : projects)) });
+    const project = await runWith(testLayer({ t3 }), findProject(base, "acme/widgets"));
+    expect(project?.id).toBe("p1");
+    expect(reads).toBe(2);
   });
 });
 

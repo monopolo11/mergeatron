@@ -1,4 +1,4 @@
-import { Cause, Clock, Effect, Metric, Queue, Semaphore } from "effect";
+import { Cause, Clock, Effect, Metric, Queue, Schedule, Semaphore } from "effect";
 import { Background, RunEvents } from "./background.ts";
 import { pausedReview, watchCompletion, type CompletionServices } from "./completion.ts";
 import { errorMessage } from "./errors.ts";
@@ -9,7 +9,7 @@ import type { PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
 import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, reasoningOf, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
-import { T3, type T3Error, type T3Project } from "./t3.ts";
+import { T3, type T3Error, type T3HttpError, type T3Project } from "./t3.ts";
 import { joinPrompts, renderTemplate } from "./template.ts";
 
 export { matchRules, ruleMismatch } from "./match.ts";
@@ -61,6 +61,29 @@ export function resolveProject(rule: Pick<Rule, "projectId">, projects: T3Projec
   if (rule.projectId) return projects.find((project) => project.id === rule.projectId) ?? null;
   return projects.find((project) => hostsRepository(project, repo)) ?? null;
 }
+
+/** Re-reads of T3's projects while a remote is unresolved: about 3s in all. */
+const IDENTITY_REREAD = Schedule.spaced("500 millis");
+const IDENTITY_REREADS = 6;
+
+/**
+ * `resolveProject` against T3's live projects. T3 caches each project's git
+ * identity for a minute; the first read after that answers
+ * `repositoryIdentity: null` and resolves it in the background. So a miss
+ * while some project is unresolved reads again shortly before giving up.
+ */
+export const findProject = (rule: Pick<Rule, "projectId">, repo: string): Effect.Effect<T3Project | null, T3HttpError, T3> =>
+  Effect.gen(function* () {
+    const t3 = yield* T3;
+    const read = Effect.map(t3.projects(), (projects) => ({
+      project: resolveProject(rule, projects, repo),
+      unresolved: !rule.projectId && repo !== "" && projects.some((project) => !project.repositoryIdentity),
+    }));
+    const { project } = yield* read.pipe(
+      Effect.repeat({ schedule: IDENTITY_REREAD, times: IDENTITY_REREADS, until: (found) => found.project !== null || !found.unresolved }),
+    );
+    return project;
+  });
 
 /** True when the project's git remote is this GitHub repository (`owner/name`). */
 export function hostsRepository(project: T3Project, repo: string): boolean {
@@ -346,13 +369,12 @@ const withPreviousReview = (ctx: WebhookContext, repo: string, prNumber: string)
 const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect<StartResult, T3Error, Store | T3> =>
   Effect.gen(function* () {
     const store = yield* Store;
-    const t3 = yield* T3;
     const settings = yield* store.getSettings();
     if (rule.skipSelfReview && ctx.pr_author && settings.githubLogin && sameName(ctx.pr_author, settings.githubLogin)) {
       return skipped(`PR by ${ctx.pr_author} is your own; rule skips self review`);
     }
 
-    const project = resolveProject(rule, yield* t3.projects(), ctx.repo);
+    const project = yield* findProject(rule, ctx.repo);
     if (!project) {
       return skipped(
         rule.projectId
