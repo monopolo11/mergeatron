@@ -11,7 +11,8 @@ import { cn } from "@/lib/utils";
 
 /** Tone colours as CSS values, for SVG fills. */
 const FILL: Record<Tone, string> = { ok: "var(--ok)", warn: "var(--warn)", err: "var(--destructive)", active: "var(--active)", idle: "var(--muted-foreground)" };
-const AXIS = 40;
+/** Room left of the plot for y labels, fitting "$200.00" at 10px type; shared so day columns line up between charts. */
+const AXIS = 56;
 const LABEL = 16;
 /** Room above the top grid line for its label. */
 const TOP = 6;
@@ -66,12 +67,13 @@ function Frame({
   const every = Math.max(1, Math.ceil(points.length / Math.max(1, Math.floor(plot / 56))));
 
   return (
-    <div ref={ref} className="relative" onMouseLeave={() => setHover(null)}>
+    // The svg is out of flow so it adds no intrinsic width: a chart sized to a wide column would otherwise keep that column from shrinking when the window narrows.
+    <div ref={ref} className="relative" style={{ height: TOP + height + LABEL }} onMouseLeave={() => setHover(null)}>
       {width > 0 && (
         <svg
           width={width}
           height={TOP + height + LABEL}
-          className="block"
+          className="absolute top-0 left-0"
           onMouseMove={(e) => {
             // Measured against the svg: offsetX is relative to whichever mark is under the pointer.
             const index = Math.floor((e.clientX - e.currentTarget.getBoundingClientRect().left - AXIS) / band);

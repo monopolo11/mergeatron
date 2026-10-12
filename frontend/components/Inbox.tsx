@@ -19,6 +19,8 @@ import { INBOX_KINDS, INBOX_REASON_LABELS, INBOX_REASONS, INBOX_SOURCE_SETUP, IN
 type Row = InboxResponse["items"][number];
 
 const mono = "font-mono text-xs";
+/** Columns shown only on a wide table (72rem); narrower, the last run moves under the title and the timestamps drop. */
+const ROOMY = "hidden @6xl:table-cell";
 const KIND_LABELS: Record<InboxKind, string> = { pull_request: "PR", issue: "Issue" };
 
 /** `/inbox` search: the inbox's own facets (the repo facet and range are shared, see lib/scope.ts), and whether to list items that left. */
@@ -101,7 +103,7 @@ export function Inbox() {
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["inbox"] });
 
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="@container flex min-h-full flex-col">
       <PageHeader
         title="Inbox"
         summary={data && `${visible.filter((item) => !item.goneAt).length} items`}
@@ -141,9 +143,9 @@ export function Inbox() {
               <TableHead className="w-7" />
               <TableHead>Item</TableHead>
               <TableHead className="w-full">Title</TableHead>
-              <TableHead>Last run</TableHead>
-              <TableHead className="text-right">In inbox</TableHead>
-              <TableHead className="text-right">Updated</TableHead>
+              <TableHead className={ROOMY}>Last run</TableHead>
+              <TableHead className={cn(ROOMY, "text-right")}>In inbox</TableHead>
+              <TableHead className={cn(ROOMY, "text-right")}>Updated</TableHead>
               <TableHead className="w-24" />
             </TableRow>
           </TableHeader>
@@ -163,12 +165,13 @@ export function Inbox() {
                   <TableCell className="max-w-0">
                     <div className="truncate" title={item.title}>{item.title}</div>
                     <div className="truncate text-muted-foreground">{meta(item)}</div>
+                    {item.lastRun && <div className="truncate @6xl:hidden"><LastRun run={item.lastRun} /></div>}
                   </TableCell>
-                  <TableCell><LastRun run={item.lastRun} /></TableCell>
-                  <TableCell className="text-right text-muted-foreground" title={`first seen ${new Date(item.firstSeenAt).toLocaleString()} · last seen ${new Date(item.lastSeenAt).toLocaleString()}`}>
+                  <TableCell className={ROOMY}><LastRun run={item.lastRun} /></TableCell>
+                  <TableCell className={cn(ROOMY, "text-right text-muted-foreground")} title={`first seen ${new Date(item.firstSeenAt).toLocaleString()} · last seen ${new Date(item.lastSeenAt).toLocaleString()}`}>
                     {item.goneAt ? `left ${timeAgo(item.goneAt)}` : since(item.firstSeenAt)}
                   </TableCell>
-                  <TableCell className="text-right text-muted-foreground" title={new Date(item.updatedAt).toLocaleString()}>{timeAgo(item.updatedAt)}</TableCell>
+                  <TableCell className={cn(ROOMY, "text-right text-muted-foreground")} title={new Date(item.updatedAt).toLocaleString()}>{timeAgo(item.updatedAt)}</TableCell>
                   <TableCell className="text-right"><Button size="xs" variant="outline" onClick={() => setDispatching([item])}>Dispatch</Button></TableCell>
                 </TableRow>
               ))}

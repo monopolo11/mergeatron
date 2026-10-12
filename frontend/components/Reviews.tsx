@@ -3,11 +3,12 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { Empty, ExternalLink } from "@/components/Field";
 import { FilterBar, useScope } from "@/components/FilterBar";
 import { Count, PageHeader } from "@/components/Toolbar";
-import { Table, TableBody, TableCell, TableFigure, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableFigure, TableHead, TableHeader, TableRow, WIDE } from "@/components/ui/table";
 import { api, timeAgo } from "@/lib/api";
 import { useRunFacets } from "@/lib/runFacets";
 import { resolveWindow, scopeKey, scopeQuery, type RunFacet, type ScopeSearch } from "@/lib/scope";
 import { PR_STATUS, TONE_TEXT } from "@/lib/status";
+import { cn } from "@/lib/utils";
 import type { PullRequestStatus, PullRequestSummary } from "../../src/store.ts";
 
 const REVIEW_FACETS = ["rule", "repo", "author"] as const satisfies RunFacet[];
@@ -38,7 +39,7 @@ export function Reviews() {
   const visible = filter ? (data ?? []).filter((pr) => pr.status === filter) : data ?? [];
 
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="@container flex min-h-full flex-col">
       <PageHeader
         title="Reviews"
         summary={data && `${data.length} PRs · ${data.reduce((sum, pr) => sum + pr.reviews, 0)} reviews`}
@@ -67,10 +68,10 @@ export function Reviews() {
               <TableHead className="w-full">Title</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Reviews</TableHead>
-              <TableHead className="text-right">Approved</TableHead>
-              <TableHead className="text-right">Changes</TableHead>
-              <TableHead className="text-right">Skipped</TableHead>
-              <TableHead className="text-right">Failed</TableHead>
+              <TableHead className={cn(WIDE, "text-right")}>Approved</TableHead>
+              <TableHead className={cn(WIDE, "text-right")}>Changes</TableHead>
+              <TableHead className={cn(WIDE, "text-right")}>Skipped</TableHead>
+              <TableHead className={cn(WIDE, "text-right")}>Failed</TableHead>
               <TableHead className="text-right">Last</TableHead>
             </TableRow>
           </TableHeader>
@@ -85,10 +86,10 @@ export function Reviews() {
                 </TableCell>
                 <TableCell className={TONE_TEXT[PR_STATUS[pr.status].tone]}>{PR_STATUS[pr.status].label}</TableCell>
                 <TableFigure value={pr.reviews} />
-                <TableFigure value={pr.approved} tone="ok" />
-                <TableFigure value={pr.changesRequested} tone="warn" />
-                <TableFigure value={pr.skipped} tone="warn" />
-                <TableFigure value={pr.failed} tone="err" />
+                <TableFigure className={WIDE} value={pr.approved} tone="ok" />
+                <TableFigure className={WIDE} value={pr.changesRequested} tone="warn" />
+                <TableFigure className={WIDE} value={pr.skipped} tone="warn" />
+                <TableFigure className={WIDE} value={pr.failed} tone="err" />
                 <TableCell className="text-right text-muted-foreground" title={new Date(pr.lastAt).toLocaleString()}>{timeAgo(pr.lastAt)}</TableCell>
               </TableRow>
             ))}

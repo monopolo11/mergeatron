@@ -111,7 +111,8 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
         </nav>
       </aside>
 
-      <div className="min-w-0 overflow-auto">
+      {/* Its grids answer to this pane, not the window: beside the section list it is narrower than the viewport suggests. */}
+      <div className="@container min-w-0 overflow-auto">
         <Toolbar title={section.label}>
           {/* Presets save on demand in their own editor; the autosave state is the other sections'. */}
           {section.id !== "presets" && (
@@ -122,7 +123,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
           {section.id === "connection" && <Connection shell={shell} />}
 
           {section.id === "defaults" && (
-            <div className="grid gap-x-6 gap-y-3 md:grid-cols-[minmax(0,28rem)_12rem_16rem]">
+            <div className="grid gap-x-6 gap-y-3 @3xl:grid-cols-[minmax(0,28rem)_12rem_16rem]">
               <form.Field name="model">
                 {(field) => (
                   <Field label="Model" hint="Used when a rule has no model override and the T3 project has no default.">
@@ -168,7 +169,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
           {section.id === "presets" && <Presets />}
 
           {section.id === "reviews" && (
-            <div className="grid gap-x-6 gap-y-3 md:grid-cols-[14rem_1fr]">
+            <div className="grid gap-x-6 gap-y-3 @2xl:grid-cols-[14rem_1fr]">
               <form.Field name="maxChangesRequestedRounds">
                 {(field) => (
                   <Field label="Pause after change requests" hint="Reviews of one PR that request changes in a row before its reviews pause and a handoff thread is written. 0 never pauses.">
@@ -195,7 +196,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
 
           {section.id === "slack" && (
             <div className="grid gap-6">
-              <div className="grid gap-x-6 gap-y-3 md:grid-cols-[14rem_1fr]">
+              <div className="grid gap-x-6 gap-y-3 @2xl:grid-cols-[14rem_1fr]">
                 <form.Field name="reviewChannel">
                   {(field) => (
                     <Field label="Review channel" hint="Where request_review posts when the agent names no channel. Channel id or #name.">
@@ -285,7 +286,7 @@ function Connection({ shell }: { shell: Shell }) {
   const environment = status?.t3.environment ?? null;
   const withRemote = projects.filter((project) => project.repositoryIdentity?.provider === "github").length;
   return (
-    <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-5 gap-y-2 text-xs">
+    <dl className="grid grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-x-5 gap-y-2 text-xs wrap-anywhere">
       <dt className="text-muted-foreground">T3 Code</dt>
       <dd className="min-w-0">
         <Dot tone={environment ? "ok" : status ? "err" : "idle"} />

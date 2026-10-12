@@ -221,7 +221,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
       >
         {error && <p className="text-xs text-destructive">{error}</p>}
 
-        <div className="grid gap-x-4 gap-y-3 md:grid-cols-2">
+        <div className="grid gap-x-4 gap-y-3 @2xl:grid-cols-2">
           <form.Field name="name">
             {(field) => (
               <Field label="Name">
@@ -423,7 +423,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
           </form.Field>
           <form.Field name="model">
             {(field) => (
-              <Field label="Model" className="md:col-span-2">
+              <Field label="Model" className="@2xl:col-span-2">
                 <div className="flex flex-wrap gap-2">
                   <Select
                     value={field.state.value ? "override" : "default"}

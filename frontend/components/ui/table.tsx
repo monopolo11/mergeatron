@@ -8,6 +8,12 @@ import { cn } from "@/lib/utils"
  * Callers add alignment and width, nothing else.
  */
 
+/**
+ * Classes for a column that only shows when the table has room (56rem wide).
+ * Needs an `@container` ancestor, usually the page, sized like the table.
+ */
+const WIDE = "hidden @4xl:table-cell"
+
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
     <div
@@ -118,6 +124,7 @@ function TableFigure({ value, tone, className }: { value: number; tone?: Tone; c
 }
 
 export {
+  WIDE,
   Table,
   TableHeader,
   TableBody,

@@ -73,7 +73,7 @@ export function Sidebar({
             type="button"
             aria-pressed={runsOpen}
             onClick={onToggleRuns}
-            className={cn("mt-1 hidden items-center justify-between border-t pt-2 text-left hover:text-foreground lg:flex", runsOpen && "text-foreground")}
+            className={cn("mt-1 hidden items-center justify-between border-t pt-2 text-left hover:text-foreground xl:flex", runsOpen && "text-foreground")}
           >
             Live panel
             {running > 0 && <span className="font-mono text-active">{running}</span>}

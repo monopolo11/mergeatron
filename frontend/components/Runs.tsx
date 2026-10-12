@@ -17,7 +17,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, WIDE } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api, timeAgo } from "@/lib/api";
@@ -107,8 +107,9 @@ export function Runs() {
   const next = [...visible.slice(index + 1), ...visible.slice(0, Math.max(index, 0))].find((run) => run.ratedAt === null && RATABLE.has(run.status));
 
   return (
-    <div className={cn("grid h-full overflow-hidden", openId && "grid-cols-[minmax(0,1fr)_420px]")}>
-      <div className="min-w-0 overflow-auto">
+    <div className={cn("relative grid h-full overflow-hidden", openId && "lg:grid-cols-[minmax(0,1fr)_420px]")}>
+      {/* The table is the container its secondary columns answer to: narrow beside the open run or on a portrait tablet. */}
+      <div className="@container min-w-0 overflow-auto">
         <PageHeader
           title="Runs"
           summary={
@@ -154,11 +155,11 @@ export function Runs() {
                 <TableHead>When</TableHead>
                 <TableHead className="w-full">Target</TableHead>
                 <TableHead>Rule</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Prompt</TableHead>
+                <TableHead className={WIDE}>Model</TableHead>
+                <TableHead className={WIDE}>Prompt</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Cost</TableHead>
-                <TableHead className="text-right">Tokens</TableHead>
+                <TableHead className={cn(WIDE, "text-right")}>Tokens</TableHead>
                 <TableHead className="text-right">Worked</TableHead>
                 <TableHead className="text-right">Score</TableHead>
               </TableRow>
@@ -173,8 +174,8 @@ export function Runs() {
                     </Link>
                   </TableCell>
                   <TableCell>{ruleNames.get(run.ruleId) ?? run.ruleName}</TableCell>
-                  <TableCell className="font-mono">{run.modelId}{run.reasoning && <span className="text-muted-foreground"> · {run.reasoning}</span>}</TableCell>
-                  <TableCell className="font-mono text-muted-foreground" title={run.promptRefs.map(promptLabel).join(" + ")}>
+                  <TableCell className={cn(WIDE, "font-mono")}>{run.modelId}{run.reasoning && <span className="text-muted-foreground"> · {run.reasoning}</span>}</TableCell>
+                  <TableCell className={cn(WIDE, "font-mono text-muted-foreground")} title={run.promptRefs.map(promptLabel).join(" + ")}>
                     {run.promptRefs[0] && promptLabel(run.promptRefs[0])}
                     {run.promptRefs.length > 1 && ` +${run.promptRefs.length - 1}`}
                   </TableCell>
@@ -182,7 +183,7 @@ export function Runs() {
                   <TableCell className={cn("text-right font-mono", !run.usage && "text-muted-foreground")} title={run.usage ? usd(run.usage.costUsd, true) : undefined}>
                     {run.usage ? usd(run.usage.costUsd) : "-"}
                   </TableCell>
-                  <TableCell className="text-right font-mono text-muted-foreground">{run.usage ? tokenCount(run.usage.totalTokens) : "-"}</TableCell>
+                  <TableCell className={cn(WIDE, "text-right font-mono text-muted-foreground")}>{run.usage ? tokenCount(run.usage.totalTokens) : "-"}</TableCell>
                   <TableCell className="text-right font-mono">{duration(run.elapsedMs)}</TableCell>
                   <TableCell className="text-right font-mono"><Score run={run} /></TableCell>
                 </TableRow>
@@ -193,7 +194,7 @@ export function Runs() {
       </div>
 
       {openId && (
-        <aside className="overflow-auto border-l">
+        <aside className="overflow-auto border-l max-lg:absolute max-lg:inset-0 max-lg:z-20 max-lg:border-l-0 max-lg:bg-background">
           <RunPanel key={openId} id={openId} promptLabel={promptLabel} onClose={() => setSearch({ run: undefined }, true)} onNext={next ? () => open(next.id) : null} />
         </aside>
       )}
