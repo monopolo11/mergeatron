@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Result, Schema } from "effect";
-import { RuleInput, RunQuery, RunRatingInput, SettingsInput } from "./rules.ts";
+import { RuleInput, RunQuery, runScope, RunRatingInput, SettingsInput } from "./rules.ts";
 import { DEFAULT_SETTINGS } from "./rules.ts";
 
 describe("RuleInput", () => {
@@ -68,9 +68,14 @@ describe("RunRatingInput", () => {
 });
 
 describe("RunQuery", () => {
-  test("decodes numbers from search params", () => {
-    const query = Schema.decodeUnknownResult(RunQuery)({ promptOwner: "preset", promptId: "p1", promptVersion: "4", limit: "500" });
-    expect(Result.isSuccess(query) && query.success).toEqual({ promptOwner: "preset", promptId: "p1", promptVersion: 4, limit: 500 });
+  test("decodes the limit and splits facet lists into a scope", () => {
+    const query = Schema.decodeUnknownResult(RunQuery)({ prompt: "preset:p1:4,rule:r1,bogus:x", source: "slack,fax", live: "1", limit: "500" });
+    expect(Result.isSuccess(query) && query.success.limit).toBe(500);
+    expect(Result.isSuccess(query) && runScope(query.success)).toMatchObject({
+      prompts: [{ owner: "preset", id: "p1", version: 4 }, { owner: "rule", id: "r1", version: undefined }],
+      sources: ["slack"],
+      livePrompts: true,
+    });
     expect(Result.isFailure(Schema.decodeUnknownResult(RunQuery)({ limit: "501" }))).toBe(true);
   });
 });

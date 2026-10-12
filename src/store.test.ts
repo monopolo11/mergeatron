@@ -51,7 +51,7 @@ describe("Store.analytics", () => {
         yield* store.recordRun(run({ event: "slack.message", source: "slack", author: "bob", status: "done", result: "lgtm" }));
 
         const analytics = yield* store.analytics();
-        expect(analytics.all).toEqual({ total: 5, queued: 0, started: 2, done: 1, skipped: 1, failed: 1 });
+        expect(analytics.all).toMatchObject({ total: 5, queued: 0, started: 2, done: 1, skipped: 1, failed: 1, rated: 0, avgRating: null });
         expect(analytics.byAuthor).toEqual([
           { author: "alice", total: 2, queued: 0, started: 1, done: 0, skipped: 0, failed: 1, totalCostUsd: null },
           { author: "bob", total: 2, queued: 0, started: 0, done: 1, skipped: 1, failed: 0, totalCostUsd: null },
@@ -69,14 +69,61 @@ describe("Store.analytics", () => {
       testLayer(),
       Effect.gen(function* () {
         const store = yield* Store;
-        expect(yield* store.analytics()).toEqual({
-          all: { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 },
+        expect(yield* store.analytics()).toMatchObject({
+          all: { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0, totalCostUsd: null },
+          byDay: [],
           byAuthor: [],
           bySource: [],
           byPrompt: [],
           usage: { runs: 0, measured: 0, totalCostUsd: null },
           byModel: [],
         });
+      }),
+    ));
+});
+
+describe("Store run scope", () => {
+  test("narrows lists, analytics, PRs and facets to a window and facet values", () =>
+    runWith(
+      testLayer(),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const p1 = yield* store.createPrompt({ name: "review", body: "x" });
+        yield* store.createPromptVersion("preset", p1.id, { body: "x2", note: null, source: "ui" });
+        const ref = (version: number) => ({ owner: "preset" as const, id: p1.id, version });
+        const pr = (number: string) => ({ pr_number: number, pr_title: `PR ${number}` }) as Run["context"];
+        const old = yield* store.recordRun(run({ status: "done", promptRefs: [ref(1)], context: pr("1") }));
+        const live = yield* store.recordRun(run({ status: "done", author: "bob", promptRefs: [ref(1)], context: pr("2") }));
+        const draft = yield* store.recordRun(run({ status: "failed", repo: "acme/gadgets", promptRefs: [ref(2)] }));
+        const [{ createdAt: t1 }, { createdAt: t2 }] = [old, live];
+
+        const ids = (runs: { id: string }[]) => runs.map((r) => r.id);
+        // v1 is live: v2 was added without promoting it.
+        expect(ids(yield* store.listRuns({ livePrompts: true }))).toEqual([live.id, old.id]);
+        // Picked versions add to the live ones.
+        expect(ids(yield* store.listRuns({ livePrompts: true, prompts: [ref(2)] }))).toEqual([draft.id, live.id, old.id]);
+        expect(ids(yield* store.listRuns({ authors: ["bob", "carol"] }))).toEqual([live.id]);
+        expect(ids(yield* store.listRuns({ repos: ["acme/gadgets"] }))).toEqual([draft.id]);
+        expect(ids(yield* store.listRuns({ from: t2 }))).toEqual(t1 === t2 ? [draft.id, live.id, old.id] : [draft.id, live.id]);
+
+        const analytics = yield* store.analytics({ livePrompts: true });
+        expect(analytics.all.total).toBe(2);
+        expect(analytics.byPrompt.map((row) => row.version)).toEqual([1]);
+        expect(analytics.byDay).toEqual([{ day: t1.slice(0, 10), total: 2, queued: 0, started: 0, done: 2, skipped: 0, failed: 0, totalCostUsd: null, avgRating: null }]);
+        expect((yield* store.pullRequests({ authors: ["bob"] })).map((pull) => pull.number)).toEqual(["2"]);
+
+        // A PR's status reads all its runs: the pause streak counts runs the scope leaves out, the review counts do not.
+        for (const author of ["dave", "dave", "carol"])
+          yield* store.recordRun(run({ status: "done", author, context: pr("7"), result: "CHANGES_REQUESTED: fix it" }));
+        expect(yield* store.pullRequests({ authors: ["carol"] })).toMatchObject([{ number: "7", status: "paused", reviews: 1, changesRequested: 1 }]);
+
+        const facets = yield* store.runFacets({ to: "2000-01-01T00:00:00.000Z" });
+        expect(facets.rules).toEqual([]);
+        expect((yield* store.runFacets()).liveRuns).toBe(2);
+        expect((yield* store.runFacets()).repos).toEqual([
+          { value: "acme/widgets", count: 5 },
+          { value: "acme/gadgets", count: 1 },
+        ]);
       }),
     ));
 });
@@ -115,9 +162,9 @@ describe("run history", () => {
         expect(yield* store.rateRun("gone", { rating: 1, feedback: "x", followUpOf: null })).toBeNull();
 
         const ids = (runs: { id: string }[]) => runs.map((r) => r.id);
-        expect(ids(yield* store.listRuns({ prompt: { owner: "preset", id: p1.id } }))).toEqual([v2b.id, v2.id, v1.id]);
-        expect(ids(yield* store.listRuns({ prompt: { owner: "preset", id: p1.id, version: 2 } }))).toEqual([v2b.id, v2.id]);
-        expect(ids(yield* store.listRuns({ model: "claude-fable-5-1" }))).toEqual([v2b.id]);
+        expect(ids(yield* store.listRuns({ prompts: [{ owner: "preset", id: p1.id }] }))).toEqual([v2b.id, v2.id, v1.id]);
+        expect(ids(yield* store.listRuns({ prompts: [{ owner: "preset", id: p1.id, version: 2 }] }))).toEqual([v2b.id, v2.id]);
+        expect(ids(yield* store.listRuns({ models: ["claude-fable-5-1"] }))).toEqual([v2b.id]);
         expect(ids(yield* store.listRuns({ rated: true, limit: 2 }))).toEqual([v2b.id, v2.id]);
         expect(yield* store.listRuns({ rated: false })).toHaveLength(1);
 

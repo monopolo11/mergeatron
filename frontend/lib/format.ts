@@ -11,3 +11,10 @@ export function tokenCount(value: number): string {
   if (value < 1_000_000) return `${Math.round(value / 1_000)}k`;
   return `${(value / 1_000_000).toFixed(2)}M`;
 }
+
+/** How long until a time: `now`, `in 3m`, `in 2h`. */
+export function timeUntil(iso: string): string {
+  const minutes = Math.round((Date.parse(iso) - Date.now()) / 60_000);
+  if (minutes < 1) return "now";
+  return minutes < 60 ? `in ${minutes}m` : `in ${Math.round(minutes / 60)}h`;
+}

@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
  */
 export function Toolbar({ title, children, className }: { title?: ReactNode; children?: ReactNode; className?: string }) {
   return (
-    <div className={cn("sticky top-0 z-10 flex min-h-9 flex-wrap items-center gap-x-3 gap-y-1 border-b bg-background px-3 py-1 text-xs", className)}>
+    <div className={cn("sticky top-0 z-10 flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-b bg-background px-3 py-1 text-xs", className)}>
       {title !== undefined && <span className="truncate font-medium text-foreground">{title}</span>}
       {children}
     </div>
@@ -66,7 +66,20 @@ export function ToolbarDivider() {
   return <span aria-hidden className="h-4 w-px bg-border" />;
 }
 
-/** A number inside a toolbar summary line, set a size up and in the foreground colour. */
-export function Figure({ children }: { children: ReactNode }) {
-  return <span className="text-[13px] text-foreground">{children}</span>;
+/**
+ * The top of a page: its title with a summary line beside it, then the
+ * page's FilterBar and, under that, quick toggles such as status counts.
+ * Sticks to the top while the page scrolls.
+ */
+export function PageHeader({ title, summary, filters, toggles }: { title: ReactNode; summary?: ReactNode; filters?: ReactNode; toggles?: ReactNode }) {
+  return (
+    <div className="sticky top-0 z-10 border-b bg-background">
+      <div className="flex h-11 items-center gap-3 px-3">
+        <h1 className="shrink-0 text-[13px] font-medium">{title}</h1>
+        {summary && <div className="min-w-0 truncate font-mono text-xs text-muted-foreground">{summary}</div>}
+      </div>
+      {filters}
+      {toggles && <div className="flex flex-wrap items-center gap-x-1 gap-y-1 border-t px-2 py-1 text-xs">{toggles}</div>}
+    </div>
+  );
 }

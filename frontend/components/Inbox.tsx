@@ -1,92 +1,138 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { DispatchDialog } from "@/components/DispatchDialog";
 import { Empty, ExternalLink, GroupLabel, RunStatus } from "@/components/Field";
-import { Count, Toolbar, ToolbarDivider } from "@/components/Toolbar";
+import { FilterBar, useScope, type Facet } from "@/components/FilterBar";
+import { Count, PageHeader } from "@/components/Toolbar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, timeAgo } from "@/lib/api";
+import { resolveWindow } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import type { InboxItem, InboxResponse, InboxRun } from "../../src/inbox.ts";
 import type { PollStatus } from "../../src/poller.ts";
-import { INBOX_REASON_LABELS, INBOX_REASONS, INBOX_SOURCE_SETUP, INBOX_SOURCES, type InboxKind, type InboxReason, type InboxSource } from "../../src/shared.ts";
+import { INBOX_KINDS, INBOX_REASON_LABELS, INBOX_REASONS, INBOX_SOURCE_SETUP, INBOX_SOURCES, type InboxKind, type InboxReason, type InboxSource } from "../../src/shared.ts";
 
 type Row = InboxResponse["items"][number];
 
-const ALL = "all";
 const mono = "font-mono text-xs";
+const KIND_LABELS: Record<InboxKind, string> = { pull_request: "PR", issue: "Issue" };
+
+/** `/inbox` search: the inbox's own facets (the repo facet and range are shared, see lib/scope.ts), and whether to list items that left. */
+export type InboxSearch = { feed?: InboxSource[]; kind?: InboxKind[]; reason?: InboxReason[]; gone?: true };
+
+const listOf = <T extends string>(options: readonly T[], value: unknown) => {
+  const list = (Array.isArray(value) ? value : [value]).filter((item): item is T => options.some((option) => option === item));
+  return list.length > 0 ? list : undefined;
+};
+
+export const validateInboxSearch = (search: Record<string, unknown>): InboxSearch => ({
+  feed: listOf(INBOX_SOURCES, search.feed),
+  kind: listOf(INBOX_KINDS, search.kind),
+  reason: listOf(INBOX_REASONS, search.reason),
+  gone: search.gone === true ? true : undefined,
+});
 
 /**
- * Polled PRs and issues grouped by why they involve you. Each row dispatches
- * on its own; checkboxes dispatch several with one composed prompt. Polls on
- * the run log's cadence.
+ * Polled PRs and issues updated in the range, grouped by why they involve
+ * you, filtered by source, kind, reason and repo. Each row dispatches on its
+ * own; checkboxes dispatch several with one composed prompt. Polls on the run
+ * log's cadence.
  */
 export function Inbox() {
   const queryClient = useQueryClient();
-  const [showGone, setShowGone] = useState(false);
+  const navigate = useNavigate();
+  const { search: scope, setScope } = useScope();
+  const search = useSearch({ from: "/inbox" });
   const { data } = useQuery({
-    queryKey: showGone ? ["inbox", "gone"] : ["inbox"],
-    queryFn: () => api<InboxResponse>(showGone ? "/api/inbox?gone=1" : "/api/inbox"),
+    queryKey: search.gone ? ["inbox", "gone"] : ["inbox"],
+    queryFn: () => api<InboxResponse>(search.gone ? "/api/inbox?gone=1" : "/api/inbox"),
     refetchInterval: 5000,
   });
-  const [source, setSource] = useState<InboxSource | typeof ALL>(ALL);
-  const [kind, setKind] = useState<InboxKind | typeof ALL>(ALL);
-  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [dispatching, setDispatching] = useState<InboxItem[] | null>(null);
+  const setSearch = (patch: Partial<InboxSearch>) => void navigate({ to: "/inbox", search: (prev: InboxSearch) => ({ ...prev, ...patch }), replace: true });
 
-  if (!data) {
-    return (
-      <div className="flex min-h-full flex-col">
-        <Toolbar title="Inbox" />
-        <Empty>Loading…</Empty>
-      </div>
-    );
-  }
+  const { from, to } = resolveWindow(scope);
+  const inRange = (item: Row) => (!from || item.updatedAt >= from) && (!to || item.updatedAt < to);
+  const ranged = (data?.items ?? []).filter(inRange);
+  const current = ranged.filter((item) => !item.goneAt);
+  const tally = (key: (item: Row) => readonly string[]) => {
+    const counts = new Map<string, number>();
+    for (const item of current) for (const value of key(item)) counts.set(value, (counts.get(value) ?? 0) + 1);
+    return counts;
+  };
+  const facet = <T extends string>(key: string, label: string, values: readonly T[], selected: readonly T[] | undefined, counts: Map<string, number>, text: (value: T) => string, onChange: (values: T[]) => void): Facet => ({
+    key,
+    label,
+    options: values.map((value) => ({ value, text: text(value), count: counts.get(value) ?? 0 })),
+    selected: selected ?? [],
+    onChange: (next) => onChange(values.filter((value) => next.includes(value))),
+  });
+  const repoCounts = tally((item) => (item.repo ? [item.repo] : []));
+  const facets: Facet[] = [
+    facet("feed", "Source", INBOX_SOURCES, search.feed, tally((item) => [item.source]), (value) => value, (feed) => setSearch({ feed: feed.length ? feed : undefined })),
+    facet("kind", "Kind", INBOX_KINDS, search.kind, tally((item) => [item.kind]), (value) => KIND_LABELS[value], (kind) => setSearch({ kind: kind.length ? kind : undefined })),
+    facet("reason", "Reason", INBOX_REASONS, search.reason, tally((item) => item.reasons), (value) => INBOX_REASON_LABELS[value], (reason) => setSearch({ reason: reason.length ? reason : undefined })),
+    facet("repo", "Repo", [...repoCounts.keys()].sort(), scope.repo, repoCounts, (value) => value, (repo) => setScope({ repo: repo.length ? repo : undefined })),
+  ];
 
-  const query = search.trim().toLowerCase();
-  const visible = data.items.filter(
+  const needle = query.trim().toLowerCase();
+  const visible = ranged.filter(
     (item) =>
-      (source === ALL || item.source === source) &&
-      (kind === ALL || item.kind === kind) &&
-      (!query || [item.repo, item.identifier, item.title, item.author, item.state, item.team, ...item.labels].some((field) => field?.toLowerCase().includes(query))),
+      (!search.feed || search.feed.includes(item.source)) &&
+      (!search.kind || search.kind.includes(item.kind)) &&
+      (!search.reason || item.reasons.some((reason) => search.reason!.includes(reason))) &&
+      (!scope.repo || (item.repo !== null && scope.repo.includes(item.repo))) &&
+      (!needle || [item.repo, item.identifier, item.title, item.author, item.state, item.team, ...item.labels].some((field) => field?.toLowerCase().includes(needle))),
   );
   // An item sits under its first reason in display order and notes the others; departed items close the list.
   const groups = [
     ...INBOX_REASONS.map((reason) => ({ key: reason, label: INBOX_REASON_LABELS[reason], items: visible.filter((item) => !item.goneAt && firstReason(item) === reason) })),
     { key: "gone", label: "left the inbox", items: visible.filter((item) => item.goneAt) },
   ].filter((group) => group.items.length > 0);
-  const count = (predicate: (item: Row) => boolean) => data.items.filter((item) => !item.goneAt).filter(predicate).length;
-  const selectedItems = data.items.filter((item) => selected.includes(item.key));
+  // Only what is listed dispatches: a selection the range or filters hide is left out.
+  const selectedItems = visible.filter((item) => selected.includes(item.key));
   const toggle = (key: string, on: boolean) => setSelected((keys) => (on ? [...keys, key] : keys.filter((k) => k !== key)));
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["inbox"] });
 
   return (
     <div className="flex min-h-full flex-col">
-      <Toolbar title="Inbox">
-        <Count value={count(() => true)} label="all" active={source === ALL} onClick={() => setSource(ALL)} />
-        {INBOX_SOURCES.map((s) => <Count key={s} value={count((item) => item.source === s)} label={s} active={source === s} onClick={() => setSource(s)} />)}
-        <ToolbarDivider />
-        <Count value={count((item) => item.kind === "pull_request")} label="PRs" active={kind === "pull_request"} onClick={() => setKind(kind === "pull_request" ? ALL : "pull_request")} />
-        <Count value={count((item) => item.kind === "issue")} label="issues" active={kind === "issue"} onClick={() => setKind(kind === "issue" ? ALL : "issue")} />
-        <ToolbarDivider />
-        <Count value={data.gone} label="left" active={showGone} onClick={() => setShowGone((v) => !v)} title="Dispatched items that stopped showing up: closed, merged, resolved or done. Kept 30 days." />
-        <Input className="h-7 w-44 text-xs" placeholder="search" value={search} onChange={(e) => setSearch(e.target.value)} />
-        <span className="ml-auto flex items-center gap-3">
-          {INBOX_SOURCES.map((s) => <PollState key={s} source={s} status={data.polling[s]} onPolled={refresh} />)}
-          <Button size="xs" variant={selected.length > 0 ? "default" : "outline"} disabled={selected.length === 0} onClick={() => setDispatching(selectedItems)}>
-            Dispatch selected{selected.length > 0 ? ` (${selected.length})` : ""}
-          </Button>
-        </span>
-      </Toolbar>
+      <PageHeader
+        title="Inbox"
+        summary={data && `${visible.filter((item) => !item.goneAt).length} items`}
+        filters={
+          <FilterBar facets={facets}>
+            <Input className="h-6 w-44 text-xs" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <Button size="xs" variant={selectedItems.length > 0 ? "default" : "outline"} disabled={selectedItems.length === 0} onClick={() => setDispatching(selectedItems)}>
+              Dispatch selected{selectedItems.length > 0 ? ` (${selectedItems.length})` : ""}
+            </Button>
+          </FilterBar>
+        }
+        toggles={
+          data && (
+            <>
+              <span className="flex gap-3 px-1.5">
+                {INBOX_SOURCES.map((source) => <PollState key={source} source={source} status={data.polling[source]} onPolled={refresh} />)}
+              </span>
+              <span className="ml-auto" />
+              <Count value={data.gone} label="left" active={!!search.gone} onClick={() => setSearch({ gone: search.gone ? undefined : true })} title="Dispatched items that stopped showing up: closed, merged, resolved or done. Kept 30 days." />
+            </>
+          )
+        }
+      />
 
-      {visible.length === 0 ? (
+      {!data ? (
+        <Empty>Loading…</Empty>
+      ) : visible.length === 0 ? (
         <Empty>
           {data.items.length === 0
             ? "Nothing in the inbox. GitHub polls through the gh CLI; set LINEAR_API_KEY in .env for Linear, SENTRY_AUTH_TOKEN and SENTRY_ORG for Sentry. Intervals and Sentry filters are in Settings."
-            : "Nothing matches these filters."}
+            : "Nothing updated in this range matches these filters."}
         </Empty>
       ) : (
         <Table>

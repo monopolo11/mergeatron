@@ -1,20 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createRootRoute, createRoute, createRouter, Outlet, RouterProvider, useNavigate, useRouterState } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, Outlet, retainSearchParams, RouterProvider, useNavigate, useRouterState } from "@tanstack/react-router";
 import { use, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import { Analytics } from "@/components/Analytics";
+import { Analytics, validateAnalyticsSearch } from "@/components/Analytics";
 import { Empty } from "@/components/Field";
-import { Header } from "@/components/Header";
-import { Inbox } from "@/components/Inbox";
+import { Inbox, validateInboxSearch } from "@/components/Inbox";
 import { Reviews, STATUS_FILTERS } from "@/components/Reviews";
 import { RuleEditor } from "@/components/RuleEditor";
 import { RulesList } from "@/components/RulesList";
 import { RunLog } from "@/components/RunLog";
 import { Runs, validateRunsSearch } from "@/components/Runs";
 import { SettingsPage } from "@/components/Settings";
+import { Sidebar } from "@/components/Sidebar";
 import { Button } from "@/components/ui/button";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, type Status } from "@/lib/api";
+import { useRunFacets } from "@/lib/runFacets";
+import { SCOPE_KEYS, validateScope } from "@/lib/scope";
 import { ShellContext, type RuleDraft } from "@/lib/shell";
 import { confirmDiscard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
@@ -50,7 +53,7 @@ const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
 /** Remembers whether the run panel is open across reloads. */
 const RUNS_PANEL_KEY = "mergeatron.runs-panel";
 
-/** App shell: top bar, the active route, and the live run log beside it on every page but Runs. */
+/** App shell: sidebar, the active route, and the live run log beside it on every page but Runs. */
 function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [projects, setProjects] = useState<T3Project[]>([]);
@@ -143,10 +146,9 @@ function App() {
 
   return (
     <ShellContext value={{ status, projects, providers, settings, saveSettings, update, updateError, recheckUpdate, rules, selected, selectRule, runs, webhookUrl, createRule, saveRule, toggleRule, deleteRule, refreshRuns }}>
-      <div className="grid h-screen grid-rows-[40px_1fr] overflow-hidden">
-        <Header status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={onRunsPage ? undefined : toggleRuns} />
-
-        <div className={cn("grid overflow-hidden", liveOpen && "lg:grid-cols-[1fr_340px]")}>
+      <TooltipProvider delayDuration={200}>
+        <div className={cn("grid h-screen grid-cols-[184px_minmax(0,1fr)] overflow-hidden", liveOpen && "lg:grid-cols-[184px_minmax(0,1fr)_340px]")}>
+          <Sidebar status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={onRunsPage ? undefined : toggleRuns} />
           <main className="min-w-0 overflow-auto">
             <Outlet />
           </main>
@@ -156,17 +158,18 @@ function App() {
             </aside>
           )}
         </div>
-      </div>
+      </TooltipProvider>
     </ShellContext>
   );
 }
 
-/** Index route: the rules list beside the selected rule's editor, or onboarding when there are no rules. */
+/** Index route: the rules list (with run counts in the range) beside the selected rule's editor, or onboarding when there are no rules. */
 function RulesMain() {
   const { rules, selected, selectRule, projects, providers, runs, settings, webhookUrl, createRule, saveRule, toggleRule, deleteRule, refreshRuns } = use(ShellContext)!;
+  const { data: facets } = useRunFacets([]);
   return (
     <div className="grid h-full grid-cols-[240px_1fr] overflow-hidden">
-      <RulesList rules={rules} selectedId={selected?.id ?? null} runs={runs} onSelect={selectRule} onToggle={(rule) => void toggleRule(rule)} onCreate={() => void createRule()} />
+      <RulesList rules={rules} selectedId={selected?.id ?? null} runCounts={new Map(facets?.rules.map((row) => [row.value, row.count]))} onSelect={selectRule} onToggle={(rule) => void toggleRule(rule)} onCreate={() => void createRule()} />
       <div className="min-w-0 overflow-auto">
         {selected ? (
           <RuleEditor key={selected.id} rule={selected} projects={projects} providers={providers} runs={runs} githubLogin={settings?.githubLogin ?? null} onSave={saveRule} onDelete={deleteRule} onRunsChanged={refreshRuns} />
@@ -187,10 +190,11 @@ function RulesMain() {
 
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
-const rootRoute = createRootRoute({ component: App });
+/** The range and run filters are the root's search params, kept across pages (see lib/scope.ts). */
+const rootRoute = createRootRoute({ component: App, validateSearch: validateScope, search: { middlewares: [retainSearchParams([...SCOPE_KEYS])] } });
 const routeTree = rootRoute.addChildren([
   createRoute({ getParentRoute: () => rootRoute, path: "/", component: RulesMain }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/inbox", component: Inbox }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/inbox", validateSearch: validateInboxSearch, component: Inbox }),
   createRoute({ getParentRoute: () => rootRoute, path: "/runs", validateSearch: validateRunsSearch, component: Runs }),
   createRoute({
     getParentRoute: () => rootRoute,
@@ -200,7 +204,7 @@ const routeTree = rootRoute.addChildren([
     }),
     component: Reviews,
   }),
-  createRoute({ getParentRoute: () => rootRoute, path: "/analytics", component: Analytics }),
+  createRoute({ getParentRoute: () => rootRoute, path: "/analytics", validateSearch: validateAnalyticsSearch, component: Analytics }),
   createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: SettingsPage }),
 ]);
 const router = createRouter({ routeTree });

@@ -1,5 +1,6 @@
 import { Effect, Schema, SchemaGetter } from "effect";
 import type { promptVersions, prompts, reviewRequests, rules, runPullRequests, runUsage, runs, settings } from "./db/schema.ts";
+import type { PromptKey, RunScope } from "./store.ts";
 import { parseLabels } from "./labelQuery.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -164,19 +165,57 @@ export type DispatchInput = typeof DispatchInput.Type;
 const intFromString = Schema.FiniteFromString.check(Schema.isInt());
 
 /**
- * Search params of the runs page's list (`GET /api/runs/history`): the
- * RunFilter fields, with the prompt split into owner, id and optional version.
+ * Search params shared by the run-based endpoints (`/api/runs/history`,
+ * `/api/analytics`, `/api/pulls`, `/api/runs/facets`): an ISO window and
+ * comma-separated facet values, decoded by `runScope`. A prompt is
+ * `owner:id` for every version or `owner:id:version` for one.
  */
-export const RunQuery = Schema.Struct({
-  ruleId: Schema.optional(nonEmpty),
-  source: Schema.optional(Schema.Literals(RUN_SOURCES)),
+export const RunScopeQuery = Schema.Struct({
+  from: Schema.optional(nonEmpty),
+  to: Schema.optional(nonEmpty),
+  rule: Schema.optional(nonEmpty),
+  source: Schema.optional(nonEmpty),
   model: Schema.optional(nonEmpty),
-  promptOwner: Schema.optional(Schema.Literals(PROMPT_VERSION_OWNERS)),
-  promptId: Schema.optional(nonEmpty),
-  promptVersion: Schema.optional(intFromString.check(Schema.isGreaterThanOrEqualTo(1))),
-  since: Schema.optional(nonEmpty),
+  prompt: Schema.optional(nonEmpty),
+  live: Schema.optional(Schema.Literals(["1"])),
+  author: Schema.optional(nonEmpty),
+  repo: Schema.optional(nonEmpty),
+});
+
+/** `/api/runs/history`: the scope plus how many runs to return. */
+export const RunQuery = Schema.Struct({
+  ...RunScopeQuery.fields,
   limit: Schema.optional(intFromString.check(Schema.isBetween({ minimum: 1, maximum: 500 }))),
 });
+
+/** `/api/analytics`: the scope plus the browser's UTC offset in minutes, so days split at local midnight. */
+export const AnalyticsQuery = Schema.Struct({
+  ...RunScopeQuery.fields,
+  utcOffset: Schema.optional(intFromString.check(Schema.isBetween({ minimum: -840, maximum: 840 }))),
+});
+
+const csv = (value: string | undefined) => value?.split(",").map((part) => part.trim()).filter(Boolean);
+const isOneOf = <T extends string>(options: readonly T[]) => (value: string): value is T => options.some((option) => option === value);
+
+/** Decodes RunScopeQuery into a RunScope; unknown sources and malformed prompts are dropped. */
+export function runScope({ from, to, rule, source, model, prompt, live, author, repo }: typeof RunScopeQuery.Type): RunScope {
+  return {
+    from,
+    to,
+    ruleIds: csv(rule),
+    sources: csv(source)?.filter(isOneOf(RUN_SOURCES)),
+    models: csv(model),
+    prompts: csv(prompt)?.flatMap((key): PromptKey[] => {
+      const [owner = "", id, version] = key.split(":");
+      if (!isOneOf(PROMPT_VERSION_OWNERS)(owner) || !id) return [];
+      const number = Number(version);
+      return [{ owner, id, version: Number.isInteger(number) && number >= 1 ? number : undefined }];
+    }),
+    livePrompts: live === "1" || undefined,
+    authors: csv(author),
+    repos: csv(repo),
+  };
+}
 
 /** A rating from the runs page: a 0 to 10 score, written feedback, or both, and the earlier run this one follows up. Rating again replaces it. */
 export const RunRatingInput = Schema.Struct({

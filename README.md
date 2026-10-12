@@ -44,9 +44,14 @@ cp .env.example .env
    bun --hot index.ts
    ```
 
-   The UI is at http://localhost:8787. **Rules** lists your rules on the left with the
+   The UI is at http://localhost:8787. The sidebar holds the pages, live counts
+   (open inbox items, running runs, paused reviews), the inbox's next poll and
+   connection health. Every page but Settings opens on a date range (presets or
+   a custom range from the calendar) and its filters; both live in the URL and
+   carry across pages (see [Date range and filters](#date-range-and-filters)).
+   **Rules** lists your rules on the left, with their runs in the range, and the
    selected rule's editor beside it (changes save with **Save**, see [Prompt versions](#prompt-versions)). The live run log sits on the
-   right of every page but **Runs**; **Live** in the top bar hides it. The webhook endpoint
+   right of every page but **Runs**; **Live panel** at the bottom of the sidebar hides it. The webhook endpoint
    is `POST /webhooks/github`. **Settings** is its own page with six sections, one shown at a time:
    **Connection** (what the service talks to, a **Test thread** button that starts a
    one-message thread in a project to confirm the token, RPC and provider work
@@ -72,11 +77,11 @@ needs no tunnel and keeps working when a quick tunnel's URL changes.
    `connections:write`; put it in `.env` as `SLACK_APP_TOKEN`.
 3. **Install to Workspace**; put the `xoxb-` bot token (OAuth & Permissions) in `.env`
    as `SLACK_BOT_TOKEN`.
-4. Restart the service (the header shows `slack connected`) and invite the bot to the
+4. Restart the service (the sidebar shows `slack`) and invite the bot to the
    channel (`/invite @mergeatron`).
 
 Behind a TLS-inspecting proxy (Cloudflare WARP, Zscaler, ...) `fetch` to slack.com
-fails with `self signed certificate in certificate chain` and the header stays on
+fails with `self signed certificate in certificate chain` and the sidebar stays on
 `slack connecting`. Bun reads `SSL_CERT_FILE` / `NODE_EXTRA_CA_CERTS` at startup, so
 export the CA bundle in the shell that launches `bun` (`.env` is too late for a manual
 run). For the launchd service, `bun service.ts install` copies whichever of these is
@@ -268,7 +273,7 @@ past the limit does not write a second handoff. Set the limit to 0 to never paus
 ## Inbox: polled PRs and issues, dispatch, automations
 
 Besides webhooks and Slack, the orchestrator polls for the open PRs and issues
-that involve you. **Inbox** in the header lists them grouped by why they are
+that involve you. **Inbox** lists the ones updated in the range, grouped by why they are
 yours, and each row (or a selection) can be dispatched to T3 with a composed
 prompt; rules on the inbox events do the same automatically.
 
@@ -413,10 +418,10 @@ while queued, then 👀 when they start.
 
 **Runs** lists every run newest first with its target, rule, model, prompt
 version, status, cost and tokens (see [Usage and cost](#usage-and-cost)), how
-long its thread worked and its score. The selects filter
-by rule, source, model, prompt (one version, or all versions of a preset or
-rule prompt) and time; the counts toggle status and unrated. Filters live in
-the URL, so a filtered view can be linked. The toolbar sums up the listed runs:
+long its thread worked and its score, within the range and filters (see
+[Date range and filters](#date-range-and-filters)); the counts toggle status
+and unrated, and the search box matches titles, targets and rules. The page
+header sums up the listed runs:
 how many are scored, their average score and average work time, and what the
 measured ones cost, so filtering by one prompt version and then another
 compares them.
@@ -429,8 +434,7 @@ read it), and a 0 to 10 score with
 written feedback. Either one alone saves; rating again replaces it. **Next
 unrated** (or ⌘⏎ in the feedback box, which saves first) moves to the next
 finished run without a rating. Ratings feed the MCP `run_analytics` tool. The
-API is `GET /api/runs/history` (the filters as `ruleId`, `source`, `model`,
-`promptOwner`, `promptId`, `promptVersion`, `since`, `limit`), `GET /api/runs/:id`
+API is `GET /api/runs/history` (the scope params below plus `limit`), `GET /api/runs/:id`
 and `PUT /api/runs/:id/rating` with `{ rating, feedback }`.
 
 ### Usage and cost
@@ -474,19 +478,40 @@ run, and later it retries runs whose read failed when they settled.
 
 ## Analytics
 
-**Analytics** in the header swaps the editor for run figures. Per prompt
-version (the live one marked) and per model: runs, how many are scored and
-their average score, how many have usage measured, their average and total
-cost, average output tokens and the share of input read from the prompt cache.
-Then runs per PR or issue author and per trigger source, each split into
-running, done, skipped and failed. The toolbar shows how many settled runs are
-measured and what they cost; **Measure** starts the backfill for the rest
+**Analytics** sums up the runs in the range and filters: runs, done, failed,
+average score, cost and average cost, each with a trend over the days and,
+with **Compare to previous period** on, the change from the period of the same
+length before. Below are runs per day by outcome and cost per day, then runs,
+done, failed and cost per model, per PR or issue author and per trigger
+source, and per prompt version (the live one marked): runs, how many are
+scored and their average score, how many have usage measured, their average
+and total cost, average output tokens and the share of input read from the
+prompt cache. Clicking a row of a breakdown adds it as a filter. The header
+shows how many settled runs are measured; **Measure** starts the backfill for the rest
 (`GET /api/runs/usage/backfill` says how many are left and whether one is running). Sources are `github` (webhook), `slack` (Socket Mode), `poll`
-(inbox automations) and `manual` (inbox dispatches and connection tests). The same data is at `GET /api/analytics`.
+(inbox automations) and `manual` (inbox dispatches and connection tests). The same data is at `GET /api/analytics` (the scope params, plus `utcOffset` in minutes so days split at local midnight).
+
+## Date range and filters
+
+Runs, Reviews, Analytics and the rule counts read one range and one set of
+filters from the URL (`range` as `24h`, `7d`, `14d` (the default), `30d`,
+`90d`, `month` or `all`, or `from` and `to` days), kept when switching pages.
+**+ Filter** adds a filter by rule, source, model, prompt, author or repo; each
+takes several values (any of) with their run counts in the range, and shows as
+a token that reopens or clears it. The prompt filter's **Live versions only**
+follows promotions: it means every preset's and rule's live version, whichever
+that is now. Reviews offers rule, repo and author; the inbox has its own
+source, kind and reason filters and shares repo.
+
+The run endpoints take the same scope as search params: `from` and `to` (ISO
+timestamps), comma-separated `rule`, `source`, `model`, `prompt` (`owner:id`
+for every version, `owner:id:version` for one), `author` and `repo`, and
+`live=1`. `GET /api/runs/facets?from&to` lists the values each filter offers
+with run counts.
 
 ## Updating
 
-The header shows **update · N** when the tracked upstream (`origin/main` for a
+The sidebar shows **update · N** when the tracked upstream (`origin/main` for a
 plain clone) has commits the running server does not, including ones already
 pulled by hand without a restart; **Settings → Connection** lists them and flags
 whether they bring migrations or dependency changes. **Update and restart**

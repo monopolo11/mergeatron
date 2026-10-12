@@ -17,7 +17,7 @@ import { makeMcpHandler, type McpServices } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
-import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, RunQuery, RunRatingInput, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
+import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
 import { deleteRun, getRun, listRuns, rateRun } from "./src/runHistory.ts";
 import { startPullRequestBackfill, syncPullRequests } from "./src/runPullRequests.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
@@ -375,9 +375,8 @@ const api = HttpRouter.use((router) =>
       "/api/runs/history",
       route(
         Effect.gen(function* () {
-          const { promptOwner, promptId, promptVersion, ...filter } = yield* HttpServerRequest.schemaSearchParams(RunQuery);
-          const prompt = promptOwner && promptId ? { owner: promptOwner, id: promptId, version: promptVersion } : undefined;
-          return json(yield* listRuns({ ...filter, prompt }));
+          const { limit, ...query } = yield* HttpServerRequest.schemaSearchParams(RunQuery);
+          return json(yield* listRuns({ ...runScope(query), limit }));
         }),
       ),
     );
@@ -398,8 +397,19 @@ const api = HttpRouter.use((router) =>
         }),
       ),
     );
-    yield* router.add("GET", "/api/analytics", route(Effect.map(store.analytics(), json)));
-    yield* router.add("GET", "/api/pulls", route(Effect.map(store.pullRequests(), json)));
+    /** The values each filter offers within a window, with run counts. */
+    yield* router.add("GET", "/api/runs/facets", route(Effect.map(Effect.flatMap(HttpServerRequest.schemaSearchParams(RunScopeQuery), store.runFacets), json)));
+    yield* router.add(
+      "GET",
+      "/api/analytics",
+      route(
+        Effect.gen(function* () {
+          const { utcOffset, ...query } = yield* HttpServerRequest.schemaSearchParams(AnalyticsQuery);
+          return json(yield* store.analytics(runScope(query), utcOffset));
+        }),
+      ),
+    );
+    yield* router.add("GET", "/api/pulls", route(Effect.map(Effect.flatMap(HttpServerRequest.schemaSearchParams(RunScopeQuery), (query) => store.pullRequests(runScope(query))), json)));
 
     yield* router.add(
       "POST",

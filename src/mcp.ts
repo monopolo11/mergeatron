@@ -283,13 +283,13 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         result(
           "list_runs",
           listRuns({
-            ruleId: rule_id,
+            ruleIds: rule_id ? [rule_id] : undefined,
             status,
-            source,
-            prompt: prompt_owner && prompt_id ? { owner: prompt_owner, id: prompt_id, version: prompt_version } : undefined,
-            model,
+            sources: source ? [source] : undefined,
+            prompts: prompt_owner && prompt_id ? [{ owner: prompt_owner, id: prompt_id, version: prompt_version }] : undefined,
+            models: model ? [model] : undefined,
             rated,
-            since,
+            from: since,
             sort,
             limit: limit ?? 50,
           }),

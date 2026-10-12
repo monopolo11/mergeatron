@@ -78,7 +78,7 @@ describe("Poller", () => {
 
         expect(yield* poll(ready)).toEqual(["linear:ENG-7"]);
         yield* settle;
-        yield* store.updateRun((yield* store.listRuns({ ruleId: implement.id }))[0]!.id, { status: "done" });
+        yield* store.updateRun((yield* store.listRuns({ ruleIds: [implement.id] }))[0]!.id, { status: "done" });
         // Still matching: nothing new.
         expect(yield* poll(ready)).toEqual([]);
 

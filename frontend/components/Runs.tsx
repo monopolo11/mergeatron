@@ -1,9 +1,10 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { XIcon } from "lucide-react";
-import { use, useState, type ReactNode } from "react";
+import { use, useState } from "react";
 import { Dot, Empty, ExternalLink, GroupLabel, RunStatus } from "@/components/Field";
-import { Count, Figure, Toolbar, ToolbarDivider } from "@/components/Toolbar";
+import { FilterBar, useScope } from "@/components/FilterBar";
+import { Count, PageHeader, Toolbar, ToolbarDivider } from "@/components/Toolbar";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,35 +17,23 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api, timeAgo } from "@/lib/api";
 import { tokenCount, usd } from "@/lib/format";
+import { useRunFacets } from "@/lib/runFacets";
+import { resolveWindow, RUN_FACETS, scopeKey, scopeQuery } from "@/lib/scope";
 import { ShellContext } from "@/lib/shell";
 import { prState, runStatus, scoreTone, TONE_BG, TONE_TEXT, type Tone } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { PromptRef, Run, RunPullRequest, RunRatingInput, RunUsage } from "../../src/rules.ts";
 import type { RunDetail, RunSummary } from "../../src/runHistory.ts";
-import { HANDOFF_EVENT, RUN_SOURCES, RUN_STATUSES, type RunSource } from "../../src/shared.ts";
-import type { Analytics } from "../../src/store.ts";
+import { HANDOFF_EVENT, RUN_STATUSES } from "../../src/shared.ts";
 import { reviewVerdict } from "../../src/verdict.ts";
 
-const ALL = "__all__";
-/** Runs fetched per filter; the status and unrated counts are within these. */
+/** Runs fetched per scope; the status and unrated counts are within these. */
 const LIMIT = 500;
-const DAY = 24 * 60 * 60 * 1000;
-const SINCE_KEYS = ["1d", "7d", "30d"] as const;
-type Since = (typeof SINCE_KEYS)[number];
-const SINCE: Record<Since, { days: number; label: string }> = {
-  "1d": { days: 1, label: "Last 24 hours" },
-  "7d": { days: 7, label: "Last 7 days" },
-  "30d": { days: 30, label: "Last 30 days" },
-};
-const SOURCE_LABELS: Record<RunSource, string> = { github: "GitHub webhook", slack: "Slack", poll: "Inbox automation", manual: "Manual" };
-/** Runs without a stored rule, by the id they are recorded under. */
-const PSEUDO_RULES = { dispatch: "Inbox dispatches", handoff: "Handoffs", manual: "Connection tests" };
 /** Runs worth rating: their thread replied, or should have. "Next unrated" skips the rest. */
 const RATABLE = new Set<Run["status"]>(["done", "failed"]);
 const UNSETTLED = new Set<Run["status"]>(["queued", "started"]);
@@ -58,88 +47,55 @@ const TOKEN_KINDS = [
 ] as const satisfies ReadonlyArray<{ key: keyof RunUsage; label: string; tone: Tone }>;
 
 /**
- * The page's state, all in the URL so a filtered view can be linked. The
- * selects filter on the server; the status and unrated counts toggle within
- * what came back. `run` is the run open beside the table.
+ * The page's own state, in the URL beside the shared range and filters (see
+ * lib/scope.ts). The status and unrated counts toggle within the runs that
+ * came back; `run` is the run open beside the table.
  */
 export type RunsSearch = {
-  ruleId?: string;
-  source?: RunSource;
-  model?: string;
-  /** `owner:id` for every version of a prompt, `owner:id:version` for one. */
-  prompt?: string;
-  since?: Since;
   status?: Run["status"];
   unrated?: true;
   run?: string;
 };
 
-const text = (value: unknown) => (typeof value === "string" && value !== "" ? value : undefined);
 const oneOf = <T extends string>(options: readonly T[], value: unknown) => options.find((option) => option === value);
 
 /** Validates the `/runs` search params; unknown values are dropped. */
 export function validateRunsSearch(search: Record<string, unknown>): RunsSearch {
   return {
-    ruleId: text(search.ruleId),
-    source: oneOf(RUN_SOURCES, search.source),
-    model: text(search.model),
-    prompt: text(search.prompt),
-    since: oneOf(SINCE_KEYS, search.since),
     status: oneOf(RUN_STATUSES, search.status),
     unrated: search.unrated === true ? true : undefined,
-    run: text(search.run),
+    run: typeof search.run === "string" && search.run !== "" ? search.run : undefined,
   };
-}
-
-/** Query string for `/api/runs/history`. `since` becomes a timestamp now, so the window moves with each refetch. */
-function historyQuery({ ruleId, source, model, prompt, since }: RunsSearch): string {
-  const [promptOwner, promptId, promptVersion] = prompt?.split(":") ?? [];
-  const params = {
-    ruleId,
-    source,
-    model,
-    promptOwner,
-    promptId,
-    promptVersion,
-    since: since && new Date(Date.now() - SINCE[since].days * DAY).toISOString(),
-    limit: String(LIMIT),
-  };
-  return new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => entry[1] !== undefined)).toString();
 }
 
 /**
- * Every run with the trigger, model and prompt versions it started with, and
- * what its thread cost. Picking a row opens it beside the table to read its
- * reply and rate it. The toolbar's summary (scored runs, average score,
- * average work time, cost of the measured runs) is over the listed runs, so
- * filtering by one prompt version and then another compares them.
+ * Every run in the range and filters, with the trigger, model and prompt
+ * versions it started with, and what its thread cost. Picking a row opens it
+ * beside the table to read its reply and rate it. The summary (scored runs,
+ * average score, average work time, cost of the measured runs) is over the
+ * listed runs, so filtering by one prompt version and then another compares them.
  */
 export function Runs() {
-  const search = useSearch({ from: "/runs" });
+  const { search: scope } = useScope();
+  const { status, unrated, run: openId } = useSearch({ from: "/runs" });
   const navigate = useNavigate();
   const { rules } = use(ShellContext)!;
-  const { ruleId, source, model, prompt, since, status, unrated, run: openId } = search;
+  const { facets, promptLabel } = useRunFacets(RUN_FACETS);
+  const [query, setQuery] = useState("");
 
   const list = useQuery({
-    queryKey: ["runs", "history", { ruleId, source, model, prompt, since }],
-    queryFn: () => api<RunSummary[]>(`/api/runs/history?${historyQuery(search)}`),
+    queryKey: ["runs", "history", scopeKey(scope)],
+    queryFn: () => api<RunSummary[]>(`/api/runs/history?${scopeQuery(scope, resolveWindow(scope), { limit: String(LIMIT) })}`),
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
   });
-  // Prompt versions and models that have runs, for the filters and prompt names.
-  const { data: analytics } = useQuery({ queryKey: ["analytics"], queryFn: () => api<Analytics>("/api/analytics"), refetchInterval: 30_000 });
 
-  const setSearch = (patch: Partial<RunsSearch>, replace = false) => void navigate({ to: "/runs", search: { ...search, ...patch }, replace });
+  const setSearch = (patch: Partial<RunsSearch>, replace = false) => void navigate({ to: "/runs", search: (prev: RunsSearch) => ({ ...prev, ...patch }), replace });
   const open = (id: string) => setSearch({ run: id }, true);
-
-  // Versions per prompt, keyed `owner:id`; a deleted preset or rule has no name left, so its owner stands in.
-  const prompts = Map.groupBy(analytics?.byPrompt ?? [], (row) => `${row.owner}:${row.id}`);
-  const promptNames = new Map(analytics?.byPrompt.map((row) => [`${row.owner}:${row.id}`, row.name ?? row.owner]));
-  const promptLabel = ({ owner, id, version }: PromptRef) => `${promptNames.get(`${owner}:${id}`) ?? owner} v${version}`;
-  const models = [...new Set(analytics?.byModel.map((row) => row.modelId))];
   const ruleNames = new Map(rules?.map((rule) => [rule.id, rule.name]));
 
-  const runs = list.data ?? [];
+  const needle = query.trim().toLowerCase();
+  const runs = (list.data ?? []).filter((run) => !needle || [run.title, target(run), run.ruleName].some((field) => field?.toLowerCase().includes(needle)));
   const visible = runs.filter((run) => (!status || run.status === status) && (!unrated || run.ratedAt === null));
   const count = (predicate: (run: RunSummary) => boolean) => runs.filter(predicate).length;
   const scores = visible.flatMap((run) => (run.rating === null ? [] : [run.rating]));
@@ -153,51 +109,44 @@ export function Runs() {
   return (
     <div className={cn("grid h-full overflow-hidden", openId && "grid-cols-[minmax(0,1fr)_420px]")}>
       <div className="min-w-0 overflow-auto">
-        <Toolbar title="Runs">
-          <Count
-            value={runs.length}
-            label="runs"
-            active={!status && !unrated}
-            onClick={() => setSearch({ status: undefined, unrated: undefined })}
-            title={runs.length === LIMIT ? `The latest ${LIMIT}. Narrow the filters to reach older runs.` : undefined}
-          />
-          {RUN_STATUSES.map((value) => {
-            const { label, tone } = runStatus({ status: value });
-            return <Count key={value} value={count((run) => run.status === value)} label={label} tone={tone} active={status === value} onClick={() => setSearch({ status: status === value ? undefined : value })} />;
-          })}
-          <ToolbarDivider />
-          <Count value={count((run) => run.ratedAt === null)} label="unrated" active={!!unrated} onClick={() => setSearch({ unrated: unrated ? undefined : true })} />
-          <ToolbarDivider />
-          <FilterSelect value={ruleId} all="All rules" onChange={(value) => setSearch({ ruleId: value })}>
-            {rules?.map((rule) => <SelectItem key={rule.id} value={rule.id}>{rule.name}</SelectItem>)}
-            {Object.entries(PSEUDO_RULES).map(([id, name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}
-          </FilterSelect>
-          <FilterSelect value={source} all="All sources" onChange={(value) => setSearch({ source: oneOf(RUN_SOURCES, value) })}>
-            {RUN_SOURCES.map((value) => <SelectItem key={value} value={value}>{SOURCE_LABELS[value]}</SelectItem>)}
-          </FilterSelect>
-          <FilterSelect value={model} all="All models" onChange={(value) => setSearch({ model: value })}>
-            {models.map((value) => <SelectItem key={value} value={value} className="font-mono text-xs">{value}</SelectItem>)}
-          </FilterSelect>
-          <FilterSelect value={prompt} all="All prompts" onChange={(value) => setSearch({ prompt: value })}>
-            {[...prompts].flatMap(([key, versions]) => [
-              // A prompt with one version (a hand-edited dispatch) needs no "all versions" entry.
-              ...(versions.length > 1 ? [<SelectItem key={key} value={key}>{promptNames.get(key)}, all versions</SelectItem>] : []),
-              ...versions.map((row) => <SelectItem key={`${key}:${row.version}`} value={`${key}:${row.version}`}>{promptLabel(row)}</SelectItem>),
-            ])}
-          </FilterSelect>
-          <FilterSelect value={since} all="Any time" onChange={(value) => setSearch({ since: oneOf(SINCE_KEYS, value) })}>
-            {Object.entries(SINCE).map(([key, { label }]) => <SelectItem key={key} value={key}>{label}</SelectItem>)}
-          </FilterSelect>
-          <span className="ml-auto font-mono whitespace-nowrap text-muted-foreground" title="Over the runs listed">
-            <Figure>{scores.length}</Figure> scored · avg <Figure>{average(scores)?.toFixed(1) ?? "-"}</Figure> · worked <Figure>{duration(average(worked))}</Figure> ·{" "}
-            <Figure>{costs.length > 0 ? usd(costs.reduce((sum, cost) => sum + cost, 0)) : "-"}</Figure> on {costs.length} measured
-          </span>
-        </Toolbar>
+        <PageHeader
+          title="Runs"
+          summary={
+            list.data && (
+              <>
+                {visible.length} runs · {scores.length} scored · avg {average(scores)?.toFixed(1) ?? "-"} · worked {duration(average(worked))} ·{" "}
+                {costs.length > 0 ? usd(costs.reduce((sum, cost) => sum + cost, 0)) : "-"} on {costs.length} measured
+              </>
+            )
+          }
+          filters={
+            <FilterBar facets={facets}>
+              <Input className="h-6 w-44 text-xs" placeholder="Search" value={query} onChange={(e) => setQuery(e.target.value)} />
+            </FilterBar>
+          }
+          toggles={
+            <>
+              <Count
+                value={runs.length}
+                label="all"
+                active={!status && !unrated}
+                onClick={() => setSearch({ status: undefined, unrated: undefined })}
+                title={list.data?.length === LIMIT ? `The latest ${LIMIT}. Narrow the range or filters to reach older runs.` : undefined}
+              />
+              {RUN_STATUSES.map((value) => {
+                const { label, tone } = runStatus({ status: value });
+                return <Count key={value} value={count((run) => run.status === value)} label={label} tone={tone} active={status === value} onClick={() => setSearch({ status: status === value ? undefined : value })} />;
+              })}
+              <ToolbarDivider />
+              <Count value={count((run) => run.ratedAt === null)} label="unrated" active={!!unrated} onClick={() => setSearch({ unrated: unrated ? undefined : true })} />
+            </>
+          }
+        />
 
         {!list.data ? (
           <Empty>{list.error ? list.error.message : "Loading…"}</Empty>
         ) : visible.length === 0 ? (
-          <Empty>{runs.length === 0 && !ruleId && !source && !model && !prompt && !since ? "No runs yet. Runs show up here once a rule, dispatch or connection test starts one." : "No runs match these filters."}</Empty>
+          <Empty>{list.data.length === 0 ? "No runs in this range. Runs show up here once a rule, dispatch or connection test starts one." : "No runs match these filters."}</Empty>
         ) : (
           <Table>
             <TableHeader>
@@ -219,7 +168,7 @@ export function Runs() {
                 <TableRow key={run.id} data-state={run.id === openId ? "selected" : undefined} className="cursor-pointer" onClick={() => open(run.id)}>
                   <TableCell className="text-muted-foreground" title={new Date(run.createdAt).toLocaleString()}>{timeAgo(run.createdAt)}</TableCell>
                   <TableCell className="max-w-0 truncate" title={run.title ?? undefined}>
-                    <Link to="/runs" search={{ ...search, run: run.id }} replace className="link">
+                    <Link to="/runs" search={(prev: RunsSearch) => ({ ...prev, run: run.id })} replace className="link">
                       <span className="font-mono text-muted-foreground">{target(run)}</span> {run.title}
                     </Link>
                   </TableCell>
@@ -249,21 +198,6 @@ export function Runs() {
         </aside>
       )}
     </div>
-  );
-}
-
-/** A toolbar select over one search param; the `all` entry clears it. */
-function FilterSelect({ value, all, onChange, children }: { value: string | undefined; all: string; onChange: (value: string | undefined) => void; children: ReactNode }) {
-  return (
-    <Select value={value ?? ALL} onValueChange={(next) => onChange(next === ALL ? undefined : next)}>
-      <SelectTrigger size="sm" className={cn("h-6 px-2 text-xs", value === undefined && "text-muted-foreground")}>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value={ALL}>{all}</SelectItem>
-        {children}
-      </SelectContent>
-    </Select>
   );
 }
 
@@ -367,10 +301,9 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
 
 /** The earlier run a run follows up, as a link that opens it beside the table. Falls back to the id while it loads. */
 function FollowedRun({ id }: { id: string }) {
-  const search = useSearch({ from: "/runs" });
   const { data: run } = useQuery({ queryKey: ["run", id], queryFn: () => api<RunDetail>(`/api/runs/${id}`) });
   return (
-    <Link to="/runs" search={{ ...search, run: id }} replace className="link block truncate" title={run?.title ?? id}>
+    <Link to="/runs" search={(prev: RunsSearch) => ({ ...prev, run: id })} replace className="link block truncate" title={run?.title ?? id}>
       {run ? <><span className="font-mono text-muted-foreground">{target(run)}</span> {run.title}</> : <span className="font-mono">{id}</span>}
     </Link>
   );

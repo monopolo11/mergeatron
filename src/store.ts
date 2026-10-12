@@ -1,4 +1,5 @@
-import { and, count, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql, type AnyColumn } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, gte, inArray, isNotNull, isNull, lt, notInArray, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
+import type { SelectedFields, SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
@@ -57,7 +58,9 @@ export type RunStats = RunCounts & {
 };
 
 export type Analytics = {
-  all: RunCounts;
+  all: RunStats;
+  /** Per local calendar day a run was created on (`YYYY-MM-DD`), oldest first; days without runs are left out. */
+  byDay: (RunCounts & { day: string; totalCostUsd: number | null; avgRating: number | null })[];
   /** Connection tests carry no author and are left out of this list. Cost is summed over the runs with usage measured, null when none. */
   byAuthor: (RunCounts & { author: string; totalCostUsd: number | null })[];
   bySource: (RunCounts & { source: RunSource })[];
@@ -72,22 +75,52 @@ export type Analytics = {
   usage: { runs: number; measured: number; totalCostUsd: number | null };
 };
 
+/** A prompt, or one version of it, as a filter. */
+export type PromptKey = { owner: PromptVersionOwner; id: string; version?: number };
+
+/**
+ * The runs a page looks at: created in `[from, to)` and, per facet, matching
+ * any of the listed values. A missing or empty field does not narrow.
+ * `livePrompts` adds every preset's and rule's live version to `prompts`.
+ */
+export type RunScope = {
+  /** ISO timestamps. */
+  from?: string;
+  to?: string;
+  ruleIds?: readonly string[];
+  sources?: readonly RunSource[];
+  /** Model ids, e.g. `claude-opus-5-5`, whatever the provider instance. */
+  models?: readonly string[];
+  /** Runs whose first message came from one of these prompts or prompt versions. */
+  prompts?: readonly PromptKey[];
+  livePrompts?: boolean;
+  authors?: readonly string[];
+  repos?: readonly string[];
+};
+
 /** Which runs `listRuns` returns, newest first. Every field narrows; none means the latest 100. */
-export type RunFilter = {
-  ruleId?: string;
+export type RunFilter = RunScope & {
   status?: Run["status"];
-  source?: RunSource;
-  /** Runs whose first message came from this preset or rule prompt, or from one version of it. */
-  prompt?: { owner: PromptVersionOwner; id: string; version?: number };
-  /** Model id, e.g. `claude-opus-5-5`, whatever the provider instance. */
-  model?: string;
   /** True for rated runs only, false for unrated ones. */
   rated?: boolean;
-  /** ISO timestamp: runs created at or after it. */
-  since?: string;
   /** `recent` (default): newest first. `cost`: measured runs only, most expensive first. */
   sort?: "recent" | "cost";
   limit?: number;
+};
+
+/** One value of a run facet and how many runs in scope have it; `label` names a rule. */
+export type FacetValue<T extends string = string> = { value: T; count: number; label?: string };
+
+/** The values each run facet takes within a time window, most common first: what the filter menus offer. */
+export type RunFacets = {
+  rules: FacetValue[];
+  sources: FacetValue<RunSource>[];
+  models: FacetValue[];
+  authors: FacetValue[];
+  repos: FacetValue[];
+  prompts: (PromptRef & { name: string | null; live: boolean; count: number })[];
+  /** Runs whose message used a live prompt version. */
+  liveRuns: number;
 };
 
 /**
@@ -157,6 +190,66 @@ export function makeStore(db: AppDatabase) {
     const { id, ...stored } = row;
     // A source added after the row was saved polls on its defaults.
     return { ...stored, polling: { ...DEFAULT_POLLING, ...stored.polling } };
+  };
+  /** The version of a preset or rule prompt runs use now; needs `prompts` and `rules` joined to `runPrompts` by owner. */
+  const liveVersion = sql`coalesce(${prompts.liveVersion}, ${rules.livePromptVersion})`;
+  /** Runs whose message used one of a set of prompt versions, as an id subquery. */
+  const runsWithPrompt = (where: SQL | undefined) =>
+    inArray(
+      runs.id,
+      db
+        .select({ id: runPrompts.runId })
+        .from(runPrompts)
+        .leftJoin(prompts, and(eq(runPrompts.owner, "preset"), eq(prompts.id, runPrompts.ownerId)))
+        .leftJoin(rules, and(eq(runPrompts.owner, "rule"), eq(rules.id, runPrompts.ownerId)))
+        .where(where),
+    );
+  /** Over `runPrompts` with `prompts` and `rules` joined: any picked prompt or version, or any live version with `livePrompts`. Undefined when neither is set. */
+  const promptCondition = ({ prompts: picked = [], livePrompts }: RunScope) =>
+    picked.length === 0 && !livePrompts
+      ? undefined
+      : or(
+          ...picked.map((prompt) =>
+            and(eq(runPrompts.owner, prompt.owner), eq(runPrompts.ownerId, prompt.id), prompt.version === undefined ? undefined : eq(runPrompts.version, prompt.version)),
+          ),
+          livePrompts ? eq(runPrompts.version, liveVersion) : undefined,
+        );
+  const anyOf = <T extends string>(column: AnyColumn, values: readonly T[] | undefined) => (values?.length ? inArray(column, [...values]) : undefined);
+  /** The SQL condition for a RunScope, over `runs`. */
+  const scopeWhere = (scope: RunScope) => {
+    const prompt = promptCondition(scope);
+    return and(
+      scope.from === undefined ? undefined : gte(runs.createdAt, scope.from),
+      scope.to === undefined ? undefined : lt(runs.createdAt, scope.to),
+      anyOf(runs.ruleId, scope.ruleIds),
+      anyOf(runs.source, scope.sources),
+      anyOf(runs.modelId, scope.models),
+      anyOf(runs.author, scope.authors),
+      anyOf(runs.repo, scope.repos),
+      prompt && runsWithPrompt(prompt),
+    );
+  };
+  /**
+   * Prompt versions with runs matching `where`, joined to their names and
+   * live flags so callers add the columns they need. A dispatch of stacked
+   * presets counts under each.
+   */
+  const promptGroups = <Fields extends SelectedFields>(fields: Fields, where: SQL | undefined) => {
+    // The preset's or rule's name, or a dispatch's (its version note); null once a preset or rule is deleted.
+    const name = sql<string | null>`coalesce(${prompts.name}, ${rules.name}, case when ${runPrompts.owner} = 'dispatch' then ${promptVersions.note} end)`;
+    // The version runs use now; a dispatch's single version is never live.
+    const live = sql<boolean>`ifnull(${liveVersion} = ${runPrompts.version}, 0)`.mapWith(Boolean);
+    return db
+      .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, live, ...fields })
+      .from(runPrompts)
+      .innerJoin(runs, eq(runs.id, runPrompts.runId))
+      .leftJoin(runUsage, eq(runUsage.runId, runs.id))
+      .innerJoin(promptVersions, and(eq(promptVersions.owner, runPrompts.owner), eq(promptVersions.ownerId, runPrompts.ownerId), eq(promptVersions.version, runPrompts.version)))
+      .leftJoin(prompts, and(eq(runPrompts.owner, "preset"), eq(prompts.id, runPrompts.ownerId)))
+      .leftJoin(rules, and(eq(runPrompts.owner, "rule"), eq(rules.id, runPrompts.ownerId)))
+      .where(where)
+      .groupBy(runPrompts.owner, runPrompts.ownerId, runPrompts.version)
+      .orderBy(runPrompts.owner, runPrompts.ownerId, desc(runPrompts.version));
   };
   const listPrompts = (): Prompt[] => db.select().from(prompts).orderBy(prompts.createdAt).all();
   const createPrompt = ({ body, ...input }: PromptInput, source: PromptVersionSource = "ui"): Prompt =>
@@ -403,32 +496,14 @@ export function makeStore(db: AppDatabase) {
           .run();
       }),
 
-    listRuns: ({ limit = 100, ...filter }: RunFilter = {}) =>
+    listRuns: ({ limit = 100, status, rated, sort, ...scope }: RunFilter = {}) =>
       Effect.sync((): Run[] => {
-        const { prompt } = filter;
         const where = and(
-          filter.ruleId === undefined ? undefined : eq(runs.ruleId, filter.ruleId),
-          filter.status === undefined ? undefined : eq(runs.status, filter.status),
-          filter.source === undefined ? undefined : eq(runs.source, filter.source),
-          filter.model === undefined ? undefined : eq(runs.modelId, filter.model),
-          filter.rated === undefined ? undefined : filter.rated ? isNotNull(runs.ratedAt) : isNull(runs.ratedAt),
-          filter.since === undefined ? undefined : gte(runs.createdAt, filter.since),
-          prompt &&
-            inArray(
-              runs.id,
-              db
-                .select({ id: runPrompts.runId })
-                .from(runPrompts)
-                .where(
-                  and(
-                    eq(runPrompts.owner, prompt.owner),
-                    eq(runPrompts.ownerId, prompt.id),
-                    prompt.version === undefined ? undefined : eq(runPrompts.version, prompt.version),
-                  ),
-                ),
-            ),
+          scopeWhere(scope),
+          status === undefined ? undefined : eq(runs.status, status),
+          rated === undefined ? undefined : rated ? isNotNull(runs.ratedAt) : isNull(runs.ratedAt),
         );
-        if (filter.sort === "cost")
+        if (sort === "cost")
           return db
             .select(getTableColumns(runs))
             .from(runs)
@@ -759,32 +834,41 @@ export function makeStore(db: AppDatabase) {
     /** Runs whose thread is still running as far as we know; re-watched after a restart. */
     listUnsettledRuns: () => Effect.sync((): Run[] => db.select().from(runs).where(eq(runs.status, "started")).all()),
 
-    /** Every PR with runs, most recently active first. Verdicts come from `reviewVerdict`, so counts match the pause logic. */
-    pullRequests: () =>
+    /**
+     * Every PR with runs in scope, most recently active first. The status reads
+     * all of a PR's runs, so a pause streak that began before the range still
+     * counts; review counts are the runs in scope. Verdicts come from
+     * `reviewVerdict`, so counts match the pause logic.
+     */
+    pullRequests: (scope: RunScope = {}) =>
       Effect.sync((): PullRequestSummary[] => {
-        const all = db
-          .select()
-          .from(runs)
-          .where(sql`json_extract(${runs.context}, '$.pr_number') is not null`)
-          .orderBy(desc(runs.createdAt), desc(sql`rowid`))
-          .all();
-        const byPr = Map.groupBy(all, (run) => `${run.repo.toLowerCase()}#${run.context?.pr_number}`);
+        const isPr = sql`json_extract(${runs.context}, '$.pr_number') is not null`;
+        const prKey = (run: Run) => `${run.repo.toLowerCase()}#${run.context?.pr_number}`;
+        const inScope = new Set(db.select({ id: runs.id }).from(runs).where(and(isPr, scopeWhere(scope))).all().map((run) => run.id));
+        const all = db.select().from(runs).where(isPr).orderBy(desc(runs.createdAt), desc(sql`rowid`)).all();
+        const listed = new Set(all.filter((run) => inScope.has(run.id)).map(prKey));
+        const byPr = Map.groupBy(all.filter((run) => listed.has(prKey(run))), prKey);
         const limit = getSettings().maxChangesRequestedRounds;
 
         return [...byPr.values()].map((prRuns) => {
           // Newest first, and groupBy never yields an empty group.
           const latest = prRuns[0]!;
           const reviews = prRuns.filter((run) => run.event !== HANDOFF_EVENT);
-          const done = reviews.filter((run) => run.status === "done");
-          const verdicts = done.map((run) => reviewVerdict(run.result));
           const finished = prRuns.filter((run) => run.status === "done" && run.result !== null);
+          const latestVerdict = reviews.find((run) => run.status === "done");
           const status: PullRequestStatus = reviews.some((run) => run.status === "started")
             ? "reviewing"
             : reviews.some((run) => run.status === "queued")
               ? "queued"
               : limit > 0 && changesRequestedStreak(finished).length >= limit
                 ? "paused"
-                : (verdicts[0] ?? (latest.status === "failed" ? "failed" : "skipped"));
+                : latestVerdict
+                  ? reviewVerdict(latestVerdict.result)
+                  : latest.status === "failed"
+                    ? "failed"
+                    : "skipped";
+          const scoped = reviews.filter((run) => inScope.has(run.id));
+          const verdicts = scoped.filter((run) => run.status === "done").map((run) => reviewVerdict(run.result));
           const ctx = prRuns.find((run) => run.context?.pr_title)?.context ?? latest.context;
           return {
             repo: latest.repo,
@@ -796,17 +880,23 @@ export function makeStore(db: AppDatabase) {
             reviews: verdicts.length,
             approved: verdicts.filter((verdict) => verdict === "approved").length,
             changesRequested: verdicts.filter((verdict) => verdict === "changes_requested").length,
-            skipped: reviews.filter((run) => run.status === "skipped").length,
-            failed: reviews.filter((run) => run.status === "failed").length,
+            skipped: scoped.filter((run) => run.status === "skipped").length,
+            failed: scoped.filter((run) => run.status === "failed").length,
             lastAt: latest.createdAt,
             threadUrl: prRuns.find((run) => run.threadUrl)?.threadUrl ?? null,
           };
         });
       }),
 
-    /** Aggregates over every run: totals, per PR/issue author, per trigger source, per prompt version and per model. */
-    analytics: () =>
+    /**
+     * Aggregates over the runs in scope: totals, per day, per PR/issue author,
+     * per trigger source, per prompt version and per model. Days are calendar
+     * days at `utcOffsetMinutes` (the browser's offset; UTC by default). With
+     * `livePrompts`, the prompt table keeps only live versions.
+     */
+    analytics: (scope: RunScope = {}, utcOffsetMinutes = 0) =>
       Effect.sync((): Analytics => {
+        const where = scopeWhere(scope);
         const counts = {
           total: count(),
           queued: statusCount("queued"),
@@ -815,71 +905,96 @@ export function makeStore(db: AppDatabase) {
           skipped: statusCount("skipped"),
           failed: statusCount("failed"),
         };
-        const all = db.select(counts).from(runs).get() ?? { total: 0, queued: 0, started: 0, done: 0, skipped: 0, failed: 0 };
-        const byAuthor = db
-          .select({ author: sql<string>`${runs.author}`, ...counts, totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)` })
-          .from(runs)
-          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
-          .where(sql`${runs.author} is not null`)
-          .groupBy(runs.author)
-          .orderBy(desc(counts.total), runs.author)
-          .all();
-        const bySource = db
-          .select({ source: runs.source, ...counts })
-          .from(runs)
-          .groupBy(runs.source)
-          .orderBy(desc(counts.total), runs.source)
-          .all();
-
+        const totalCostUsd = sql<number | null>`round(sum(${runUsage.costUsd}), 4)`;
+        const avgRating = sql<number | null>`round(avg(${runs.rating}), 2)`;
         const avgInt = (column: AnyColumn) => sql<number | null>`cast(round(avg(${column})) as integer)`;
         // Selected over runs left-joined to their usage (one row per run at most).
         const stats = {
           ...counts,
           rated: count(runs.rating),
-          avgRating: sql<number | null>`round(avg(${runs.rating}), 2)`,
+          avgRating,
           avgElapsedMs: sql<number | null>`cast(round(avg(${runs.elapsedMs})) as integer)`,
           measured: count(runUsage.runId),
-          totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)`,
+          totalCostUsd,
           avgCostUsd: sql<number | null>`round(avg(${runUsage.costUsd}), 4)`,
           avgInputTokens: avgInt(runUsage.inputTokens),
           avgOutputTokens: avgInt(runUsage.outputTokens),
           avgCacheCreationTokens: avgInt(runUsage.cacheCreationTokens),
           avgCacheReadTokens: avgInt(runUsage.cacheReadTokens),
         };
-        // The preset's or rule's name, or a dispatch's (its version note); null once a preset or rule is deleted.
-        const name = sql<string | null>`coalesce(${prompts.name}, ${rules.name}, case when ${runPrompts.owner} = 'dispatch' then ${promptVersions.note} end)`;
-        // The version runs use now; a dispatch's single version is never live.
-        const live = sql<boolean>`ifnull(coalesce(${prompts.liveVersion}, ${rules.livePromptVersion}) = ${runPrompts.version}, 0)`.mapWith(Boolean);
-        const byPrompt = db
-          .select({ owner: runPrompts.owner, id: runPrompts.ownerId, version: runPrompts.version, name, live, ...stats })
-          .from(runPrompts)
-          .innerJoin(runs, eq(runs.id, runPrompts.runId))
-          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
-          .innerJoin(
-            promptVersions,
-            and(eq(promptVersions.owner, runPrompts.owner), eq(promptVersions.ownerId, runPrompts.ownerId), eq(promptVersions.version, runPrompts.version)),
-          )
-          .leftJoin(prompts, and(eq(runPrompts.owner, "preset"), eq(prompts.id, runPrompts.ownerId)))
-          .leftJoin(rules, and(eq(runPrompts.owner, "rule"), eq(rules.id, runPrompts.ownerId)))
-          .groupBy(runPrompts.owner, runPrompts.ownerId, runPrompts.version)
-          .orderBy(runPrompts.owner, runPrompts.ownerId, desc(runPrompts.version))
-          .all();
+        const scoped = () => db.select(stats).from(runs).leftJoin(runUsage, eq(runUsage.runId, runs.id));
 
+        const all = scoped().where(where).get()!;
+        const day = sql<string>`date(${runs.createdAt}, ${`${utcOffsetMinutes} minutes`})`;
+        const byDay = db
+          .select({ day, ...counts, totalCostUsd, avgRating })
+          .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
+          .where(where)
+          .groupBy(day)
+          .orderBy(day)
+          .all();
+        const byAuthor = db
+          .select({ author: sql<string>`${runs.author}`, ...counts, totalCostUsd })
+          .from(runs)
+          .leftJoin(runUsage, eq(runUsage.runId, runs.id))
+          .where(and(where, isNotNull(runs.author)))
+          .groupBy(runs.author)
+          .orderBy(desc(counts.total), runs.author)
+          .all();
+        const bySource = db
+          .select({ source: runs.source, ...counts })
+          .from(runs)
+          .where(where)
+          .groupBy(runs.source)
+          .orderBy(desc(counts.total), runs.source)
+          .all();
+        const byPrompt = promptGroups(stats, and(where, promptCondition(scope))).all();
         const byModel = db
           .select({ modelInstanceId: sql<string>`${runs.modelInstanceId}`, modelId: sql<string>`${runs.modelId}`, ...stats })
           .from(runs)
           .leftJoin(runUsage, eq(runUsage.runId, runs.id))
-          .where(isNotNull(runs.modelId))
+          .where(and(where, isNotNull(runs.modelId)))
           .groupBy(runs.modelInstanceId, runs.modelId)
           .orderBy(desc(counts.total))
           .all();
         const usage = db
-          .select({ runs: count(), measured: count(runUsage.runId), totalCostUsd: sql<number | null>`round(sum(${runUsage.costUsd}), 4)` })
+          .select({ runs: count(), measured: count(runUsage.runId), totalCostUsd })
           .from(runs)
           .leftJoin(runUsage, eq(runUsage.runId, runs.id))
-          .where(and(isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"])))
+          .where(and(where, isNotNull(runs.threadId), inArray(runs.status, ["done", "failed"])))
           .get() ?? { runs: 0, measured: 0, totalCostUsd: null };
-        return { all, byAuthor, bySource, byPrompt, byModel, usage };
+        return { all, byDay, byAuthor, bySource, byPrompt, byModel, usage };
+      }),
+
+    /** The values of each run facet within a window (`from` and `to` of the scope), for the filter menus. */
+    runFacets: ({ from, to }: Pick<RunScope, "from" | "to"> = {}) =>
+      Effect.sync((): RunFacets => {
+        const where = scopeWhere({ from, to });
+        const total = count();
+        const group = (column: SQLiteColumn) =>
+          db
+            .select({ value: sql<string>`${column}`, count: total })
+            .from(runs)
+            .where(and(where, isNotNull(column), sql`${column} != ''`))
+            .groupBy(column)
+            .orderBy(desc(total), column)
+            .all();
+        return {
+          rules: db
+            .select({ value: runs.ruleId, label: sql<string>`max(${runs.ruleName})`, count: total })
+            .from(runs)
+            .where(where)
+            .groupBy(runs.ruleId)
+            .orderBy(desc(total))
+            .all(),
+          sources: group(runs.source) as FacetValue<RunSource>[],
+          models: group(runs.modelId),
+          authors: group(runs.author),
+          repos: group(runs.repo),
+          prompts: promptGroups({ count: total }, where).all(),
+          liveRuns: db.select({ count: total }).from(runs).where(scopeWhere({ from, to, livePrompts: true })).get()?.count ?? 0,
+        };
       }),
   };
 }
