@@ -72,6 +72,24 @@ describe("review requests", () => {
     );
   });
 
+  test("rounds whose agent names no one tag the default reviewers", async () => {
+    const { layer, withRule, posts } = setup();
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        yield* withRule;
+        const store = yield* Store;
+        yield* requestReview({ prUrl: PR, channel: "#reviews" });
+        expect(posts[0]?.text).toStartWith("Review requested\n");
+
+        // Set after a first round that tagged no one: the second pass still tags them.
+        yield* store.saveSettings({ ...(yield* store.getSettings()), reviewMentions: ["U0ALICE01", "S0TEAM001"] });
+        yield* requestSecondPass({ prUrl: PR });
+        expect(posts[1]?.text).toBe("Round 2: second pass requested <@U0ALICE01> <!subteam^S0TEAM001>");
+      }),
+    );
+  });
+
   test("later rounds need a first request", async () => {
     const { layer } = setup();
     const error = await runWith(layer, failureOf(requestSecondPass({ prUrl: PR })));

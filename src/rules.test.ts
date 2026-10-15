@@ -42,6 +42,11 @@ describe("SettingsInput", () => {
     const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, githubLogin: " @Bernardo ", reviewChannel: "  ", slackUserId: "<@U0BERNARDO|bernardo>" });
     expect(Result.isSuccess(settings) && settings.success).toMatchObject({ githubLogin: "Bernardo", reviewChannel: null, slackUserId: "U0BERNARDO" });
   });
+
+  test("rejects default reviewers Slack cannot tag", () => {
+    const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, reviewMentions: ["U0ALICE01", "bob@acme.com"] });
+    expect(Result.isFailure(settings) && settings.failure.message).toContain('Cannot tag "bob@acme.com"');
+  });
 });
 
 describe("RunRatingInput", () => {

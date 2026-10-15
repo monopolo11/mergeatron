@@ -310,3 +310,18 @@ Work on a branch from {{default_branch}}. Read the relevant code first, keep the
 You are checked out on the PR head. Read every unresolved review comment with the gh CLI, fix what is right, push back in one line where a comment is wrong, and push the fixes to {{pr_head}}. Summarise what you changed per comment.`,
   },
 ];
+
+/**
+ * A mention as a Slack tag: user ids (`U…`), user group ids (`S…`),
+ * `here`/`channel`/`everyone`, or a tag already in Slack syntax. Null for
+ * anything else, such as a name or email.
+ */
+export function slackTag(entry: string): string | null {
+  const trimmed = entry.trim();
+  if (/^<[@!][^>]+>$/.test(trimmed)) return trimmed;
+  const bare = trimmed.replace(/^[@!]/, "");
+  if (/^(here|channel|everyone)$/i.test(bare)) return `<!${bare.toLowerCase()}>`;
+  if (/^[UW][A-Z0-9]{6,}$/.test(bare)) return `<@${bare}>`;
+  if (/^S[A-Z0-9]{6,}$/.test(bare)) return `<!subteam^${bare}>`;
+  return null;
+}

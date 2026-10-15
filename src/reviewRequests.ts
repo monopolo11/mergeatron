@@ -5,7 +5,7 @@ import { handleDelivery, type HandlerServices } from "./handler.ts";
 import { logger } from "./log.ts";
 import { PullRequests } from "./pulls.ts";
 import type { ReviewRequest } from "./rules.ts";
-import { HANDOFF_EVENT } from "./shared.ts";
+import { HANDOFF_EVENT, slackTag } from "./shared.ts";
 import { pullRequestInText, SECOND_PASS_EVENT, SlackClient } from "./slack.ts";
 import { Store } from "./store.ts";
 import { renderTemplate } from "./template.ts";
@@ -39,7 +39,7 @@ export type ReviewRound = {
   automated_review: string[];
 };
 
-/** Posts the first review request for a PR and opens its tracked thread. */
+/** Posts the first review request for a PR and opens its tracked thread. Without `mentions` it tags the default reviewers from Settings. */
 export const requestReview = Effect.fn("review.request")(function* (ask: ReviewAsk & { channel?: string }) {
   const store = yield* Store;
   const slack = yield* SlackClient;
@@ -60,7 +60,7 @@ export const requestReview = Effect.fn("review.request")(function* (ask: ReviewA
   yield* assertChannelAllowed(channel);
 
   const ctx = yield* pulls.details({ repo: pr.repo, pr_url: pr.url, pr_number: pr.number });
-  const mentions = yield* slackMentions(ask.mentions);
+  const mentions = yield* slackMentions(ask.mentions?.length ? ask.mentions : settings.reviewMentions);
   const text = renderReviewMessage(settings.reviewRequestMessage, ctx, { round: 1, mentions, note: ask.note });
   const posted = yield* slack.post(channel, text);
   const permalink = yield* slack.permalink(posted.channel, posted.ts).pipe(Effect.orElseSucceed(() => null));
@@ -73,7 +73,8 @@ export const requestReview = Effect.fn("review.request")(function* (ask: ReviewA
 /**
  * Asks for another review in the PR's tracked thread and starts the next
  * round. Runs even when the PR's reviews are paused, like a human's
- * "second pass" mention. Without `mentions` it tags whoever the last round did.
+ * "second pass" mention. Without `mentions` it tags whoever the last round did, or the default
+ * reviewers when that round tagged no one.
  */
 export const requestSecondPass = Effect.fn("review.secondPass")(function* (ask: ReviewAsk) {
   const store = yield* Store;
@@ -85,7 +86,7 @@ export const requestSecondPass = Effect.fn("review.secondPass")(function* (ask: 
   const settings = yield* store.getSettings();
 
   const ctx = yield* pulls.details({ repo: pr.repo, pr_url: request.prUrl, pr_number: pr.number });
-  const mentions = ask.mentions?.length ? yield* slackMentions(ask.mentions) : request.mentions;
+  const mentions = ask.mentions?.length ? yield* slackMentions(ask.mentions) : request.mentions || (yield* slackMentions(settings.reviewMentions));
   const text = renderReviewMessage(settings.secondPassMessage, ctx, { round: request.round + 1, mentions, note: ask.note });
   const posted = yield* slack.post(request.channel, text, request.threadTs);
   const updated = yield* store.nextReviewRound(request.id, mentions);
@@ -153,21 +154,13 @@ export function renderReviewMessage(template: string, ctx: WebhookContext, vars:
     .trim();
 }
 
-/**
- * Turns mentions into Slack tags: user ids (`U…`), user group ids (`S…`),
- * `here`/`channel`/`everyone`, or tags already in Slack syntax. Anything
- * else, such as a name or email, is an error rather than silent plain text.
- */
-export const slackMentions = (entries: string[] = []): Effect.Effect<string, ReviewRequestError> =>
-  Effect.map(Effect.forEach(entries, (entry) => slackMention(entry.trim())), (tags) => tags.join(" "));
+/** Turns mentions into Slack tags (see `slackTag`). Anything untaggable, such as a name or email, is an error rather than silent plain text. */
+export const slackMentions = (entries: readonly string[] = []): Effect.Effect<string, ReviewRequestError> =>
+  Effect.map(Effect.forEach(entries, slackMention), (tags) => tags.join(" "));
 
 function slackMention(entry: string): Effect.Effect<string, ReviewRequestError> {
-  if (/^<[@!][^>]+>$/.test(entry)) return Effect.succeed(entry);
-  const bare = entry.replace(/^[@!]/, "");
-  if (/^(here|channel|everyone)$/i.test(bare)) return Effect.succeed(`<!${bare.toLowerCase()}>`);
-  if (/^[UW][A-Z0-9]{6,}$/.test(bare)) return Effect.succeed(`<@${bare}>`);
-  if (/^S[A-Z0-9]{6,}$/.test(bare)) return Effect.succeed(`<!subteam^${bare}>`);
-  return Effect.fail(new ReviewRequestError({ message: `Cannot tag "${entry}": use a Slack user id (U…), a user group id (S…), or here/channel.` }));
+  const tag = slackTag(entry);
+  return tag ? Effect.succeed(tag) : Effect.fail(new ReviewRequestError({ message: `Cannot tag "${entry.trim()}": use a Slack user id (U…), a user group id (S…), or here/channel.` }));
 }
 
 function parsePullRequest(url: string): Effect.Effect<{ repo: string; number: string; url: string }, ReviewRequestError> {

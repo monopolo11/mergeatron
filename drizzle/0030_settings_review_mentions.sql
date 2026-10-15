@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `review_mentions` text DEFAULT '[]' NOT NULL;

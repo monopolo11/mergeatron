@@ -104,6 +104,8 @@ export const settings = sqliteTable("settings", {
   handoffPrompt: text("handoff_prompt").notNull().default(DEFAULT_HANDOFF_PROMPT),
   /** Channel id (or `#name`) the MCP `request_review` tool posts to when the agent names none. */
   reviewChannel: text("review_channel"),
+  /** Who the MCP review tools tag when the agent names no one: Slack user ids, group ids, or here/channel. */
+  reviewMentions: text("review_mentions", { mode: "json" }).$type<string[]>().notNull().default([]),
   /** Your Slack user id (`U…`), whom the MCP `notify_user` tool DMs. Null turns the tool off. */
   slackUserId: text("slack_user_id"),
   /** React with `:skip:` instead of ⏩ when a Slack message is seen but not reviewed. */

@@ -17,6 +17,7 @@ import {
   RUNTIME_MODES,
   WORKSPACE_MODES,
   inboxSource,
+  slackTag,
   type PollingSettings,
   type RuleFilters,
   type SentryFilters,
@@ -120,6 +121,12 @@ export const SettingsInput = Schema.Struct({
   maxChangesRequestedRounds: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.withDecodingDefault(Effect.succeed(3))),
   handoffPrompt: Schema.String.check(Schema.isMinLength(1)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_HANDOFF_PROMPT))),
   reviewChannel: cleanedOrNull((channel) => channel),
+  reviewMentions: Schema.Array(nonEmpty)
+    .check(Schema.makeFilter((entries) => {
+      const bad = entries.find((entry) => slackTag(entry) === null);
+      return bad === undefined ? undefined : `Cannot tag "${bad}": use a Slack user id (U…), a user group id (S…), or here/channel.`;
+    }))
+    .pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
   slackUserId: cleanedOrNull((user) => user.replace(/^<?@?([^>|]+).*$/, "$1")),
   skipReaction: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   usageIncludesDelegatedTasks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -242,6 +249,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxChangesRequestedRounds: 3,
   handoffPrompt: DEFAULT_HANDOFF_PROMPT,
   reviewChannel: null,
+  reviewMentions: [],
   slackUserId: null,
   skipReaction: false,
   usageIncludesDelegatedTasks: true,

@@ -204,6 +204,13 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
                     </Field>
                   )}
                 </form.Field>
+                <form.Field name="reviewMentions">
+                  {(field) => (
+                    <Field label="Default reviewers" hint="Whom request_review tags when the agent names no one, and second passes when the last round tagged no one. User ids (U…), group ids (S…), or here.">
+                      <TokenInput value={field.state.value} onChange={field.handleChange} placeholder="U0123456789" />
+                    </Field>
+                  )}
+                </form.Field>
                 <form.Field name="slackUserId">
                   {(field) => (
                     <Field label="Your Slack user id" hint="Whom notify_user DMs when an agent needs you. Profile → ⋮ → Copy member ID.">
