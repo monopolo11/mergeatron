@@ -30,6 +30,7 @@ import { TokenInput, type TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { eventsService } from "@/lib/composer";
+import { applicable, eventKinds } from "@/lib/ruleFields";
 import type { RuleDraft } from "@/lib/shell";
 import { useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
@@ -93,10 +94,11 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   const [saved, setSaved] = useState<RuleDraft>({ ...stored, prompt: versions.baseBody });
   const form = useForm({ defaultValues: saved, onSubmit: () => save(false) });
   const draft = useStore(form.store, (s) => s.values);
-  const value = useMemo(() => trimmed(draft), [draft]);
+  const value = useMemo(() => applicable(draft), [draft]);
 
   const promptChanged = value.prompt !== versions.baseBody;
-  const settingsChanged = JSON.stringify({ ...value, prompt: "" }) !== JSON.stringify({ ...trimmed(saved), prompt: "" });
+  // Against the stored rule as is, so a stored value the form hides (and clears) shows as unsaved until saved away.
+  const settingsChanged = JSON.stringify({ ...value, prompt: "" }) !== JSON.stringify({ ...saved, prompt: "" });
   const dirty = promptChanged || settingsChanged;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,12 +125,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   };
 
   const events = draft.events;
-  const isSlack = events.some((event) => event.startsWith(SLACK_EVENT_PREFIX));
-  const isInbox = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX));
-  const isWebhook = events.some((event) => !event.startsWith(SLACK_EVENT_PREFIX) && !event.startsWith(INBOX_EVENT_PREFIX));
-  const inboxLinear = events.some((event) => inboxSource(event) === "linear");
-  const inboxSentry = events.some((event) => inboxSource(event) === "sentry");
-  const inboxGitHub = events.some((event) => inboxSource(event) === "github");
+  const { isSlack, isInbox, isWebhook, inboxLinear, inboxSentry, inboxGitHub } = eventKinds(events);
   const inboxPr = events.includes("inbox.github.pull_request");
   const inboxIssue = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX) && event.endsWith(".issue"));
   // Slack messages carry PR variables once a PR link is found in the text.
@@ -562,10 +559,6 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
 }
 
 /** What gets saved: blank reviewer and channel become null, like an untouched field. */
-function trimmed(draft: RuleDraft): RuleDraft {
-  return { ...draft, reviewer: draft.reviewer?.trim() || null, channel: draft.channel?.trim() || null };
-}
-
 type Match = { item: InboxItem; why: string | null; run: Run | null };
 
 const MATCH_ROWS = 20;
