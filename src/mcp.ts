@@ -67,7 +67,7 @@ const ruleFields = z.object({
   events: z
     .array(z.string())
     .min(1)
-    .describe(`Event keys it fires on: ${SUGGESTED_EVENTS.map((event) => event.key).join(", ")}. An inbox rule takes the inbox events of one source only`),
+    .describe(`Event keys it fires on: ${SUGGESTED_EVENTS.map((event) => event.key).join(", ")}, or webhook.<slug> for a custom webhook defined in Settings. An inbox rule takes the inbox events of one source only`),
   repos: z.array(z.string()).describe("owner/name repositories; empty means every repository"),
   reviewer: z.string().nullable().describe("Only fire when this GitHub login or team slug is the requested reviewer"),
   channel: z.string().nullable().describe("Slack events: the channel id to listen in; null means any channel the bot is in"),
@@ -277,7 +277,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
         inputSchema: {
           rule_id: z.string().optional().describe("Only runs of this rule; dispatch, handoff and manual are the ids of runs without a stored rule"),
           status: z.enum(RUN_STATUSES).optional(),
-          source: z.enum(RUN_SOURCES).optional().describe("What triggered the run: github webhook, slack, poll (inbox automation) or manual"),
+          source: z.enum(RUN_SOURCES).optional().describe("What triggered the run: github webhook, slack, poll (inbox automation), webhook (custom webhook) or manual"),
           prompt_owner: z.enum(PROMPT_VERSION_OWNERS).optional().describe("preset, rule, or dispatch: the hand-edited text of an inbox dispatch"),
           prompt_id: z.string().optional().describe("With prompt_owner: only runs whose message is made of this prompt"),
           prompt_version: z.number().int().min(1).optional().describe("With prompt_owner and prompt_id: only runs of this version"),

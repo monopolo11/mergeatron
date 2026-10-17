@@ -1,12 +1,14 @@
 import type { RuleDraft } from "@/lib/shell";
-import { INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, inboxSource } from "../../src/shared.ts";
+import { CUSTOM_WEBHOOK_EVENT_PREFIX, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, inboxSource } from "../../src/shared.ts";
 
 /** Which kinds of delivery a rule's events cover; the editor shows the fields that apply to any of them. */
 export function eventKinds(events: string[]) {
   return {
     isSlack: events.some((event) => event.startsWith(SLACK_EVENT_PREFIX)),
     isInbox: events.some((event) => event.startsWith(INBOX_EVENT_PREFIX)),
-    isWebhook: events.some((event) => !event.startsWith(SLACK_EVENT_PREFIX) && !event.startsWith(INBOX_EVENT_PREFIX)),
+    /** GitHub webhook events. */
+    isWebhook: events.some((event) => ![SLACK_EVENT_PREFIX, INBOX_EVENT_PREFIX, CUSTOM_WEBHOOK_EVENT_PREFIX].some((prefix) => event.startsWith(prefix))),
+    isCustom: events.some((event) => event.startsWith(CUSTOM_WEBHOOK_EVENT_PREFIX)),
     inboxLinear: events.some((event) => inboxSource(event) === "linear"),
     inboxSentry: events.some((event) => inboxSource(event) === "sentry"),
     inboxGitHub: events.some((event) => inboxSource(event) === "github"),

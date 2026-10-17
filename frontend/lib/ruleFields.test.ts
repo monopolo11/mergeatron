@@ -37,6 +37,13 @@ describe("applicable", () => {
     expect(rule.filters).toMatchObject({ reasons: [], labels: "bug", states: [], teams: [] });
   });
 
+  test("a custom webhook rule is not a GitHub one: repository, reviewer and labels go", () => {
+    const rule = applicable(draft(["webhook.deploys"]));
+    expect(rule.repos).toEqual([]);
+    expect(rule.reviewer).toBeNull();
+    expect(rule.filters).toMatchObject({ reasons: [], labels: "", states: [], teams: [] });
+  });
+
   test("mixed events keep every field any of them shows", () => {
     const rule = applicable(draft(["slack.message", "inbox.linear.issue"]));
     expect(rule.repos).toEqual(["acme/widgets"]);

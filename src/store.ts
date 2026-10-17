@@ -3,7 +3,7 @@ import type { SelectedFields, SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -20,6 +20,9 @@ import {
   type RunPullRequest,
   type RunUsage,
   type Settings,
+  type Webhook,
+  type WebhookInput,
+  type WebhookUpdate,
 } from "./rules.ts";
 import { DEFAULT_POLLING, DEFAULT_PROMPTS, HANDOFF_EVENT, type InboxSource, type PromptOwner, type PromptVersionOwner, type PromptVersionSource, type RunSource } from "./shared.ts";
 
@@ -463,6 +466,31 @@ export function makeStore(db: AppDatabase) {
 
     /** Its prompt versions stay: runs reference them. */
     deleteRule: (id: string) => Effect.sync(() => db.delete(rules).where(eq(rules.id, id)).returning().get() !== undefined),
+
+    listWebhooks: () => Effect.sync((): Webhook[] => db.select().from(webhooks).orderBy(webhooks.createdAt).all()),
+
+    getWebhookBySlug: (slug: string) => Effect.sync((): Webhook | null => db.select().from(webhooks).where(eq(webhooks.slug, slug)).get() ?? null),
+
+    /** Null when another webhook has the slug. */
+    createWebhook: (input: WebhookInput & Pick<Webhook, "secret">) =>
+      Effect.sync((): Webhook | null => {
+        const now = new Date().toISOString();
+        return (
+          db
+            .insert(webhooks)
+            .values({ ...input, id: crypto.randomUUID(), createdAt: now, updatedAt: now })
+            .onConflictDoNothing({ target: webhooks.slug })
+            .returning()
+            .get() ?? null
+        );
+      }),
+
+    /** Name and schema, or a new secret: senders using the old one are rejected from then on. */
+    updateWebhook: (id: string, input: WebhookUpdate | Pick<Webhook, "secret">) =>
+      Effect.sync((): Webhook | null => db.update(webhooks).set({ ...input, updatedAt: new Date().toISOString() }).where(eq(webhooks.id, id)).returning().get() ?? null),
+
+    /** Rules on its event stay, and fire again if a webhook with the same slug is created. */
+    deleteWebhook: (id: string) => Effect.sync(() => db.delete(webhooks).where(eq(webhooks.id, id)).returning().get() !== undefined),
 
     /**
      * Saves hand-edited dispatch text as a one-off version (owner `dispatch`,

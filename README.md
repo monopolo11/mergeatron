@@ -66,6 +66,26 @@ cp .env.example .env
    content type `application/json`, your secret, and the events you want
    (Pull requests, Pull request reviews, Issue comments, Issues).
 
+### Custom webhooks
+
+Anything that can send an HTTP request can start threads too. **Settings →
+Webhooks** defines one with a name, a slug and an optional JSON schema for its
+payload; the service generates a secret. Then:
+
+```sh
+curl -X POST http://localhost:8787/webhooks/custom/<slug> \
+  -H "X-Webhook-Secret: whsec_…" -d '{"service": "api", "deploy": {"sha": "abc123"}}'
+```
+
+A request with the wrong secret gets a 401, a body that is not JSON or does
+not match the schema a 400 with the reasons, and nothing runs. An accepted one
+fires the rules on `webhook.<slug>` (**Webhooks** in the event picker). Their prompts get `{{webhook}}` (its name), `{{payload}}` (the body
+as JSON) and paths into it such as `{{payload.deploy.sha}}`; with a schema the
+editor offers every property as a chip. A custom webhook has no repository, so
+its rules pick a T3 project. The schema is draft-07 unless its `$schema` names
+2020-12. **Rotate** replaces the secret; the slug is fixed once created, since
+rules name it.
+
 ### Slack (optional)
 
 Slack runs over Socket Mode: the service opens a WebSocket to Slack, so Slack
@@ -214,9 +234,11 @@ in the Slack app settings) to change the bot's name to `@mergeatron`.
 
 Each rule has:
 
-- **Events**: one or more keys the rule fires on: `<event>.<action>` such as
+- **Events**: one or more keys the rule fires on, picked by source (GitHub,
+  Slack, Inbox, Webhooks) with each source's count of picks: `<event>.<action>` such as
   `pull_request.review_requested`, or `slack.app_mention` / `slack.message` /
-  `slack.second_pass` for Slack. One rule can serve both sources.
+  `slack.second_pass` for Slack, or `webhook.<slug>` for a [custom
+  webhook](#custom-webhooks). One rule can serve several sources.
 - **Repositories**: optional `owner/name` list. Empty matches every repo. For
   Slack rules this is the repository of the PR linked in the message.
 - **Requested reviewer** (GitHub): optional login or team slug. Handy so only

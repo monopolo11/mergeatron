@@ -1,7 +1,8 @@
 import { Effect, Schema, SchemaGetter } from "effect";
-import type { promptVersions, prompts, reviewRequests, rules, runPullRequests, runUsage, runs, settings } from "./db/schema.ts";
+import type { promptVersions, prompts, reviewRequests, rules, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { PromptKey, RunScope } from "./store.ts";
 import { parseLabels } from "./labelQuery.ts";
+import { compileSchema } from "./jsonSchema.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -15,6 +16,7 @@ import {
   RUN_SOURCES,
   RUN_STATUSES,
   RUNTIME_MODES,
+  WEBHOOK_SLUG_PATTERN,
   WORKSPACE_MODES,
   inboxSource,
   slackTag,
@@ -33,6 +35,7 @@ export type Settings = Omit<typeof settings.$inferSelect, "id">;
 export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
 export type PromptVersion = typeof promptVersions.$inferSelect;
+export type Webhook = typeof webhooks.$inferSelect;
 export type { ModelOption, ModelSelection, PromptRef, RunAction } from "./db/schema.ts";
 
 /**
@@ -175,6 +178,25 @@ export const DispatchInput = Schema.Struct({
 });
 export type DispatchInput = typeof DispatchInput.Type;
 
+/** A JSON schema object that compiles; null accepts any payload. */
+const PayloadSchema = Schema.NullOr(
+  Schema.Record(Schema.String, Schema.Unknown).check(Schema.makeFilter((schema: Record<string, unknown>) => {
+    const compiled = compileSchema(schema);
+    return compiled.ok ? undefined : `Not a valid JSON schema: ${compiled.error}`;
+  })),
+).pipe(Schema.withDecodingDefault(Effect.succeed(null)));
+
+/** Editing a custom webhook: its name and payload schema. The slug is fixed once created, since rules name it. */
+export const WebhookUpdate = Schema.Struct({ name: nonEmpty, payloadSchema: PayloadSchema });
+export type WebhookUpdate = typeof WebhookUpdate.Type;
+
+/** A new custom webhook; the server generates its secret. */
+export const WebhookInput = Schema.Struct({
+  ...WebhookUpdate.fields,
+  slug: Schema.Trim.check(Schema.isPattern(WEBHOOK_SLUG_PATTERN, { message: "Use lowercase letters, digits and dashes, starting with a letter or digit." })),
+});
+export type WebhookInput = typeof WebhookInput.Type;
+
 const intFromString = Schema.FiniteFromString.check(Schema.isInt());
 
 /**
@@ -270,4 +292,5 @@ export type RowChecks = [
   Extends<RuleInput["filters"], RuleFilters>,
   Extends<SettingsInput["sentryFilters"], SentryFilters>,
   Extends<RunRatingInput, Pick<Run, "rating" | "feedback" | "followUpOf">>,
+  Extends<WebhookInput, Pick<Webhook, "name" | "slug" | "payloadSchema">>,
 ];

@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Dot, Empty, ExternalLink, Field, Heading } from "@/components/Field";
 import { ModelPicker } from "@/components/ModelPicker";
 import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
@@ -32,7 +33,7 @@ import { confirmDiscard, useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
 import type { InboxResponse } from "../../src/inbox.ts";
 import type { PresetWithLatest, PromptHistory } from "../../src/promptVersions.ts";
-import type { Prompt, PromptInput, Settings } from "../../src/rules.ts";
+import type { Prompt, PromptInput, Settings, Webhook } from "../../src/rules.ts";
 import type { SentryOptions } from "../../src/sentryInbox.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -45,9 +46,11 @@ import {
   REVIEW_MESSAGE_VARS,
   RUNTIME_MODES,
   TEMPLATE_VARS,
+  WEBHOOK_SECRET_HEADER,
   sentryQuery,
   type InboxSource,
 } from "../../src/shared.ts";
+import { schemaVariables } from "../../src/template.ts";
 import type { UpdateResult } from "../../src/update.ts";
 
 const SECTIONS = [
@@ -56,6 +59,7 @@ const SECTIONS = [
   { id: "polling", label: "Polling" },
   { id: "sentry", label: "Sentry" },
   { id: "presets", label: "Dispatch presets" },
+  { id: "webhooks", label: "Webhooks" },
   { id: "reviews", label: "Reviews" },
   { id: "slack", label: "Slack and MCP" },
 ] as const;
@@ -114,8 +118,8 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
       {/* Its grids answer to this pane, not the window: beside the section list it is narrower than the viewport suggests. */}
       <div className="@container min-w-0 overflow-auto">
         <Toolbar title={section.label}>
-          {/* Presets save on demand in their own editor; the autosave state is the other sections'. */}
-          {section.id !== "presets" && (
+          {/* Presets and webhooks save on demand in their own editors; the autosave state is the other sections'. */}
+          {section.id !== "presets" && section.id !== "webhooks" && (
             <span className={cn("ml-auto text-muted-foreground", state === "error" && "text-destructive")} title={error ?? undefined}>{saveLabel(state)}</span>
           )}
         </Toolbar>
@@ -167,6 +171,8 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
           {section.id === "sentry" && <Sentry shell={shell} form={form} />}
 
           {section.id === "presets" && <Presets />}
+
+          {section.id === "webhooks" && <Webhooks />}
 
           {section.id === "reviews" && (
             <div className="grid gap-x-6 gap-y-3 @2xl:grid-cols-[14rem_1fr]">
@@ -732,6 +738,198 @@ function DeletePreset({ name, onConfirm }: { name: string; onConfirm: () => Prom
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={() => void onConfirm()}>Delete</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** Where a custom webhook receives POSTs. */
+const webhookUrl = (slug: string) => `${location.origin}/webhooks/custom/${slug}`;
+
+/** Custom webhooks as rows; the open row, or a new one, is the editor. Each fires the rules on `webhook.<slug>`. */
+function Webhooks() {
+  const queryClient = useQueryClient();
+  const webhooks = useQuery({ queryKey: ["webhooks"], queryFn: () => api<Webhook[]>("/api/webhooks") });
+  const [openId, setOpenId] = useState<string | null>(null);
+  const open = (id: string | null) => {
+    if (id === openId || confirmDiscard()) setOpenId(id);
+  };
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["webhooks"] });
+
+  // A failed background refetch keeps the last data: only an empty first load shows the error, so an open form keeps its edits.
+  if (!webhooks.data) return webhooks.error ? <p className="text-xs text-destructive">{webhooks.error.message}</p> : <p className="text-xs text-muted-foreground">Loading…</p>;
+  return (
+    <div className="border-t text-xs">
+      {webhooks.data.map((webhook) =>
+        webhook.id === openId ? (
+          <WebhookForm key={webhook.id} webhook={webhook} onClose={() => open(null)} onSaved={refresh} onDeleted={() => { setOpenId(null); void refresh(); }} />
+        ) : (
+          <button
+            key={webhook.id}
+            type="button"
+            onClick={() => open(webhook.id)}
+            className="grid w-full grid-cols-[12rem_1fr_auto] items-baseline gap-3 border-b px-1 py-2 text-left hover:bg-muted/40"
+          >
+            <span className="truncate text-[13px]">{webhook.name}</span>
+            <span className={cn("truncate text-muted-foreground", mono)}>{webhookUrl(webhook.slug)}</span>
+            <span className={cn("text-muted-foreground/70", mono)}>{webhook.payloadSchema ? `${schemaVariables(webhook.payloadSchema).length} keys` : "any JSON"}</span>
+          </button>
+        ),
+      )}
+      {openId === "new" ? (
+        <WebhookForm webhook={null} onClose={() => open(null)} onSaved={async (created) => { await refresh(); setOpenId(created.id); }} onDeleted={() => open(null)} />
+      ) : (
+        <div className="px-1 py-2">
+          <Button size="xs" variant="ghost" className="text-primary" onClick={() => open("new")}>+ New webhook</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Creates a webhook, or edits one's name and payload schema; the slug is fixed
+ * once created, since rules name it. A saved webhook shows its URL and secret
+ * header, with Rotate to replace the secret.
+ */
+function WebhookForm({ webhook, onClose, onSaved, onDeleted }: { webhook: Webhook | null; onClose: () => void; onSaved: (webhook: Webhook) => Promise<void> | void; onDeleted: () => void }) {
+  const initial = { name: webhook?.name ?? "", slug: webhook?.slug ?? "", schema: webhook?.payloadSchema ? JSON.stringify(webhook.payloadSchema, null, 2) : "" };
+  const [saved, setSaved] = useState(initial);
+  const [values, setValues] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dirty = values.name !== saved.name || values.slug !== saved.slug || values.schema !== saved.schema;
+  useUnsavedGuard(dirty);
+
+  // The schema as typed: empty is no schema, anything else must be a JSON object.
+  const parsed = parseSchema(values.schema);
+  const save = async () => {
+    if (!parsed.ok) return setError(parsed.error);
+    setSaving(true);
+    try {
+      const body = JSON.stringify({ name: values.name, slug: values.slug, payloadSchema: parsed.schema });
+      const result = webhook
+        ? await api<Webhook>(`/api/webhooks/${webhook.id}`, { method: "PUT", body })
+        : await api<Webhook>("/api/webhooks", { method: "POST", body });
+      setSaved(values);
+      setError(null);
+      await onSaved(result);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const failed = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const rotate = () => webhook && api<Webhook>(`/api/webhooks/${webhook.id}/secret`, { method: "POST" }).then(onSaved).catch(failed);
+  const remove = () => webhook && api(`/api/webhooks/${webhook.id}`, { method: "DELETE" }).then(onDeleted).catch(failed);
+
+  return (
+    <form
+      className="grid gap-3 border-b bg-muted/20 px-1 py-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn("ml-auto", error ? "text-destructive" : "text-warn")}>{error ? "Failed" : dirty ? "Unsaved changes" : ""}</span>
+        <Button type="submit" size="xs" variant="outline" disabled={!dirty || saving}>{webhook ? "Save" : "Create"}</Button>
+        {webhook && <ConfirmButton label="Delete" title={`Delete "${webhook.name}"?`} description="Requests to its URL are refused from now on. Rules on its event stay, and past runs stay in the log." onConfirm={remove} />}
+        <Button type="button" size="xs" variant="ghost" onClick={onClose}>Close</Button>
+      </div>
+      {error && <p className="text-destructive">{error}</p>}
+      <div className="grid gap-x-4 gap-y-3 @2xl:grid-cols-2">
+        <Field label="Name">
+          <Input autoFocus={!webhook} value={values.name} onChange={(e) => setValues({ ...values, name: e.target.value })} placeholder="Deploys" />
+        </Field>
+        <Field label="Slug" hint={webhook ? `Rules fire on webhook.${webhook.slug}. Fixed once created.` : "Lowercase letters, digits and dashes. Fixed once created."}>
+          <Input className={mono} disabled={!!webhook} value={values.slug} onChange={(e) => setValues({ ...values, slug: e.target.value.toLowerCase() })} placeholder="deploys" />
+        </Field>
+      </div>
+      {webhook && (
+        <dl className="grid grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-x-5 gap-y-2 wrap-anywhere">
+          <dt className="text-muted-foreground">URL</dt>
+          <dd className="flex items-baseline gap-2">
+            <code className={mono}>POST {webhookUrl(webhook.slug)}</code>
+            <CopyButton text={webhookUrl(webhook.slug)} />
+          </dd>
+          <dt className="text-muted-foreground">Secret header</dt>
+          <dd><SecretHeader secret={webhook.secret} onRotate={rotate} /></dd>
+        </dl>
+      )}
+      <Field
+        label="Payload schema"
+        hint={
+          parsed.ok
+            ? parsed.schema
+              ? `Requests must match it. Prompts can use {{payload}} and ${schemaVariables(parsed.schema).map((name) => `{{${name}}}`).join(", ") || "no keys yet"}.`
+              : "Optional JSON schema. Without one any JSON is accepted, and prompts use {{payload}}."
+            : parsed.error
+        }
+      >
+        <Textarea
+          className={cn("min-h-36", mono)}
+          aria-invalid={!parsed.ok}
+          value={values.schema}
+          onChange={(e) => setValues({ ...values, schema: e.target.value })}
+          placeholder={'{ "type": "object", "properties": { "service": { "type": "string" } } }'}
+        />
+      </Field>
+    </form>
+  );
+}
+
+/** The schema textarea's content: empty is no schema; otherwise it must be a JSON object. The server checks it is a valid schema. */
+function parseSchema(text: string): { ok: true; schema: Record<string, unknown> | null } | { ok: false; error: string } {
+  if (!text.trim()) return { ok: true, schema: null };
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? { ok: true, schema: value as Record<string, unknown> } : { ok: false, error: "The schema must be a JSON object." };
+  } catch (e) {
+    return { ok: false, error: `Not JSON: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/** `X-Webhook-Secret: whsec_…`, hidden until shown, with copy and rotate. */
+function SecretHeader({ secret, onRotate }: { secret: string; onRotate: () => Promise<unknown> | null }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <span className="flex flex-wrap items-baseline gap-2">
+      <code className={mono}>{WEBHOOK_SECRET_HEADER}: {shown ? secret : `${secret.slice(0, 10)}…`}</code>
+      <Button type="button" size="xs" variant="ghost" className="h-5 px-1 text-primary" onClick={() => setShown(!shown)}>{shown ? "Hide" : "Show"}</Button>
+      <CopyButton text={secret} />
+      <ConfirmButton className="h-5 px-1" label="Rotate" title="Rotate the secret?" description="Senders using the current secret are refused until they switch to the new one." onConfirm={() => void onRotate()} />
+    </span>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => void navigator.clipboard.writeText(text).then(() => setCopied(true));
+  return (
+    <Button type="button" size="xs" variant="ghost" className="h-5 px-1 text-primary" onClick={copy} onBlur={() => setCopied(false)}>
+      {copied ? "Copied" : "Copy"}
+    </Button>
+  );
+}
+
+/** A small destructive action behind a confirmation. */
+function ConfirmButton({ label, title, description, onConfirm, className }: { label: string; title: string; description: string; onConfirm: () => void; className?: string }) {
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button type="button" size="xs" variant="ghost" className={cn("text-destructive", className)}>{label}</Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={onConfirm}>{label}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

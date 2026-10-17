@@ -17,18 +17,19 @@ import { makeMcpHandler, type McpServices } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
-import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, type Rule } from "./src/rules.ts";
+import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, WebhookInput, WebhookUpdate, type Rule } from "./src/rules.ts";
 import { deleteRun, getRun, listRuns, rateRun } from "./src/runHistory.ts";
 import { startPullRequestBackfill, syncPullRequests } from "./src/runPullRequests.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
-import { EMPTY_FILTERS, INBOX_SOURCES } from "./src/shared.ts";
+import { EMPTY_FILTERS, INBOX_SOURCES, WEBHOOK_SECRET_HEADER } from "./src/shared.ts";
 import { runSlackSocket, SlackClient, SlackSocket } from "./src/slack.ts";
 import { Store } from "./src/store.ts";
 import { supervisorLayer } from "./src/supervisor.ts";
 import { T3 } from "./src/t3.ts";
 import { Updater } from "./src/update.ts";
 import { backfillStatus, startBackfill, Usage } from "./src/usage.ts";
+import { generateSecret, receiveWebhook } from "./src/webhooks.ts";
 
 const log = logger("server");
 const webhookLog = logger("webhook");
@@ -53,7 +54,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -324,6 +325,40 @@ const api = HttpRouter.use((router) =>
       route(Effect.map(Effect.flatMap(param("id"), store.deleteRule), (deleted) => (deleted ? HttpServerResponse.empty({ status: 204 }) : json({ error: "not found" }, 404)))),
     );
 
+    /** Custom webhooks (see src/webhooks.ts). The secret is generated here; POST `:id/secret` replaces it. */
+    yield* router.add("GET", "/api/webhooks", route(Effect.map(store.listWebhooks(), json)));
+    yield* router.add(
+      "POST",
+      "/api/webhooks",
+      route(
+        Effect.gen(function* () {
+          const input = yield* body(WebhookInput);
+          const webhook = yield* store.createWebhook({ ...input, secret: generateSecret() });
+          return webhook ? json(webhook, 201) : json({ error: `a webhook named ${input.slug} already exists` }, 409);
+        }),
+      ),
+    );
+    yield* router.add(
+      "PUT",
+      "/api/webhooks/:id",
+      route(
+        Effect.gen(function* () {
+          const webhook = yield* store.updateWebhook(yield* param("id"), yield* body(WebhookUpdate));
+          return webhook ? json(webhook) : json({ error: "not found" }, 404);
+        }),
+      ),
+    );
+    yield* router.add(
+      "POST",
+      "/api/webhooks/:id/secret",
+      route(Effect.map(Effect.flatMap(param("id"), (id) => store.updateWebhook(id, { secret: generateSecret() })), (webhook) => (webhook ? json(webhook) : json({ error: "not found" }, 404)))),
+    );
+    yield* router.add(
+      "DELETE",
+      "/api/webhooks/:id",
+      route(Effect.map(Effect.flatMap(param("id"), store.deleteWebhook), (deleted) => (deleted ? HttpServerResponse.empty({ status: 204 }) : json({ error: "not found" }, 404)))),
+    );
+
     /** Backfill: runs an inbox rule on every item it matches now, not only on new activity. */
     yield* router.add(
       "POST",
@@ -448,6 +483,18 @@ const api = HttpRouter.use((router) =>
             reviewer: ctx.requested_reviewer,
           });
           return json(yield* handleDelivery({ deliveryId, event, ctx }), 202);
+        }),
+      ),
+    );
+
+    yield* router.add(
+      "POST",
+      "/webhooks/custom/:slug",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const delivery = yield* receiveWebhook({ slug: yield* param("slug"), secret: request.headers[WEBHOOK_SECRET_HEADER], body: yield* request.text });
+          return json(delivery, 202);
         }),
       ),
     );

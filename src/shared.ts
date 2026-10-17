@@ -32,10 +32,11 @@ export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 /**
  * How a run was triggered: `github` is the webhook endpoint, `slack` the Socket
- * Mode connection, `poll` an inbox automation (see poller.ts), `manual` a
- * dispatch from the inbox view or the connection test in the header.
+ * Mode connection, `poll` an inbox automation (see poller.ts), `webhook` a
+ * custom webhook (see webhooks.ts), `manual` a dispatch from the inbox view or
+ * the connection test in the header.
  */
-export const RUN_SOURCES = ["github", "slack", "poll", "manual"] as const;
+export const RUN_SOURCES = ["github", "slack", "poll", "webhook", "manual"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 
 /**
@@ -168,31 +169,51 @@ function searchValue(value: string): string {
 }
 
 /**
- * Events offered by the rule editor's picker. GitHub keys are `<event>.<action>`
- * (or just `<event>` when the payload has no action); Slack keys are
- * `slack.<type>`. Matching is a plain string compare, so a rule saved with a
- * key outside this list (via the API) still works and shows under "Custom".
+ * Where a rule's events come from, as the rule editor's event picker groups
+ * them: GitHub webhooks, Slack, polled inbox items and custom webhooks.
+ */
+export const EVENT_SOURCES = [
+  { id: "github", label: "GitHub" },
+  { id: "slack", label: "Slack" },
+  { id: "inbox", label: "Inbox" },
+  { id: "webhook", label: "Webhooks" },
+] as const;
+export type EventSource = (typeof EVENT_SOURCES)[number]["id"];
+
+/** The source of an event key; anything without a known prefix is a GitHub webhook event. */
+export function eventSource(key: string): EventSource {
+  if (key.startsWith(SLACK_EVENT_PREFIX)) return "slack";
+  if (key.startsWith(INBOX_EVENT_PREFIX)) return "inbox";
+  return key.startsWith(CUSTOM_WEBHOOK_EVENT_PREFIX) ? "webhook" : "github";
+}
+
+/**
+ * Events offered by the rule editor's picker, labelled within their source.
+ * GitHub keys are `<event>.<action>` (or just `<event>` when the payload has
+ * no action); Slack keys are `slack.<type>`. Matching is a plain string
+ * compare, so a rule saved with a key outside this list (via the API) still
+ * works and shows under its source by key.
  */
 export const SUGGESTED_EVENTS = [
-  { key: "pull_request.review_requested", label: "PR: review requested" },
-  { key: "pull_request.opened", label: "PR: opened" },
-  { key: "pull_request.ready_for_review", label: "PR: ready for review" },
-  { key: "pull_request.synchronize", label: "PR: new commits pushed" },
-  { key: "pull_request.reopened", label: "PR: reopened" },
-  { key: "pull_request.labeled", label: "PR: labeled" },
-  { key: "pull_request_review.submitted", label: "PR review: submitted" },
-  { key: "pull_request_review_comment.created", label: "PR review comment: created" },
-  { key: "issue_comment.created", label: "Issue/PR comment: created" },
-  { key: "issues.opened", label: "Issue: opened" },
-  { key: "issues.assigned", label: "Issue: assigned" },
-  { key: "issues.labeled", label: "Issue: labeled" },
-  { key: "slack.app_mention", label: "Slack: bot mentioned" },
-  { key: "slack.message", label: "Slack: PR link posted in channel" },
-  { key: "slack.second_pass", label: "Slack: 'second/third/next/another pass' mention in a review thread" },
-  { key: "inbox.github.pull_request", label: "Inbox: GitHub PR" },
-  { key: "inbox.github.issue", label: "Inbox: GitHub issue" },
-  { key: "inbox.linear.issue", label: "Inbox: Linear issue" },
-  { key: "inbox.sentry.issue", label: "Inbox: Sentry issue" },
+  { key: "pull_request.review_requested", label: "PR review requested" },
+  { key: "pull_request.opened", label: "PR opened" },
+  { key: "pull_request.ready_for_review", label: "PR ready for review" },
+  { key: "pull_request.synchronize", label: "PR new commits pushed" },
+  { key: "pull_request.reopened", label: "PR reopened" },
+  { key: "pull_request.labeled", label: "PR labeled" },
+  { key: "pull_request_review.submitted", label: "PR review submitted" },
+  { key: "pull_request_review_comment.created", label: "PR review comment" },
+  { key: "issue_comment.created", label: "Issue or PR comment" },
+  { key: "issues.opened", label: "Issue opened" },
+  { key: "issues.assigned", label: "Issue assigned" },
+  { key: "issues.labeled", label: "Issue labeled" },
+  { key: "slack.app_mention", label: "Bot mentioned" },
+  { key: "slack.message", label: "PR link posted in channel" },
+  { key: "slack.second_pass", label: "Second pass mention in a review thread" },
+  { key: "inbox.github.pull_request", label: "GitHub PR" },
+  { key: "inbox.github.issue", label: "GitHub issue" },
+  { key: "inbox.linear.issue", label: "Linear issue" },
+  { key: "inbox.sentry.issue", label: "Sentry issue" },
 ] as const;
 
 /**
@@ -218,6 +239,25 @@ export const HANDOFF_TEMPLATE_VARS = ["rounds", "review_history"] as const;
 
 /** Rules whose event starts with this prefix are fed by the Slack webhook, not GitHub. */
 export const SLACK_EVENT_PREFIX = "slack.";
+
+/** Rule keys for custom webhooks are `webhook.<slug>`; each POST to the webhook's URL fires them. */
+export const CUSTOM_WEBHOOK_EVENT_PREFIX = "webhook.";
+export function customWebhookEvent(slug: string): string {
+  return `${CUSTOM_WEBHOOK_EVENT_PREFIX}${slug}`;
+}
+
+/** Header carrying a custom webhook's secret. */
+export const WEBHOOK_SECRET_HEADER = "x-webhook-secret";
+
+/** A custom webhook's slug: its URL path segment and event key suffix. */
+export const WEBHOOK_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * Variables a custom webhook delivery carries: the webhook's name, and the
+ * request body as JSON. `{{payload.user.login}}` reaches into the body (see
+ * `renderTemplate`); the webhook's payload schema lists those paths.
+ */
+export const CUSTOM_WEBHOOK_VARS = ["webhook", "payload"] as const;
 
 /** Variables available to prompt templates as `{{name}}`. See extractContext in github.ts, slack.ts and itemContext in inbox.ts. */
 export const TEMPLATE_VARS = [
@@ -267,7 +307,7 @@ export const TEMPLATE_VARS = [
   "previous_thread_url",
   "review_round",
 ] as const;
-export type TemplateVar = (typeof TEMPLATE_VARS)[number];
+export type TemplateVar = (typeof TEMPLATE_VARS)[number] | (typeof CUSTOM_WEBHOOK_VARS)[number];
 
 /**
  * Slack messages the MCP tools post for agents (Settings). Rendered with

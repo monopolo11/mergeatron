@@ -79,6 +79,24 @@ export const rules = sqliteTable("rules", {
 });
 
 /**
+ * A webhook you defined: any service can POST JSON to `/webhooks/custom/<slug>`
+ * with the secret in the `X-Webhook-Secret` header, and each request fires the
+ * rules on `webhook.<slug>` (see webhooks.ts).
+ */
+export const webhooks = sqliteTable("webhooks", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  /** URL path segment and event key suffix; fixed once created, since rules name it. */
+  slug: text().notNull().unique(),
+  /** Requests must carry it in `X-Webhook-Secret`. Generated, never typed in. */
+  secret: text().notNull(),
+  /** JSON schema requests must match; its properties are offered as `{{payload.<path>}}` variables. Null accepts any JSON. */
+  payloadSchema: text("payload_schema", { mode: "json" }).$type<Record<string, unknown> | null>(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/**
  * What a run starts with: the slice of its rule that `startThreadForRule`
  * reads, and the prompt versions its message is made of (in order). Stored
  * per run in `runActions` and `runPrompts`, since the rule may change while

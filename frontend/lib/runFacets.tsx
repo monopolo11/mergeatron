@@ -9,7 +9,7 @@ import type { PromptRef } from "../../src/rules.ts";
 import type { RunSource } from "../../src/shared.ts";
 import type { RunFacets } from "../../src/store.ts";
 
-export const SOURCE_LABELS: Record<RunSource, string> = { github: "GitHub webhook", slack: "Slack", poll: "Inbox automation", manual: "Manual" };
+export const SOURCE_LABELS: Record<RunSource, string> = { github: "GitHub webhook", slack: "Slack", poll: "Inbox automation", webhook: "Custom webhook", manual: "Manual" };
 /** Runs without a stored rule, by the id they are recorded under. */
 export const PSEUDO_RULES: Record<string, string> = { dispatch: "Inbox dispatches", handoff: "Handoffs", manual: "Connection tests" };
 

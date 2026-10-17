@@ -6,7 +6,7 @@ import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
 import type { PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
-import { HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, reasoningOf, type RunSource } from "./shared.ts";
+import { CUSTOM_WEBHOOK_EVENT_PREFIX, HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, reasoningOf, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3Error, type T3HttpError, type T3Project } from "./t3.ts";
@@ -17,7 +17,7 @@ export { matchRules, ruleMismatch } from "./match.ts";
 /** One inbound event, already reduced to a rule key and template variables. */
 export type Delivery = {
   deliveryId: string;
-  /** Rule key: `pull_request.review_requested`, `slack.app_mention`, `inbox.github.pull_request`, ... */
+  /** Rule key: `pull_request.review_requested`, `slack.app_mention`, `inbox.github.pull_request`, `webhook.<slug>`, ... */
   event: string;
   ctx: WebhookContext;
   /**
@@ -392,7 +392,7 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
     if (!bodies) return skipped("no prompt version to start the thread with");
     const branched = yield* withProjectBranch(rule, project, ctx);
     const started = yield* openThread(rule, project, branched.ctx, {
-      title: `${rule.name}: ${ctx.pr_title ?? ctx.issue_title ?? ctx.slack_text ?? ctx.repo}`,
+      title: `${rule.name}: ${ctx.pr_title ?? ctx.issue_title ?? ctx.slack_text ?? ctx.webhook ?? ctx.repo}`,
       prompt: renderTemplate(joinPrompts(bodies), branched.ctx),
     });
     const detail = branched.note ? `${started.detail} (${branched.note})` : started.detail;
@@ -494,7 +494,9 @@ function skipped(detail: string): StartResult {
 
 /** Trigger that produced a delivery, from its rule key. */
 function runSource(event: string): RunSource {
-  return event.startsWith(SLACK_EVENT_PREFIX) ? "slack" : event.startsWith(INBOX_EVENT_PREFIX) ? "poll" : "github";
+  if (event.startsWith(SLACK_EVENT_PREFIX)) return "slack";
+  if (event.startsWith(INBOX_EVENT_PREFIX)) return "poll";
+  return event.startsWith(CUSTOM_WEBHOOK_EVENT_PREFIX) ? "webhook" : "github";
 }
 
 /** PR or issue author the review is for; falls back to whoever caused the event. */

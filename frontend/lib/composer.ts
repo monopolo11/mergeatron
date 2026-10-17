@@ -1,5 +1,6 @@
-import { inboxSource, SLACK_EVENT_PREFIX, type InboxSource, type TemplateVar } from "../../src/shared.ts";
+import { CUSTOM_WEBHOOK_EVENT_PREFIX, inboxSource, SLACK_EVENT_PREFIX, type InboxSource, type TemplateVar } from "../../src/shared.ts";
 import type { T3Provider, T3Skill } from "../../src/t3.ts";
+import { VARIABLE_NAME } from "../../src/template.ts";
 
 /**
  * Text logic behind the prompt editor, ported from T3 Code's composer
@@ -44,7 +45,7 @@ export function splitSkills(line: string, skills: readonly T3Skill[]): Array<str
 }
 
 /** `{{name}}` with no inner spaces, so a chip writes back exactly the text it replaced. */
-const VARIABLE_TOKEN = /\{\{([a-zA-Z0-9_]+)\}\}/g;
+const VARIABLE_TOKEN = new RegExp(String.raw`\{\{(${VARIABLE_NAME})\}\}`, "g");
 
 /** Text split into plain runs and the `{{name}}` template variables it holds, in order. */
 export function splitVariables(text: string): Array<string | { variable: string }> {
@@ -104,8 +105,9 @@ export function variableService(name: string, source: VariableService | null = n
   return SHARED_VARIABLES.has(name) ? source : null;
 }
 
-/** The one service a set of events comes from (its inbox source, Slack, else a GitHub webhook); null when they mix. */
+/** The one service a set of events comes from (its inbox source, Slack, else a GitHub webhook); null when they mix or for custom webhooks. */
 export function eventsService(events: readonly string[]): VariableService | null {
+  if (events.some((event) => event.startsWith(CUSTOM_WEBHOOK_EVENT_PREFIX))) return null;
   const services = new Set(events.map((event) => inboxSource(event) ?? (event.startsWith(SLACK_EVENT_PREFIX) ? "slack" : "github")));
   return services.size === 1 ? [...services][0]! : null;
 }

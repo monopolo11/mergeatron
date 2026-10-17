@@ -10,6 +10,7 @@ import { api } from "@/lib/api";
 import { detectTrigger, providerSkills, searchSkills, skillLabel, skillSource, splitSkills, splitVariables, variableService, type ComposerTrigger, type VariableService } from "@/lib/composer";
 import { cn } from "@/lib/utils";
 import type { T3Provider, T3Skill } from "../../src/t3.ts";
+import { VARIABLE_NAME } from "../../src/template.ts";
 
 /** Lets a parent insert at the caret: variables, preset bodies. */
 export type PromptEditorHandle = { insert: (text: string) => void };
@@ -126,7 +127,7 @@ const VariableChip = Node.create<{ source: () => VariableService | null }>({
   addInputRules() {
     return [
       new InputRule({
-        find: /\{\{([a-zA-Z0-9_]+)\}\}$/,
+        find: new RegExp(String.raw`\{\{(${VARIABLE_NAME})\}\}$`),
         handler: ({ state, range, match }) => {
           state.tr.replaceWith(range.from, range.to, this.type.create({ name: match[1], service: variableService(match[1]!, this.options.source()) }));
         },

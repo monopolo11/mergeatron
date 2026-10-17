@@ -37,19 +37,23 @@ import { cn } from "@/lib/utils";
 import { itemContext, itemEvent, type InboxItem, type InboxResponse, type LabelsResponse } from "../../src/inbox.ts";
 import { ruleMismatch, sameName } from "../../src/match.ts";
 import type { PromptHistory } from "../../src/promptVersions.ts";
-import type { Prompt, Rule, Run } from "../../src/rules.ts";
+import type { Prompt, Rule, Run, Webhook } from "../../src/rules.ts";
 import {
+  CUSTOM_WEBHOOK_VARS,
+  EVENT_SOURCES,
   INBOX_EVENT_PREFIX,
   INBOX_REASON_LABELS,
   INBOX_REASONS,
-  SLACK_EVENT_PREFIX,
   SUGGESTED_EVENTS,
   TEMPLATE_VARS,
   WORKSPACE_MODES,
+  customWebhookEvent,
+  eventSource,
   inboxSource,
+  type EventSource,
 } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
-import { renderTemplate } from "../../src/template.ts";
+import { renderTemplate, schemaVariables } from "../../src/template.ts";
 
 /** Radix Select cannot hold an empty string, so "auto" gets a sentinel. */
 const AUTO_PROJECT = "__auto__";
@@ -125,7 +129,9 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   };
 
   const events = draft.events;
-  const { isSlack, isInbox, isWebhook, inboxLinear, inboxSentry, inboxGitHub } = eventKinds(events);
+  const { isSlack, isInbox, isWebhook, isCustom, inboxLinear, inboxSentry, inboxGitHub } = eventKinds(events);
+  // Linear and Sentry issues and custom webhooks name no repository, so the rule must pick a project.
+  const needsProject = inboxLinear || inboxSentry || isCustom;
   const inboxPr = events.includes("inbox.github.pull_request");
   const inboxIssue = events.some((event) => event.startsWith(INBOX_EVENT_PREFIX) && event.endsWith(".issue"));
   // Slack messages carry PR variables once a PR link is found in the text.
@@ -135,6 +141,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   // Inbox items feed the token suggestions and the match preview; only fetched for inbox rules.
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: isInbox });
   const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<Prompt[]>("/api/prompts") });
+  const webhooks = useQuery({ queryKey: ["webhooks"], queryFn: () => api<Webhook[]>("/api/webhooks") });
   // Labels synced from the rule's provider, so suggestions cover labels no inbox item carries yet.
   const synced = useQuery({ queryKey: ["labels"], queryFn: () => api<LabelsResponse>("/api/labels"), enabled: isInbox || isWebhook, staleTime: 5 * 60_000 });
   const candidates = (inbox.data?.items ?? []).filter((item) => events.includes(itemEvent(item)));
@@ -185,13 +192,20 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   const shownPrompt = linked?.body ?? versions.viewed?.body ?? draft.prompt;
   const preview = previewCtx ? renderTemplate(shownPrompt, previewCtx) : null;
 
-  const vars = TEMPLATE_VARS.filter(
-    (name) =>
-      (showsPullRequestVars || !name.startsWith("pr_")) &&
-      (isSlack || !name.startsWith("slack_")) &&
-      (isWebhook || isSlack || !WEBHOOK_ONLY_VARS.has(name)) &&
-      (isWebhook || isSlack || inboxIssue || !name.startsWith("issue_")),
-  );
+  // A custom webhook's body is `{{payload}}`; its schema's properties are offered as paths into it.
+  const payloadVars = (webhooks.data ?? []).filter((webhook) => events.includes(customWebhookEvent(webhook.slug))).flatMap((webhook) => schemaVariables(webhook.payloadSchema));
+  const vars = [
+    ...(isCustom && !isSlack && !isInbox && !isWebhook
+      ? ["default_branch"]
+      : TEMPLATE_VARS.filter(
+          (name) =>
+            (showsPullRequestVars || !name.startsWith("pr_")) &&
+            (isSlack || !name.startsWith("slack_")) &&
+            (isWebhook || isSlack || !WEBHOOK_ONLY_VARS.has(name)) &&
+            (isWebhook || isSlack || inboxIssue || !name.startsWith("issue_")),
+        )),
+    ...(isCustom ? new Set([...CUSTOM_WEBHOOK_VARS, ...payloadVars]) : []),
+  ];
 
   const insertText = (text: string) => promptRef.current?.insert(text);
 
@@ -237,10 +251,12 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                       ? "slack.message fires only for channel messages that link a GitHub PR."
                       : events.includes("slack.second_pass")
                         ? "slack.second_pass fires when the bot is mentioned with 'second pass' (or third, fourth...) inside a review thread. Use {{previous_result}} to hand the agent the previous review."
-                        : "Any selected event starts this rule."
+                        : isCustom
+                          ? "A custom webhook fires on every accepted POST to its URL."
+                          : "Any selected event starts this rule."
                 }
               >
-                <EventPicker value={field.state.value} onChange={field.handleChange} />
+                <EventPicker value={field.state.value} webhooks={webhooks.data ?? []} onChange={field.handleChange} />
               </Field>
             )}
           </form.Field>
@@ -380,15 +396,15 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 hint={
                   field.state.value
                     ? undefined
-                    : inboxLinear || inboxSentry
-                      ? `${inboxSentry ? "Sentry" : "Linear"} issues have no repository: pick a project.`
+                    : needsProject
+                      ? `${inboxSentry ? "Sentry issues have" : inboxLinear ? "Linear issues have" : "A custom webhook has"} no repository: pick a project.`
                       : isSlack
                         ? "Matched by comparing the PR linked in the message to each project's git remote."
                         : "Matched by comparing the repository to each project's git remote."
                 }
               >
                 <Select value={field.state.value ?? AUTO_PROJECT} onValueChange={(v) => field.handleChange(v === AUTO_PROJECT ? null : v)}>
-                  <SelectTrigger size="sm" className={cn("w-full", (inboxLinear || inboxSentry) && !field.state.value && "border-warn")}><SelectValue /></SelectTrigger>
+                  <SelectTrigger size="sm" className={cn("w-full", needsProject && !field.state.value && "border-warn")}><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value={AUTO_PROJECT}>Auto by git remote</SelectItem>
                     {projects.map((p) => (
@@ -643,52 +659,81 @@ function within(wanted: string[], name: string | null): boolean {
   return wanted.length === 0 || !name || wanted.some((w) => sameName(w, name));
 }
 
-const EVENT_GROUPS = [
-  { label: "GitHub webhook", events: SUGGESTED_EVENTS.filter((e) => !e.key.startsWith(SLACK_EVENT_PREFIX) && !e.key.startsWith(INBOX_EVENT_PREFIX)) },
-  { label: "Slack", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(SLACK_EVENT_PREFIX)) },
-  { label: "Inbox (polled) · one source per rule", events: SUGGESTED_EVENTS.filter((e) => e.key.startsWith(INBOX_EVENT_PREFIX)) },
-];
+type EventOption = { key: string; label: string };
 
 /**
- * Multi-select of event keys. Keys saved via the API that are not in the list
- * stay selected and show under "Custom". Picking an inbox event of one source
- * drops the other source's inbox events: a rule polls one source.
+ * Multi-select of event keys in two panes: the sources on the left, with how
+ * many of each are picked, and the open source's events on the right. Custom
+ * webhooks defined in Settings list under Webhooks. Keys saved via the API
+ * that are not offered (or whose webhook was deleted) stay selected and list
+ * under their source by key. Picking an inbox event of one source drops the
+ * other source's inbox events: a rule polls one source.
  */
-function EventPicker({ value, onChange }: { value: string[]; onChange: (events: string[]) => void }) {
-  const known = new Set<string>(SUGGESTED_EVENTS.map((e) => e.key));
-  const custom = value.filter((key) => !known.has(key)).map((key) => ({ key, label: key }));
-  const groups = custom.length > 0 ? [...EVENT_GROUPS, { label: "Custom", events: custom }] : EVENT_GROUPS;
+function EventPicker({ value, webhooks, onChange }: { value: string[]; webhooks: Webhook[]; onChange: (events: string[]) => void }) {
+  const offered: EventOption[] = [...SUGGESTED_EVENTS, ...webhooks.map((webhook) => ({ key: customWebhookEvent(webhook.slug), label: webhook.name }))];
+  const unknown = value.filter((key) => !offered.some((e) => e.key === key)).map((key) => ({ key, label: key }));
+  const options = [...offered, ...unknown];
+  const ofSource = (source: EventSource) => options.filter((e) => eventSource(e.key) === source);
+  const [open, setOpen] = useState<EventSource>(() => (value[0] ? eventSource(value[0]) : "github"));
+
   const toggle = (key: string, checked: boolean) => {
     const source = inboxSource(key);
     const otherSource = (k: string) => source !== null && inboxSource(k) !== null && inboxSource(k) !== source;
     const next = checked ? [...value.filter((k) => !otherSource(k)), key] : value.filter((k) => k !== key);
     if (next.length > 0) onChange(next);
   };
-  const labelOf = (key: string) => SUGGESTED_EVENTS.find((e) => e.key === key)?.label ?? key;
+  const labelOf = (key: string) => options.find((e) => e.key === key)?.label ?? key;
+  // `GitHub PR opened, PR labeled · Slack Bot mentioned`: picks grouped by source.
+  const picked = EVENT_SOURCES.map((source) => ({ ...source, keys: value.filter((key) => eventSource(key) === source.id) })).filter((source) => source.keys.length > 0);
 
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="w-full justify-start truncate font-normal">
-          <span className="truncate">{value.map(labelOf).join(", ") || "Pick events"}</span>
+          <span className="truncate">
+            {picked.map((source, i) => (
+              <span key={source.id}>
+                <span className="text-muted-foreground">{i > 0 && " · "}{source.label} </span>
+                {source.keys.map(labelOf).join(", ")}
+              </span>
+            ))}
+          </span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-96 p-2">
-        {groups.map((group) => (
-          <div key={group.label} className="mb-2 last:mb-0">
-            <GroupLabel className="px-2 py-1">{group.label}</GroupLabel>
-            {group.events.map((event) => {
-              const checked = value.includes(event.key);
-              return (
-                <label key={event.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-muted/60">
-                  <Checkbox checked={checked} disabled={checked && value.length === 1} onCheckedChange={(v) => toggle(event.key, v === true)} />
-                  <span>{event.label}</span>
-                  <span className={cn("ml-auto text-muted-foreground", mono)}>{event.key}</span>
-                </label>
-              );
-            })}
-          </div>
-        ))}
+      <PopoverContent align="start" className="grid w-[30rem] grid-cols-[8.5rem_1fr] p-0">
+        <nav className="border-r p-1">
+          {EVENT_SOURCES.map((source) => {
+            const count = value.filter((key) => eventSource(key) === source.id).length;
+            return (
+              <button
+                key={source.id}
+                type="button"
+                onClick={() => setOpen(source.id)}
+                className={cn("flex w-full items-center rounded px-2 py-1.5 text-left text-[13px] hover:bg-muted/60", open === source.id && "bg-muted")}
+              >
+                {source.label}
+                {count > 0 && <span className="ml-auto text-xs text-muted-foreground">{count}</span>}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="h-80 overflow-auto p-1">
+          {open === "inbox" && <GroupLabel className="px-2 py-1">One source per rule</GroupLabel>}
+          {ofSource(open).map((event) => {
+            const checked = value.includes(event.key);
+            return (
+              <label key={event.key} title={event.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-[13px] hover:bg-muted/60">
+                <Checkbox checked={checked} disabled={checked && value.length === 1} onCheckedChange={(v) => toggle(event.key, v === true)} />
+                <span className="truncate">{event.label}</span>
+              </label>
+            );
+          })}
+          {open === "webhook" && (
+            <Link to="/settings" hash="webhooks" className="link block px-2 py-1 text-[13px] text-primary">
+              {webhooks.length === 0 ? "Define one in Settings" : "Manage in Settings"}
+            </Link>
+          )}
+        </div>
       </PopoverContent>
     </Popover>
   );
