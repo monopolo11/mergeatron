@@ -98,6 +98,22 @@ describe("resolveProject", () => {
     expect(hostsRepository({ ...projects[0]!, repositoryIdentity: { canonicalKey: "x", owner: "acme", name: "widgets" } }, "acme/widgets")).toBe(false);
   });
 
+  test("hostsRepository matches the origin remote of a fork checkout whose primary remote is upstream", () => {
+    const fork: T3Project = {
+      ...projects[0]!,
+      repositoryIdentity: {
+        canonicalKey: "github.com/colemurray/background-agents",
+        provider: "github",
+        owner: "ColeMurray",
+        name: "background-agents",
+        origin: { canonicalKey: "github.com/acme/background-agents" },
+      },
+    };
+    expect(hostsRepository(fork, "acme/background-agents")).toBe(true);
+    expect(hostsRepository(fork, "ColeMurray/background-agents")).toBe(true);
+    expect(hostsRepository(fork, "acme/other")).toBe(false);
+  });
+
   test("findProject reads again while T3 has not resolved a remote yet", async () => {
     let reads = 0;
     const t3 = fakeT3({ projects: () => Effect.sync(() => (reads++ === 0 ? [{ ...projects[0]!, repositoryIdentity: null }] : projects)) });

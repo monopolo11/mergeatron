@@ -35,6 +35,8 @@ export type T3Project = {
     provider?: string;
     owner?: string;
     name?: string;
+    /** Set when the project's primary remote is not `origin`, e.g. a fork checkout whose `upstream` wins; `origin` is the fork. */
+    origin?: { canonicalKey: string };
   } | null;
 };
 
