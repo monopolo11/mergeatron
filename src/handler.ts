@@ -85,15 +85,16 @@ export const findProject = (rule: Pick<Rule, "projectId">, repo: string): Effect
     return project;
   });
 
-/** True when the project's git remote is this GitHub repository (`owner/name`). */
+/**
+ * True when the project's git remote is this GitHub repository (`owner/name`).
+ * T3 reports one primary remote per project; in a fork checkout that is
+ * `upstream`, so the `origin` remote it nests alongside counts too.
+ */
 export function hostsRepository(project: T3Project, repo: string): boolean {
   const identity = project.repositoryIdentity;
-  return (
-    identity?.provider === "github" &&
-    !!identity.owner &&
-    !!identity.name &&
-    sameName(`${identity.owner}/${identity.name}`, repo)
-  );
+  if (!identity) return false;
+  const isPrimary = identity.provider === "github" && !!identity.owner && !!identity.name && sameName(`${identity.owner}/${identity.name}`, repo);
+  return isPrimary || (!!identity.origin && sameName(identity.origin.canonicalKey, `github.com/${repo}`));
 }
 
 /**
