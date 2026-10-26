@@ -167,6 +167,18 @@ const api = HttpRouter.use((router) =>
       ),
     );
 
+    /** The running commit and, given `from` (a commit an earlier run started from), the commits and first-time contributors since. */
+    yield* router.add(
+      "GET",
+      "/api/update/changes",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return json(yield* updater.since(new URL(request.url, "http://localhost").searchParams.get("from")));
+        }),
+      ),
+    );
+
     yield* router.add("GET", "/api/settings", route(Effect.map(store.getSettings(), json)));
     yield* router.add(
       "PUT",

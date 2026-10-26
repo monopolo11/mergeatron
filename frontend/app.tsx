@@ -13,6 +13,7 @@ import { RunLog } from "@/components/RunLog";
 import { Runs, validateRunsSearch } from "@/components/Runs";
 import { SettingsPage } from "@/components/Settings";
 import { Sidebar } from "@/components/Sidebar";
+import { WhatsNew } from "@/components/WhatsNew";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api, type Status } from "@/lib/api";
@@ -152,6 +153,7 @@ function App() {
           <main className="min-w-0 overflow-auto">
             <Outlet />
           </main>
+          <WhatsNew />
           {liveOpen && (
             <aside className="hidden overflow-auto border-l xl:block">
               <RunLog runs={runs} rules={rules ?? []} webhookUrl={webhookUrl} />

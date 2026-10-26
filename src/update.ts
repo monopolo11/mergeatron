@@ -39,6 +39,17 @@ export type UpdateStatus = {
 
 export type UpdateResult = { from: string; to: string; restart: RestartMode };
 
+/** The commit this process runs and, when `from` is an earlier one, what changed since. */
+export type Changes = { current: string; release: Release | null };
+
+/** What a restart brought: the commits between two runs and the contributors who had never committed before. */
+export type Release = {
+  /** Non-merge commits, newest first. `author` is a GitHub username when git knows one, else the author name. */
+  commits: { sha: string; subject: string; author: string }[];
+  /** Authors in `commits` with no commit before the earlier run. */
+  newContributors: string[];
+};
+
 /** The check or the update could not be done; the message is shown in the UI. */
 export class UpdateError extends Data.TaggedError("UpdateError")<{ readonly message: string }> {}
 
@@ -69,6 +80,20 @@ export function summarize(
   };
 }
 
+/** GitHub username from a noreply address (`123+login@users.noreply.github.com`), else the commit's author name. */
+function username(name: string, email: string): string {
+  return /^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/i.exec(email)?.[1] ?? name;
+}
+
+/** Pure part of `since`, split out for tests. Both inputs are tab-separated `name, email[, sha, subject]` lines. */
+export function summarizeRelease(log: string, history: string): Release {
+  const rows = (text: string) => text.split("\n").filter(Boolean).map((line) => line.split("\t"));
+  const known = new Set(rows(history).map(([name = "", email = ""]) => username(name, email).toLowerCase()));
+  const commits = rows(log).map(([name = "", email = "", sha = "", ...subject]) => ({ sha, subject: subject.join("\t"), author: username(name, email) }));
+  const newContributors = [...new Set(commits.map((commit) => commit.author))].filter((author) => !known.has(author.toLowerCase()));
+  return { commits, newContributors };
+}
+
 export type UpdaterShape = {
   /** Fetches the tracked upstream and reports what updating the running process would bring. */
   readonly check: Effect.Effect<UpdateStatus, UpdateError>;
@@ -79,6 +104,12 @@ export type UpdaterShape = {
    * starts. Call `restart` once the HTTP response is on its way.
    */
   readonly apply: Effect.Effect<UpdateResult, UpdateError>;
+  /**
+   * The running commit and what it has over `from`, a commit an earlier run
+   * started from. No release when `from` is absent, current, or unknown to
+   * git (force push, another checkout). Works offline: it never fetches.
+   */
+  readonly since: (from: string | null) => Effect.Effect<Changes>;
   /** Gets the pulled code running. Never returns in `launchd` and `respawn` modes. */
   readonly restart: (mode: RestartMode) => Effect.Effect<void>;
 };
@@ -142,9 +173,25 @@ const makeUpdater = Effect.gen(function* () {
     return { from: status.current, to: status.latest, restart: status.restart };
   }).pipe(Effect.withSpan("update.apply"));
 
+  const since: UpdaterShape["since"] = (from) =>
+    Effect.gen(function* () {
+      const current = running.slice(0, 7);
+      // `from` comes from the query string and ends up in git's argv: only a bare commit id is accepted.
+      if (!from || !/^[0-9a-f]{7,40}$/i.test(from) || running.startsWith(from.toLowerCase())) return { current, release: null };
+      const [log, history] = yield* Effect.all(
+        [git("log", "--no-merges", "--format=%aN%x09%aE%x09%h%x09%s", `${from}..${running}`), git("log", "--no-merges", "--format=%aN%x09%aE", from)],
+        { concurrency: "unbounded" },
+      );
+      return { current, release: summarizeRelease(log, history) };
+    }).pipe(
+      Effect.orElseSucceed(() => ({ current: running.slice(0, 7), release: null })),
+      Effect.withSpan("update.since"),
+    );
+
   const shape: UpdaterShape = {
     check,
     apply,
+    since,
     restart: (mode) =>
       Effect.gen(function* () {
         yield* log.info("restarting", { mode });
