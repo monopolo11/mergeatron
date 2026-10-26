@@ -9,7 +9,7 @@ Besides webhooks and Slack, the service polls for the open PRs and issues that i
 | Source | Needs | Brings |
 | --- | --- | --- |
 | **GitHub** | The `gh` CLI, logged in (private repos included) | PRs where your review is requested, PRs and issues assigned to you, PRs and issues that mention you, PRs you authored. One GraphQL search per reason |
-| **Linear** | `LINEAR_API_KEY` in `.env` (personal API key) | Issues assigned to or created by you that are not done, plus issues whose description or comments mention you (from your notifications) |
+| **Linear** | `LINEAR_API_KEY` in `.env` (personal API key) | Issues assigned to or created by you that are open or were done in the last 7 days, plus issues whose description or comments mention you (from your notifications). Canceled and duplicate issues are left out |
 | **Sentry** | `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` in `.env`; `SENTRY_URL` for self-hosted or a region such as `https://de.sentry.io` | Unresolved issues seen in the last 14 days that pass the [filters](#sentry-filters), newest first, up to 100. The token needs `event:read`, `org:read` and `project:read` |
 
 Without a key, Linear and Sentry are off. **Settings → Polling** turns each source on or off and sets its interval in minutes; the counts in the inbox bar poll on click.
@@ -19,7 +19,7 @@ Each item carries its `reasons` (`review_requested`, `assigned`, `mentioned`, `a
 Items are stored in SQLite, so the inbox is full the moment the service starts and every poll is a diff:
 
 - New items get a first-seen time (the "In inbox" column).
-- Items the source stops returning (closed, merged, unassigned, resolved, done) are marked gone and kept for 30 days. An item that comes back starts a new stay.
+- Items the source stops returning (closed, merged, unassigned, resolved, a week after done) are marked gone and kept for 30 days. An item that comes back starts a new stay.
 - The **left** toggle lists only the departed items something ran on (a dispatch or a rule), so a churning source such as Sentry does not bury them.
 
 The same data is at `GET /api/inbox` (`?gone=1` appends departed items). `POST /api/inbox/poll` with `{"source"}` polls now.
@@ -57,7 +57,7 @@ On top of the repository list the editor gets:
 | Filter | Notes |
 | --- | --- |
 | **Reasons** | Token field with values seen in the inbox and their counts; type to add one not seen yet |
-| **States** | Same. Linear state name or type, Sentry substatus or status, GitHub `open`/`draft` |
+| **States** | Same. Linear state name or type, Sentry substatus or status, GitHub `open`/`draft`. A done Linear issue only matches a rule that names its state (`Done`) or type (`completed`), so rules without a state filter skip finished work |
 | **Teams** | Linear teams or Sentry projects (within what the Sentry filters let in), instead of repositories |
 | **Labels** | An expression, see below |
 | **Re-run on push** | PR rules. Default on: fires again for each new head commit, like `pull_request.synchronize` |

@@ -128,6 +128,14 @@ describe("filterMismatch", () => {
     expect(filterMismatch({ ...EMPTY_FILTERS, states: ["In Progress"] }, ctx)).toBe("state Todo is not In Progress");
     expect(filterMismatch({ ...EMPTY_FILTERS, teams: ["OPS"] }, ctx)).toBe("team ENG is not OPS");
   });
+
+  test("a done Linear issue matches only rules that name its state or type", () => {
+    const ctx = itemContext({ ...linear, state: "Done", stateType: "completed" });
+    expect(filterMismatch(EMPTY_FILTERS, ctx)).toBe("state Done is done; add it to States to run on done issues");
+    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["Todo"] }, ctx)).toBe("state Done is not Todo");
+    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["done"] }, ctx)).toBeNull();
+    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["completed"] }, ctx)).toBeNull();
+  });
 });
 
 describe("itemDeliveryId", () => {
