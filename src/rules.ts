@@ -1,5 +1,5 @@
 import { Effect, Schema, SchemaGetter } from "effect";
-import type { promptVersions, prompts, reviewRequests, rules, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
+import type { promptVersions, prompts, queuePauses, reviewRequests, rules, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { PromptKey, RunScope } from "./store.ts";
 import { parseLabels } from "./labelQuery.ts";
 import { compileSchema } from "./jsonSchema.ts";
@@ -36,6 +36,8 @@ export type ReviewRequest = typeof reviewRequests.$inferSelect;
 export type Prompt = typeof prompts.$inferSelect;
 export type PromptVersion = typeof promptVersions.$inferSelect;
 export type Webhook = typeof webhooks.$inferSelect;
+/** A provider whose usage ran out: why, and until when its runs wait; see queuePause.ts. */
+export type QueuePause = typeof queuePauses.$inferSelect;
 export type { ModelOption, ModelSelection, PromptRef, RunAction } from "./db/schema.ts";
 
 /**
@@ -263,6 +265,11 @@ export const RunRatingInput = Schema.Struct({
   followUpOf: optionalName,
 }).check(Schema.makeFilter((input) => (input.rating !== null || input.feedback !== null ? undefined : "Give a score, feedback or both.")));
 export type RunRatingInput = typeof RunRatingInput.Type;
+
+/** A new time for a paused provider to resume at, picked in the UI; a time already past resumes now. */
+export const QueueResumeInput = Schema.Struct({
+  resumeAt: Schema.String.check(Schema.makeFilter((value) => (Number.isNaN(Date.parse(value)) ? "Expected a date and time." : undefined))),
+});
 
 export const DEFAULT_SETTINGS: Settings = {
   model: { instanceId: "claudeAgent", model: "claude-fable-5-1" },

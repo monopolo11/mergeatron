@@ -4,12 +4,14 @@ import { errorMessage } from "./errors.ts";
 import { startQueued } from "./handler.ts";
 import { handoffIfStuck } from "./handoff.ts";
 import { logger } from "./log.ts";
+import { pauseProvider } from "./queuePause.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 
 const log = logger("supervisor");
 
 /**
- * Reacts to run events on its own fiber: whenever a run stops running the
+ * Reacts to run events on its own fiber: a thread that ran out of usage
+ * pauses its provider (see queuePause.ts), whenever a run stops running the
  * rule's queue advances, and a review that finished is checked for a stuck
  * PR (see handoff.ts). Events are handled one at a time, in order.
  */
@@ -19,6 +21,9 @@ const handle = (event: RunEvent) => {
       return startQueued(event.ruleId);
     case "Settled":
       return Effect.gen(function* () {
+        const { usageLimit } = event.outcome;
+        const provider = event.run.modelInstanceId;
+        if (usageLimit && provider) yield* pauseProvider(provider, event.run, event.outcome.detail, usageLimit.resetAt);
         yield* startQueued(event.run.ruleId);
         if (event.run.event !== HANDOFF_EVENT && event.outcome.status === "done") yield* handoffIfStuck(event.run);
       });

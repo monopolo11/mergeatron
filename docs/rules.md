@@ -45,7 +45,7 @@ Each match is a run. It shows in the live log as:
 
 | Status | Meaning |
 | --- | --- |
-| `queued` | Waiting for the rule's concurrency limit |
+| `queued` | Waiting for the rule's concurrency limit, or for its provider to resume after running out of usage |
 | `running` | Thread started; until its first turn settles |
 | `done` | Settled, with the agent's final message as the result |
 | `failed` | The thread failed, or had no result after 3 hours (which frees the PR for a new review) |
@@ -58,6 +58,14 @@ A PR gets one review at a time: while a run for it is running, further triggers 
 Every rule has a **Concurrency** limit. A match past it is recorded as `queued`, with the rule's prompt, project, workspace and model frozen on the run, and starts when a thread of the rule settles or fails to start, oldest first. Raising the limit starts queued runs right away, and queued runs survive a restart.
 
 A queued review holds its PR's one-at-a-time lock like a running one, and is skipped if the PR got a thread from elsewhere before its turn. Dispatches from the inbox share one limit set in the dialog. Slack-triggered reviews react ⏳ while queued, then 👀 when they start.
+
+### Usage limits
+
+When a thread fails because its provider's usage ran out (T3 reports the failure as a usage limit), that provider instance pauses (`claudeAgent`, `codex`…). Other providers keep running. A run that would start on a paused provider goes back to `queued`, with the provider it is waiting for in its detail, and frees its slot in the rule's concurrency limit. Runs on other providers start as usual, even in the same rule.
+
+A banner above every page has one row per paused provider. Each row says why, links the thread, and shows when the provider resumes: at the reset time T3 reported, or not until someone resumes it when the provider gave no time. Pick another time and **Reschedule resume** to move it, or **Resume now**. On resume, its waiting runs start oldest first within each rule's concurrency limit. Pauses and their resume times survive a restart.
+
+The API behind the banner: `GET /api/queue/pauses`, `PUT /api/queue/pauses/<instanceId>` with `{ "resumeAt": "<ISO time>" }`, and `DELETE /api/queue/pauses/<instanceId>` to resume now.
 
 ## Stuck PRs
 

@@ -225,6 +225,13 @@
       "when": 1792203493150,
       "tag": "0031_custom_webhooks",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1793019691848,
+      "tag": "0032_queue_pauses",
+      "breakpoints": true
     }
   ]
 }

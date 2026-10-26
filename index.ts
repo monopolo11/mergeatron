@@ -16,8 +16,9 @@ import { logger, loggerLayer } from "./src/log.ts";
 import { makeMcpHandler, type McpServices } from "./src/mcp.ts";
 import { Poller } from "./src/poller.ts";
 import { PullRequests } from "./src/pulls.ts";
+import { rescheduleResume, resumeProvider, resumeTimersOnStartup } from "./src/queuePause.ts";
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
-import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, WebhookInput, WebhookUpdate, type Rule } from "./src/rules.ts";
+import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, QueueResumeInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, WebhookInput, WebhookUpdate, type Rule } from "./src/rules.ts";
 import { deleteRun, getRun, listRuns, rateRun } from "./src/runHistory.ts";
 import { startPullRequestBackfill, syncPullRequests } from "./src/runPullRequests.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
@@ -54,7 +55,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409, QueueNotPausedError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -415,6 +416,20 @@ const api = HttpRouter.use((router) =>
       );
     }
 
+    /** Providers paused because a thread ran out of usage: PUT moves one's resume time, DELETE resumes it now (see src/queuePause.ts). */
+    yield* router.add("GET", "/api/queue/pauses", route(Effect.map(store.listQueuePauses(), json)));
+    yield* router.add(
+      "PUT",
+      "/api/queue/pauses/:instanceId",
+      route(
+        Effect.gen(function* () {
+          const { resumeAt } = yield* body(QueueResumeInput);
+          return json(yield* rescheduleResume(yield* param("instanceId"), resumeAt));
+        }),
+      ),
+    );
+    yield* router.add("DELETE", "/api/queue/pauses/:instanceId", route(Effect.as(Effect.flatMap(param("instanceId"), resumeProvider), HttpServerResponse.empty({ status: 204 }))));
+
     yield* router.add("GET", "/api/runs", route(Effect.map(store.listRuns(), json)));
     /** The runs page: summaries matching its filters, one run in full, rating a run and deleting it (see src/runHistory.ts). */
     yield* router.add(
@@ -590,7 +605,7 @@ const slackSocketLayer = Layer.effect(
 );
 
 /**
- * Seeds presets, re-attaches watchers and queues left by the previous process,
+ * Seeds presets, re-attaches watchers, queues and paused providers' resume timers left by the previous process,
  * starts polling, measures runs that settled without usage, and says hello.
  */
 const startupLayer = Layer.effectDiscard(
@@ -601,6 +616,7 @@ const startupLayer = Layer.effectDiscard(
     const poller = yield* Poller;
     yield* store.ensureDefaultPrompts();
     yield* resumeWatchers;
+    yield* resumeTimersOnStartup();
     yield* Effect.forEach(yield* store.queuedRuleIds(), startQueued, { discard: true });
     yield* poller.start;
     yield* startBackfill();

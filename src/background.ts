@@ -14,6 +14,10 @@ export type BackgroundShape = {
   /** Like `fork`, keyed: a second `watch` for a key still running is ignored (a resumed watcher does not double up). */
   readonly watch: <R>(key: string, job: Effect.Effect<unknown, never, R>) => Effect.Effect<void, never, R>;
   readonly watching: Effect.Effect<number>;
+  /** Like `watch`, but a job still running for the key is interrupted and replaced: a timer that was rescheduled. */
+  readonly replace: <R>(key: string, job: Effect.Effect<unknown, never, R>) => Effect.Effect<void, never, R>;
+  /** Interrupts the `watch` or `replace` job running for the key, if any. */
+  readonly cancel: (key: string) => Effect.Effect<void>;
   /** Whether a `watch` job for the key is still running. */
   readonly isWatching: (key: string) => Effect.Effect<boolean>;
   /** Resolves once every forked job (watchers excluded) has finished. */
@@ -27,6 +31,8 @@ export class Background extends Context.Service<Background, BackgroundShape>()("
     const shape: BackgroundShape = {
       fork: (job) => Effect.asVoid(FiberSet.run(jobs, job)),
       watch: (key, job) => Effect.asVoid(FiberMap.run(watchers, key, job, { onlyIfMissing: true })),
+      replace: (key, job) => Effect.asVoid(FiberMap.run(watchers, key, job)),
+      cancel: (key) => FiberMap.remove(watchers, key),
       watching: FiberMap.size(watchers),
       isWatching: (key) => FiberMap.has(watchers, key),
       awaitIdle: FiberSet.awaitEmpty(jobs),

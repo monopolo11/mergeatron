@@ -3,7 +3,7 @@ import type { SelectedFields, SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, queuePauses, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -11,6 +11,7 @@ import {
   type PromptRef,
   type PromptInput,
   type PromptVersion,
+  type QueuePause,
   type ReviewRequest,
   type Rule,
   type RuleInput,
@@ -529,6 +530,21 @@ export function makeStore(db: AppDatabase) {
           .run();
       }),
 
+    /** Providers whose usage ran out, oldest pause first; empty while every provider runs. */
+    listQueuePauses: () => Effect.sync((): QueuePause[] => db.select().from(queuePauses).orderBy(queuePauses.pausedAt).all()),
+
+    getQueuePause: (instanceId: string) => Effect.sync((): QueuePause | null => db.select().from(queuePauses).where(eq(queuePauses.instanceId, instanceId)).get() ?? null),
+
+    saveQueuePause: (pause: QueuePause) =>
+      Effect.sync(() => {
+        db.insert(queuePauses).values(pause).onConflictDoUpdate({ target: queuePauses.instanceId, set: pause }).run();
+      }),
+
+    clearQueuePause: (instanceId: string) =>
+      Effect.sync(() => {
+        db.delete(queuePauses).where(eq(queuePauses.instanceId, instanceId)).run();
+      }),
+
     listRuns: ({ limit = 100, status, rated, sort, ...scope }: RunFilter = {}) =>
       Effect.sync((): Run[] => {
         const where = and(
@@ -734,14 +750,24 @@ export function makeStore(db: AppDatabase) {
     countRuns: (ruleId: string, status: Run["status"]) =>
       Effect.sync(() => db.select({ n: count() }).from(runs).where(and(eq(runs.ruleId, ruleId), eq(runs.status, status))).get()?.n ?? 0),
 
-    /** Next run of a rule waiting for capacity: queued the longest. */
-    oldestQueuedRun: (ruleId: string) =>
+    /**
+     * Next run of a rule waiting for capacity: queued the longest, skipping
+     * runs held for a paused provider (`paused` instance ids). A run whose
+     * provider is not known yet is not skipped.
+     */
+    oldestQueuedRun: (ruleId: string, paused: readonly string[] = []) =>
       Effect.sync(
         (): Run | null =>
           db
             .select()
             .from(runs)
-            .where(and(eq(runs.ruleId, ruleId), eq(runs.status, "queued")))
+            .where(
+              and(
+                eq(runs.ruleId, ruleId),
+                eq(runs.status, "queued"),
+                paused.length > 0 ? or(isNull(runs.modelInstanceId), notInArray(runs.modelInstanceId, [...paused])) : undefined,
+              ),
+            )
             .orderBy(runs.createdAt, sql`rowid`)
             .get() ?? null,
       ),
