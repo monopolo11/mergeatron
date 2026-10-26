@@ -37,7 +37,7 @@ const threadDuration = Metric.timer("orchestrator_thread_duration", { descriptio
 /**
  * How a thread ended. `usageLimit` marks a failure because the provider's
  * usage ran out, with when it resets (null when the provider did not say):
- * the supervisor pauses the queue on it (see queuePause.ts).
+ * the supervisor pauses the run's provider on it (see queuePause.ts).
  */
 export type TurnOutcome = { status: "done" | "failed"; detail: string; result: string | null; usageLimit?: { resetAt: string | null } };
 
