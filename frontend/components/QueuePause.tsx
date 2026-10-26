@@ -9,7 +9,7 @@ import { timeUntil } from "@/lib/format";
 import { ShellContext } from "@/lib/shell";
 import type { QueuePause } from "../../src/rules.ts";
 
-const QUERY_KEY = ["queue-pause"];
+const QUERY_KEY = ["queue-pauses"];
 
 /** An ISO time as a `datetime-local` value, in the browser's time zone: `2026-10-26T12:30`. */
 function localInput(iso: string): string {
@@ -18,25 +18,35 @@ function localInput(iso: string): string {
 }
 
 /**
- * Shown above every page while the queue is paused because a thread ran out
- * of usage: why, when it resumes on its own (the provider's reset time unless
- * rescheduled), a picker to move that time, and a button to resume now.
+ * Shown above every page while providers are paused because a thread ran
+ * out of usage, one row each: why, when it resumes on its own (the
+ * provider's reset time unless rescheduled), a picker to move that time, and
+ * a button to resume now. Other providers keep running meanwhile.
  */
 export function QueuePauseBanner() {
-  const { runs, refreshRuns } = use(ShellContext)!;
+  const { data: pauses } = useQuery({ queryKey: QUERY_KEY, queryFn: () => api<QueuePause[]>("/api/queue/pauses"), refetchInterval: 5000 });
+  if (!pauses?.length) return null;
+  return (
+    <div role="status" className="divide-y divide-amber-500/30 border-b border-amber-500/40 bg-amber-500/10 text-xs">
+      {pauses.map((pause) => <ProviderPause key={pause.instanceId} pause={pause} />)}
+    </div>
+  );
+}
+
+function ProviderPause({ pause }: { pause: QueuePause }) {
+  const { runs, providers, refreshRuns } = use(ShellContext)!;
   const queryClient = useQueryClient();
-  const { data: pause } = useQuery({ queryKey: QUERY_KEY, queryFn: () => api<QueuePause | null>("/api/queue/pause"), refetchInterval: 5000 });
   const [picked, setPicked] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The picker shows the scheduled time, and follows it when it moves.
-  useEffect(() => setPicked(pause?.resumeAt ? localInput(pause.resumeAt) : ""), [pause?.resumeAt]);
-  if (!pause) return null;
+  useEffect(() => setPicked(pause.resumeAt ? localInput(pause.resumeAt) : ""), [pause.resumeAt]);
 
+  const path = `/api/queue/pauses/${encodeURIComponent(pause.instanceId)}`;
   const send = (init: RequestInit) => {
     setBusy(true);
     setError(null);
-    api<QueuePause | null>("/api/queue/pause", init)
+    api<QueuePause | undefined>(path, init)
       .then(() => {
         void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
         refreshRuns();
@@ -47,15 +57,16 @@ export function QueuePauseBanner() {
   // A `datetime-local` value has no zone, so Date reads it as local time.
   const reschedule = () => send({ method: "PUT", body: JSON.stringify({ resumeAt: new Date(picked).toISOString() }) });
   const resumeNow = () => send({ method: "DELETE" });
-  const waiting = runs.filter((run) => run.status === "queued").length;
+  const name = providers?.find((provider) => provider.instanceId === pause.instanceId)?.displayName ?? pause.instanceId;
+  const waiting = runs.filter((run) => run.status === "queued" && run.modelInstanceId === pause.instanceId).length;
   const unchanged = pause.resumeAt !== null && picked === localInput(pause.resumeAt);
 
   return (
-    <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
       <CirclePause className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
       <div className="min-w-0 flex-1">
         <p className="font-medium">
-          Queue paused: usage ran out
+          {name} paused: usage ran out
           {pause.resumeAt ? (
             <span title={new Date(pause.resumeAt).toLocaleString()}>
               {" "}· resumes {new Date(pause.resumeAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ({timeUntil(pause.resumeAt)})
@@ -76,7 +87,7 @@ export function QueuePauseBanner() {
           {error && <span className="text-destructive"> · {error}</span>}
         </p>
       </div>
-      <Input type="datetime-local" aria-label="Resume at" value={picked} onChange={(event) => setPicked(event.target.value)} className="h-7 w-auto text-xs" />
+      <Input type="datetime-local" aria-label={`Resume ${name} at`} value={picked} onChange={(event) => setPicked(event.target.value)} className="h-7 w-auto text-xs" />
       <Button size="xs" variant="outline" disabled={busy || picked === "" || unchanged} onClick={reschedule}>
         Reschedule resume
       </Button>

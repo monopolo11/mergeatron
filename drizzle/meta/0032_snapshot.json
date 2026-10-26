@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "bc2b92af-d9be-4e3e-a21b-f3e0710f6747",
+  "id": "938497bf-09ab-43f2-9f39-55d898e50a44",
   "prevId": "e6d903ba-53b9-4d87-9f34-54735c795f2b",
   "tables": {
     "inbox_items": {
@@ -320,12 +320,12 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "queue_pause": {
-      "name": "queue_pause",
+    "queue_pauses": {
+      "name": "queue_pauses",
       "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
+        "instance_id": {
+          "name": "instance_id",
+          "type": "text",
           "primaryKey": true,
           "notNull": true,
           "autoincrement": false

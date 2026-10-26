@@ -140,14 +140,15 @@ export const settings = sqliteTable("settings", {
 });
 
 /**
- * Single row, present while the queue is paused: a thread stopped because the
- * provider's usage ran out, so no thread starts and matches wait as `queued`
- * until `resumeAt` or until someone resumes by hand (see queuePause.ts).
+ * One row per provider instance whose usage ran out: no thread starts on it,
+ * and its runs wait as `queued` until `resumeAt` or until someone resumes it
+ * by hand (see queuePause.ts). Other providers keep running.
  */
-export const queuePause = sqliteTable("queue_pause", {
-  id: integer().primaryKey(),
+export const queuePauses = sqliteTable("queue_pauses", {
+  /** The paused provider instance, as in `ModelSelection.instanceId`: `claudeAgent`, `codex`… */
+  instanceId: text("instance_id").primaryKey(),
   pausedAt: text("paused_at").notNull(),
-  /** When the queue resumes on its own: the provider's usage reset, or a time picked in the UI. Null waits for a human. */
+  /** When it resumes on its own: the provider's usage reset, or a time picked in the UI. Null waits for a human. */
   resumeAt: text("resume_at"),
   /** Why: the failure T3 reported, e.g. "Claude API rate limit reached. Try again later." */
   reason: text().notNull(),

@@ -5,7 +5,7 @@ import { errorMessage } from "./errors.ts";
 import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
-import type { PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
+import type { ModelSelection, PromptRef, Rule, Run, RunAction, Settings } from "./rules.ts";
 import { CUSTOM_WEBHOOK_EVENT_PREFIX, HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_EVENT_PREFIX, reasoningOf, type RunSource } from "./shared.ts";
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
@@ -40,8 +40,6 @@ export type Delivery = {
 const skippedReaction = (settings: Pick<Settings, "skipReaction">) => (settings.skipReaction ? "skip" : "fast_forward");
 /** Reaction while a Slack-triggered review waits for its rule's concurrency limit. */
 const QUEUED_REACTION = "hourglass_flowing_sand";
-/** Detail of a run queued while the queue is paused; the UI shows until when. */
-const PAUSED_DETAIL = "queued: usage ran out, the queue is paused";
 
 const log = logger("rules");
 
@@ -150,8 +148,9 @@ const NO_THREAD: Thread = { threadId: null, threadUrl: null };
  *
  * Each rule runs at most `maxConcurrent` threads at once: past that a match
  * is recorded as `queued` with the rule's action frozen on it, and
- * `startQueued` starts it when a thread of the rule settles. While the queue
- * is paused (usage ran out, see queuePause.ts) every match queues.
+ * `startQueued` starts it when a thread of the rule settles. A run whose
+ * provider ran out of usage goes back to `queued` when it would start (see
+ * `startThreadForRule` and queuePause.ts).
  *
  * `promptRefs` says which prompt versions a one-off rule's text came from (a
  * dispatch's stacked presets); stored rules record their own prompt's version.
@@ -218,7 +217,6 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
   for (const rule of matched) {
     const decision = yield* Semaphore.withPermits(scheduling, 1)(
       Effect.gen(function* () {
-        if (yield* store.getQueuePause()) return { queued: true as const, running: 0, run: yield* record(rule, "queued", PAUSED_DETAIL, NO_THREAD) };
         const running = rule.maxConcurrent > 0 ? yield* store.countRuns(rule.id, "started") : 0;
         if (rule.maxConcurrent > 0 && running >= rule.maxConcurrent) {
           const detail = `queued: ${running} of ${rule.maxConcurrent} threads running`;
@@ -230,7 +228,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
     const run = decision.run;
     const runAt = { ...at, rule: rule.name, run: run.id };
     if (decision.queued) {
-      yield* log.info("rule matched, queued", { ...runAt, detail: run.detail, running: decision.running, limit: rule.maxConcurrent });
+      yield* log.info("rule matched, queued", { ...runAt, running: decision.running, limit: rule.maxConcurrent });
       // Complete the context now so the queued start has everything, and the author shows while it waits.
       yield* background.fork(Effect.flatMap(context, (ctx) => store.updateRun(run.id, { context: ctx, author: runAuthor(ctx) })));
       yield* notifySlack(delivery.ctx, { status: "queued", detail: run.detail });
@@ -254,12 +252,17 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
   return runs;
 });
 
-/** A started thread also records what it started with, for the run history; every field is a RunPatch field. */
+/**
+ * A started thread also records what it started with, for the run history;
+ * a run held for a paused provider records which one, so `startQueued` passes
+ * over it until that provider resumes. Every field is a RunPatch field.
+ */
 type StartResult =
   | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[]; context?: WebhookContext } & Pick<Run, "modelInstanceId" | "modelId" | "reasoning">)
+  | ({ status: "queued"; detail: string; threadId: null; threadUrl: null } & Pick<Run, "modelInstanceId" | "modelId" | "reasoning">)
   | { status: "skipped"; detail: string; threadId: null; threadUrl: null };
 
-/** Records how a thread start went and watches it; anything but `started` frees capacity for a queued run. */
+/** Records how a thread start went and watches it; anything but `started` frees capacity for another queued run. */
 const finishStart = (run: Run, ctx: WebhookContext, result: StartResult, at: Record<string, unknown>) =>
   Effect.gen(function* () {
     const store = yield* Store;
@@ -292,10 +295,10 @@ function actionOf(rule: Rule, promptRefs: PromptRef[] = [{ owner: "rule", id: ru
  * Starts queued runs of a rule while it has capacity, oldest first. The
  * supervisor calls it whenever a thread of the rule settles or fails to
  * start; the API calls it after a limit is raised, and startup for every
- * rule with queued runs, and a resumed queue for every one. The limit is the
- * rule's current one, or the frozen action's for dispatches, whose rule is
- * not stored. A queued run whose PR or issue got a thread meanwhile is
- * skipped. Nothing starts while the queue is paused.
+ * rule with queued runs, and a resumed provider for every one. The limit is
+ * the rule's current one, or the frozen action's for dispatches, whose rule
+ * is not stored. A queued run whose PR or issue got a thread meanwhile is
+ * skipped. Runs held for a paused provider wait (see queuePause.ts).
  */
 export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: string) {
   const store = yield* Store;
@@ -304,8 +307,8 @@ export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: s
   yield* Semaphore.withPermits(scheduling, 1)(
     Effect.gen(function* () {
       for (;;) {
-        if (yield* store.getQueuePause()) return;
-        const next = yield* store.oldestQueuedRun(ruleId);
+        const paused = (yield* store.listQueuePauses()).map((pause) => pause.instanceId);
+        const next = yield* store.oldestQueuedRun(ruleId, paused);
         if (!next) return;
         const action = yield* store.getRunAction(next.id);
         const limit = (yield* store.getRule(ruleId))?.maxConcurrent ?? action?.maxConcurrent ?? 0;
@@ -392,6 +395,11 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
       );
     }
 
+    const model = threadModel(rule, project, settings);
+    if (yield* store.getQueuePause(model.instanceId)) {
+      return { status: "queued", detail: `queued: ${model.instanceId} ran out of usage, waiting for it to resume`, threadId: null, threadUrl: null, ...modelFields(model) };
+    }
+
     // A linked preset's live version is read now, not when the rule was saved; a deleted one falls back to the action's own versions.
     const preset = rule.presetId ? yield* store.getPrompt(rule.presetId) : null;
     const promptRefs: PromptRef[] = preset ? [{ owner: "preset", id: preset.id, version: preset.liveVersion }] : rule.promptRefs;
@@ -422,6 +430,17 @@ const withProjectBranch = (rule: Pick<RunAction, "workspace">, project: T3Projec
     );
   });
 
+/** The model a thread starts with: the rule's, else the project's default, else the one in settings. */
+const threadModel = (rule: Pick<Rule, "model">, project: T3Project, settings: Pick<Settings, "model">): ModelSelection =>
+  rule.model ?? project.defaultModelSelection ?? settings.model;
+
+/** How a run records the model it started (or waits) with. */
+const modelFields = (model: ModelSelection): Pick<Run, "modelInstanceId" | "modelId" | "reasoning"> => ({
+  modelInstanceId: model.instanceId,
+  modelId: model.model,
+  reasoning: reasoningOf(model.options),
+});
+
 /**
  * Starts a T3 thread for the PR (or issue) in `ctx`, with the rule's workspace
  * and model. Shared by reviews and the handoff written when reviews stall.
@@ -440,7 +459,7 @@ export const openThread = (
     const baseBranch = ctx.pr_head ?? ctx.default_branch ?? null;
     const worktree = rule.workspace === "worktree";
 
-    const model = rule.model ?? project.defaultModelSelection ?? settings.model;
+    const model = threadModel(rule, project, settings);
     const thread = yield* t3.startThread({
       project,
       title: message.title.slice(0, 120),
@@ -462,9 +481,7 @@ export const openThread = (
       status: "started" as const,
       detail: worktree && baseBranch ? `worktree from origin/${baseBranch}` : `checkout ${project.workspaceRoot}`,
       ...thread,
-      modelInstanceId: model.instanceId,
-      modelId: model.model,
-      reasoning: reasoningOf(model.options),
+      ...modelFields(model),
       startedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
     };
   });
