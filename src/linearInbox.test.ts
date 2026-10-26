@@ -13,6 +13,7 @@ const issue = (patch: Partial<LinearIssue>): LinearIssue => ({
   branchName: "me/eng-7-rate-limit",
   createdAt: "2026-10-01T10:00:00Z",
   updatedAt: "2026-10-02T10:00:00Z",
+  completedAt: null,
   state: { name: "Todo", type: "unstarted" },
   team: { key: "ENG" },
   labels: { nodes: [{ name: "ready for dev" }] },
@@ -66,6 +67,33 @@ describe("LinearInbox.fetch", () => {
       }),
     );
     expect((await Effect.runPromise(inbox.fetch())).items).toHaveLength(1);
+  });
+
+  test("polls issues done within the last week; mentions of older done, canceled and duplicate issues are left out", async () => {
+    const queries: string[] = [];
+    const daysAgo = (days: number) => new Date(Date.now() - days * 24 * 60 * 60_000).toISOString();
+    const done = (identifier: string, completedAt: string) => issue({ id: identifier, identifier, assignee: null, state: { name: "Done", type: "completed" }, completedAt });
+    const inbox = makeLinearInbox(
+      transport((query) => {
+        queries.push(query);
+        if (query.includes("query Mine")) return { viewer: { id: "me", displayName: "Me" }, issues: { nodes: [done("ENG-1", daysAgo(1))] } };
+        return {
+          notifications: {
+            nodes: [
+              { type: "issueMention", issue: done("ENG-2", daysAgo(2)) },
+              { type: "issueMention", issue: done("ENG-3", daysAgo(20)) },
+              { type: "issueMention", issue: issue({ id: "i4", identifier: "ENG-4", state: { name: "Canceled", type: "canceled" } }) },
+            ],
+          },
+        };
+      }),
+    );
+    const { items } = await Effect.runPromise(inbox.fetch());
+    expect(items.map((item) => [item.identifier, item.stateType])).toEqual([
+      ["ENG-1", "completed"],
+      ["ENG-2", "completed"],
+    ]);
+    expect(queries[0]).toContain('completedAt: { gt: "-P7D" }');
   });
 });
 

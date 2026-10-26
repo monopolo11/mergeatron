@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Clock, Effect } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/http";
 import type { InboxLabel, PolledItem } from "./inbox.ts";
 import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
@@ -9,14 +9,17 @@ const log = logger("linear");
 
 /**
  * Polls Linear for the issues that involve you: assigned to or created by you
- * and not done, plus issues whose description or comments mention you, read
- * from your notifications. Uses a personal API key (`LINEAR_API_KEY`).
+ * and open or done within the last week, plus issues whose description or
+ * comments mention you, read from your notifications. Done issues are polled
+ * so rules can fire on them; only rules that name a done state in States do
+ * (see `filterMismatch`). Canceled and duplicate issues are left out. Uses a
+ * personal API key (`LINEAR_API_KEY`).
  */
 
 const LINEAR_API = "https://api.linear.app/graphql";
 
 const ISSUE_FIELDS = `fragment IssueFields on Issue {
-  id identifier title description url priorityLabel branchName createdAt updatedAt
+  id identifier title description url priorityLabel branchName createdAt updatedAt completedAt
   state { name type }
   team { key }
   labels { nodes { name } }
@@ -24,7 +27,11 @@ const ISSUE_FIELDS = `fragment IssueFields on Issue {
   creator { id displayName }
 }`;
 
-/** Open issues assigned to or created by the key's user. Newest activity first; 100 is plenty for one person. */
+/** How long a done issue stays in the inbox, as a Linear relative date. */
+const DONE_WINDOW = "-P7D";
+const DONE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** Open and recently done issues assigned to or created by the key's user. Newest activity first; 100 is plenty for one person. */
 const MINE_QUERY = `${ISSUE_FIELDS}
 query Mine {
   viewer { id displayName }
@@ -32,8 +39,10 @@ query Mine {
     first: 100
     orderBy: updatedAt
     filter: {
-      or: [{ assignee: { isMe: { eq: true } } }, { creator: { isMe: { eq: true } } }]
-      state: { type: { nin: ["completed", "canceled", "duplicate"] } }
+      and: [
+        { or: [{ assignee: { isMe: { eq: true } } }, { creator: { isMe: { eq: true } } }] }
+        { or: [{ state: { type: { nin: ["completed", "canceled", "duplicate"] } } }, { completedAt: { gt: "${DONE_WINDOW}" } }] }
+      ]
     }
   ) { nodes { ...IssueFields } }
 }`;
@@ -67,6 +76,7 @@ export type LinearIssue = {
   branchName: string;
   createdAt: string;
   updatedAt: string;
+  completedAt: string | null;
   state: { name: string; type: string };
   team: { key: string };
   labels: { nodes: { name: string }[] };
@@ -83,8 +93,15 @@ type LabelsResult = {
   };
 };
 
-/** Workflow state types that mean the issue is over; `duplicate` is its own type in Linear, not a kind of canceled. */
-const DONE_STATES = new Set(["completed", "canceled", "duplicate"]);
+/** Workflow state types never polled; `duplicate` is its own type in Linear, not a kind of canceled. */
+const DROPPED_STATES = new Set(["canceled", "duplicate"]);
+
+/** Whether a mentioned issue is left out, as the Mine query's filter would leave it out. */
+function leftOut(issue: LinearIssue, now: number): boolean {
+  if (DROPPED_STATES.has(issue.state.type)) return true;
+  if (issue.state.type !== "completed") return false;
+  return now - (issue.completedAt ? Date.parse(issue.completedAt) : 0) > DONE_WINDOW_MS;
+}
 
 /** GraphQL transport bound to an API key; the live one uses the HttpClient, tests inject fakes. */
 export type LinearQuery = <T>(query: string, variables?: Record<string, unknown>) => Effect.Effect<T, InboxSourceError>;
@@ -94,6 +111,7 @@ export function makeLinearInbox(query: LinearQuery): InboxSourceClient {
     fetch: () =>
       Effect.gen(function* () {
         const mine = yield* query<MineResult>(MINE_QUERY);
+        const now = yield* Clock.currentTimeMillis;
         const me = mine.viewer.id;
         const items = new Map<string, PolledItem>();
         for (const issue of mine.issues.nodes) {
@@ -108,7 +126,7 @@ export function makeLinearInbox(query: LinearQuery): InboxSourceClient {
         );
         for (const node of mentions?.notifications.nodes ?? []) {
           const issue = node.issue;
-          if (!issue || DONE_STATES.has(issue.state.type)) continue;
+          if (!issue || leftOut(issue, now)) continue;
           const existing = items.get(issue.identifier);
           if (existing) {
             if (!existing.reasons.includes("mentioned")) existing.reasons.push("mentioned");

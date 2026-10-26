@@ -34,9 +34,12 @@ export function ruleMismatch(rule: Rule, key: string, ctx: WebhookContext): stri
  * The first filter the delivery fails, or null. List-valued variables
  * (`labels`, `reasons`) are comma separated; a list filter passes when any of
  * its values is present, `labels` when its expression holds. `states` accepts
- * the state name or, for Linear, its type.
+ * the state name or, for Linear, its type. A done Linear issue only matches a
+ * rule whose `states` names its state, so rules written before done issues
+ * were polled do not start firing on finished work.
  */
 export function filterMismatch(filters: RuleFilters, ctx: WebhookContext): string | null {
+  if (ctx.state_type === "completed" && filters.states.length === 0) return `state ${ctx.state ?? "(none)"} is done; add it to States to run on done issues`;
   if (!intersects(filters.reasons, ctx.reasons)) return `reasons ${ctx.reasons || "(none)"} include none of ${filters.reasons.join(", ")}`;
   const labels = parseLabels(filters.labels);
   if (!labels.ok) return `label filter is invalid: ${labels.error}`;
