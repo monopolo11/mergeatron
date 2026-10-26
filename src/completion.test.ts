@@ -90,6 +90,22 @@ describe("threadOutcome", () => {
     expect(threadOutcome(thread({ runs: [run(1, "failed")] }), T0)?.detail).toBe("turn failed");
     expect(threadOutcome(thread({ runs: [run(1, "interrupted")] }), T0)?.detail).toBe("turn interrupted");
   });
+
+  test("a run that ran out of usage says so, with the reset time when the provider gave one", () => {
+    const limited = (resetAt?: string | null) =>
+      thread({
+        runs: [run(1, "failed")],
+        turnItems: [{ runId: "run1", type: "error", ordinal: 1, failure: { message: "Claude API rate limit reached. Try again later.", class: "usage_limit", resetAt } }],
+      });
+    expect(threadOutcome(limited("2026-10-26T02:20:00.000Z"), T0)).toMatchObject({
+      status: "failed",
+      detail: "Claude API rate limit reached. Try again later.",
+      usageLimit: { resetAt: "2026-10-26T02:20:00.000Z" },
+    });
+    expect(threadOutcome(limited(null), T0)?.usageLimit).toEqual({ resetAt: null });
+    expect(threadOutcome(limited(undefined), T0)?.usageLimit).toEqual({ resetAt: null });
+    expect(threadOutcome(thread({ runs: [run(1, "failed")] }), T0)?.usageLimit).toBeUndefined();
+  });
 });
 
 describe("reviewVerdict", () => {

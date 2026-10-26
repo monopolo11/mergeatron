@@ -3,7 +3,7 @@ import type { SelectedFields, SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { Context, Effect, Layer } from "effect";
 import { changesRequestedStreak, reviewVerdict } from "./verdict.ts";
 import { Database, type AppDatabase } from "./db/index.ts";
-import { inboxItems, promptVersions, prompts, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
+import { inboxItems, promptVersions, prompts, queuePause, reviewRequests, ruleGenerations, rules, runActions, runPrompts, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { InboxItem, PolledItem } from "./inbox.ts";
 import {
   DEFAULT_SETTINGS,
@@ -11,6 +11,7 @@ import {
   type PromptRef,
   type PromptInput,
   type PromptVersion,
+  type QueuePause,
   type ReviewRequest,
   type Rule,
   type RuleInput,
@@ -527,6 +528,28 @@ export function makeStore(db: AppDatabase) {
           .values({ id: 1, ...next })
           .onConflictDoUpdate({ target: settings.id, set: next })
           .run();
+      }),
+
+    /** Why and until when the queue is paused; null while it runs. */
+    getQueuePause: () =>
+      Effect.sync((): QueuePause | null => {
+        const row = db.select().from(queuePause).where(eq(queuePause.id, 1)).get();
+        if (!row) return null;
+        const { id, ...pause } = row;
+        return pause;
+      }),
+
+    saveQueuePause: (pause: QueuePause) =>
+      Effect.sync(() => {
+        db.insert(queuePause)
+          .values({ id: 1, ...pause })
+          .onConflictDoUpdate({ target: queuePause.id, set: pause })
+          .run();
+      }),
+
+    clearQueuePause: () =>
+      Effect.sync(() => {
+        db.delete(queuePause).where(eq(queuePause.id, 1)).run();
       }),
 
     listRuns: ({ limit = 100, status, rated, sort, ...scope }: RunFilter = {}) =>

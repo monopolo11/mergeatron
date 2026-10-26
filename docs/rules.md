@@ -45,7 +45,7 @@ Each match is a run. It shows in the live log as:
 
 | Status | Meaning |
 | --- | --- |
-| `queued` | Waiting for the rule's concurrency limit |
+| `queued` | Waiting for the rule's concurrency limit, or for a paused queue to resume |
 | `running` | Thread started; until its first turn settles |
 | `done` | Settled, with the agent's final message as the result |
 | `failed` | The thread failed, or had no result after 3 hours (which frees the PR for a new review) |
@@ -58,6 +58,12 @@ A PR gets one review at a time: while a run for it is running, further triggers 
 Every rule has a **Concurrency** limit. A match past it is recorded as `queued`, with the rule's prompt, project, workspace and model frozen on the run, and starts when a thread of the rule settles or fails to start, oldest first. Raising the limit starts queued runs right away, and queued runs survive a restart.
 
 A queued review holds its PR's one-at-a-time lock like a running one, and is skipped if the PR got a thread from elsewhere before its turn. Dispatches from the inbox share one limit set in the dialog. Slack-triggered reviews react ⏳ while queued, then 👀 when they start.
+
+### Usage limits
+
+When a thread fails because the provider's usage ran out (T3 reports the failure as a usage limit), the whole queue pauses: no thread starts, and every new match is recorded as `queued` until it resumes. A banner above every page says why, links the thread, and shows when the queue resumes: at the reset time T3 reported, or never on its own when the provider gave none. Pick another time and **Reschedule resume** to move it, or **Resume now**. On resume, queued runs start oldest first within each rule's concurrency limit. The pause and its resume time survive a restart.
+
+The API behind the banner: `GET /api/queue/pause` (null while the queue runs), `PUT /api/queue/pause` with `{ "resumeAt": "<ISO time>" }`, and `DELETE /api/queue/pause` to resume now.
 
 ## Stuck PRs
 

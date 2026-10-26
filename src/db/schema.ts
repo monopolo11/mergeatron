@@ -140,6 +140,23 @@ export const settings = sqliteTable("settings", {
 });
 
 /**
+ * Single row, present while the queue is paused: a thread stopped because the
+ * provider's usage ran out, so no thread starts and matches wait as `queued`
+ * until `resumeAt` or until someone resumes by hand (see queuePause.ts).
+ */
+export const queuePause = sqliteTable("queue_pause", {
+  id: integer().primaryKey(),
+  pausedAt: text("paused_at").notNull(),
+  /** When the queue resumes on its own: the provider's usage reset, or a time picked in the UI. Null waits for a human. */
+  resumeAt: text("resume_at"),
+  /** Why: the failure T3 reported, e.g. "Claude API rate limit reached. Try again later." */
+  reason: text().notNull(),
+  /** The run whose thread ran out of usage, and that thread. */
+  runId: text("run_id"),
+  threadUrl: text("thread_url"),
+});
+
+/**
  * A PR or issue that involves you, as last polled from GitHub, Linear or Sentry. One
  * shape for every source so the inbox, the composer and rule filters treat
  * them alike. Rows outlive the poll: `goneAt` marks when an item stopped

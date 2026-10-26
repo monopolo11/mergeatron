@@ -6,6 +6,7 @@ import "./styles.css";
 import { Analytics, validateAnalyticsSearch } from "@/components/Analytics";
 import { Empty } from "@/components/Field";
 import { Inbox, validateInboxSearch } from "@/components/Inbox";
+import { QueuePauseBanner } from "@/components/QueuePause";
 import { Reviews, STATUS_FILTERS } from "@/components/Reviews";
 import { RuleEditor } from "@/components/RuleEditor";
 import { RulesList } from "@/components/RulesList";
@@ -149,8 +150,11 @@ function App() {
       <TooltipProvider delayDuration={200}>
         <div className={cn("grid h-screen grid-cols-[184px_minmax(0,1fr)] overflow-clip", liveOpen && "xl:grid-cols-[184px_minmax(0,1fr)_340px]")}>
           <Sidebar status={status} update={update} running={running} runsOpen={runsOpen} onToggleRuns={onRunsPage ? undefined : toggleRuns} />
-          <main className="min-w-0 overflow-auto">
-            <Outlet />
+          <main className="flex min-w-0 flex-col overflow-hidden">
+            <QueuePauseBanner />
+            <div className="min-h-0 flex-1 overflow-auto">
+              <Outlet />
+            </div>
           </main>
           {liveOpen && (
             <aside className="hidden overflow-auto border-l xl:block">

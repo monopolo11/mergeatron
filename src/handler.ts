@@ -40,6 +40,8 @@ export type Delivery = {
 const skippedReaction = (settings: Pick<Settings, "skipReaction">) => (settings.skipReaction ? "skip" : "fast_forward");
 /** Reaction while a Slack-triggered review waits for its rule's concurrency limit. */
 const QUEUED_REACTION = "hourglass_flowing_sand";
+/** Detail of a run queued while the queue is paused; the UI shows until when. */
+const PAUSED_DETAIL = "queued: usage ran out, the queue is paused";
 
 const log = logger("rules");
 
@@ -148,7 +150,8 @@ const NO_THREAD: Thread = { threadId: null, threadUrl: null };
  *
  * Each rule runs at most `maxConcurrent` threads at once: past that a match
  * is recorded as `queued` with the rule's action frozen on it, and
- * `startQueued` starts it when a thread of the rule settles.
+ * `startQueued` starts it when a thread of the rule settles. While the queue
+ * is paused (usage ran out, see queuePause.ts) every match queues.
  *
  * `promptRefs` says which prompt versions a one-off rule's text came from (a
  * dispatch's stacked presets); stored rules record their own prompt's version.
@@ -215,6 +218,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
   for (const rule of matched) {
     const decision = yield* Semaphore.withPermits(scheduling, 1)(
       Effect.gen(function* () {
+        if (yield* store.getQueuePause()) return { queued: true as const, running: 0, run: yield* record(rule, "queued", PAUSED_DETAIL, NO_THREAD) };
         const running = rule.maxConcurrent > 0 ? yield* store.countRuns(rule.id, "started") : 0;
         if (rule.maxConcurrent > 0 && running >= rule.maxConcurrent) {
           const detail = `queued: ${running} of ${rule.maxConcurrent} threads running`;
@@ -226,7 +230,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
     const run = decision.run;
     const runAt = { ...at, rule: rule.name, run: run.id };
     if (decision.queued) {
-      yield* log.info("rule matched, queued", { ...runAt, running: decision.running, limit: rule.maxConcurrent });
+      yield* log.info("rule matched, queued", { ...runAt, detail: run.detail, running: decision.running, limit: rule.maxConcurrent });
       // Complete the context now so the queued start has everything, and the author shows while it waits.
       yield* background.fork(Effect.flatMap(context, (ctx) => store.updateRun(run.id, { context: ctx, author: runAuthor(ctx) })));
       yield* notifySlack(delivery.ctx, { status: "queued", detail: run.detail });
@@ -288,9 +292,10 @@ function actionOf(rule: Rule, promptRefs: PromptRef[] = [{ owner: "rule", id: ru
  * Starts queued runs of a rule while it has capacity, oldest first. The
  * supervisor calls it whenever a thread of the rule settles or fails to
  * start; the API calls it after a limit is raised, and startup for every
- * rule with queued runs. The limit is the rule's current one, or the frozen
- * action's for dispatches, whose rule is not stored. A queued run whose PR or
- * issue got a thread meanwhile is skipped.
+ * rule with queued runs, and a resumed queue for every one. The limit is the
+ * rule's current one, or the frozen action's for dispatches, whose rule is
+ * not stored. A queued run whose PR or issue got a thread meanwhile is
+ * skipped. Nothing starts while the queue is paused.
  */
 export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: string) {
   const store = yield* Store;
@@ -299,6 +304,7 @@ export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: s
   yield* Semaphore.withPermits(scheduling, 1)(
     Effect.gen(function* () {
       for (;;) {
+        if (yield* store.getQueuePause()) return;
         const next = yield* store.oldestQueuedRun(ruleId);
         if (!next) return;
         const action = yield* store.getRunAction(next.id);

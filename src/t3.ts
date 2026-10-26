@@ -153,8 +153,12 @@ export type T3Thread = {
   runs: Array<{ id: string; ordinal: number; status: T3RunStatus; startedAt: string | null; completedAt: string | null }>;
   /** A recent window (bounded snapshot) that always holds the latest run's messages. */
   messages: Array<{ id: string; runId: string | null; role: "user" | "assistant" | "system"; text: string; updatedAt: string }>;
-  /** Same window as `messages`; a failed run records its reason as an `error` item. */
-  turnItems: Array<{ runId: string | null; type: string; ordinal: number; failure?: { message: string } }>;
+  /**
+   * Same window as `messages`; a failed run records its reason as an `error` item.
+   * `class` is `usage_limit` when the provider's usage ran out, with `resetAt`
+   * when the provider said when it comes back.
+   */
+  turnItems: Array<{ runId: string | null; type: string; ordinal: number; failure?: { message: string; class?: string; resetAt?: string | null } }>;
   /**
    * `provider_native`: the agent's own subagents (Claude Code's Task tool), logged under its session.
    * `app_owned`: tasks delegated through T3, each running in `childThreadId`, a thread of its own.

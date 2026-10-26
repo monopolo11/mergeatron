@@ -34,7 +34,12 @@ const runsSettled = Metric.counter("orchestrator_runs_settled_total", { incremen
 const watchersActive = Metric.gauge("orchestrator_watchers_active", { description: "Threads being polled for completion" });
 const threadDuration = Metric.timer("orchestrator_thread_duration", { description: "Time from thread start to settle" });
 
-export type TurnOutcome = { status: "done" | "failed"; detail: string; result: string | null };
+/**
+ * How a thread ended. `usageLimit` marks a failure because the provider's
+ * usage ran out, with when it resets (null when the provider did not say):
+ * the supervisor pauses the queue on it (see queuePause.ts).
+ */
+export type TurnOutcome = { status: "done" | "failed"; detail: string; result: string | null; usageLimit?: { resetAt: string | null } };
 
 type T3Run = T3Thread["runs"][number];
 
@@ -52,7 +57,9 @@ function runOutcome(thread: T3Thread, run: T3Run): TurnOutcome {
       .filter((item) => item.runId === run.id && item.type === "error")
       .toSorted((a, b) => a.ordinal - b.ordinal)
       .at(-1);
-    return { status: "failed", detail: error?.failure?.message ?? "turn failed", result };
+    const failure = error?.failure;
+    const outcome: TurnOutcome = { status: "failed", detail: failure?.message ?? "turn failed", result };
+    return failure?.class === "usage_limit" ? { ...outcome, usageLimit: { resetAt: failure.resetAt ?? null } } : outcome;
   }
   return { status: "done", detail: `turn ${run.status === "completed" ? "completed" : "interrupted"}`, result };
 }
@@ -176,7 +183,7 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
     yield* log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
     yield* Metric.update(Metric.withAttributes(runsSettled, { status: outcome.status }), 1);
     yield* Metric.update(threadDuration, Duration.millis((yield* Clock.currentTimeMillis) - startedAt));
-    yield* store.updateRun(runId, outcome);
+    yield* store.updateRun(runId, { status: outcome.status, detail: outcome.detail, result: outcome.result });
     const run = yield* store.getRun(runId);
     if (!run) return;
     yield* background.fork(
