@@ -14,6 +14,7 @@ import {
   RUNTIME_MODES,
   RUN_SOURCES,
   RUN_STATUSES,
+  UPDATE_CHANNELS,
   WORKSPACE_MODES,
   type InboxReason,
   type PollingSettings,
@@ -137,6 +138,8 @@ export const settings = sqliteTable("settings", {
   polling: text({ mode: "json" }).$type<PollingSettings>().notNull().default(DEFAULT_POLLING),
   /** Which Sentry issues reach the inbox: projects, environments, tags. */
   sentryFilters: text("sentry_filters", { mode: "json" }).$type<SentryFilters>().notNull().default(EMPTY_SENTRY_FILTERS),
+  /** Which GitHub Releases the update check offers (see update.ts). */
+  updateChannel: text("update_channel", { enum: UPDATE_CHANNELS }).notNull().default("stable"),
 });
 
 /**

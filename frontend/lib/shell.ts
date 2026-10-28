@@ -19,9 +19,10 @@ export type Shell = {
   settings: Settings | null;
   saveSettings: (next: Settings) => Promise<void>;
   update: UpdateStatus | null;
-  /** Why the last update check failed (no upstream, git error), when it did. */
+  /** Why the last update check failed (gh or git error), when it did. */
   updateError: string | null;
-  recheckUpdate: () => Promise<void>;
+  /** Rereads the check; `refresh` fetches releases first instead of reading the server's cached ones. */
+  recheckUpdate: (refresh?: boolean) => Promise<void>;
   rules: Rule[] | null;
   selected: Rule | null;
   selectRule: (id: string) => void;

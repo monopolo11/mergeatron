@@ -152,14 +152,24 @@ const api = HttpRouter.use((router) =>
       ),
     );
 
-    /** Compares the running code with upstream; POST fast-forwards, installs and restarts. */
-    yield* router.add("GET", "/api/update", route(Effect.map(updater.check, json)));
+    /** The running build and the release it would update to on the configured channel; `?refresh=1` fetches releases now. POST checks out the release, installs and restarts. */
+    yield* router.add(
+      "GET",
+      "/api/update",
+      route(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const refresh = new URL(request.url, "http://localhost").searchParams.has("refresh");
+          return json(yield* updater.status((yield* store.getSettings()).updateChannel, { refresh }));
+        }),
+      ),
+    );
     yield* router.add(
       "POST",
       "/api/update",
       route(
         Effect.gen(function* () {
-          const result = yield* updater.apply;
+          const result = yield* updater.apply((yield* store.getSettings()).updateChannel);
           yield* log.info("update applied, restarting", { from: result.from, to: result.to, restart: result.restart });
           // Let the response leave before the process goes away.
           yield* background.fork(Effect.delay(updater.restart(result.restart), "500 millis"));

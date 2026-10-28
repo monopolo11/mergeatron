@@ -65,7 +65,7 @@ Every page but Settings opens on a date range and its filters. Both live in the 
 
 One section shown at a time:
 
-- **Connection**: what the service talks to, the **Test thread** button, the update check.
+- **Connection**: what the service talks to, the **Test thread** button, the running version, the update channel and the update check.
 - **Defaults**: model, runtime mode, your GitHub login (lets rules skip PRs you authored), count of delegated tasks in usage.
 - **Polling**: which inbox sources are polled and how often.
 - **Sentry**: which Sentry issues reach the inbox.
@@ -112,9 +112,18 @@ The agent runs `bun index.ts` from this directory, so `.env` is the same one you
 
 ## Updating
 
-The sidebar shows **update · N** when the tracked upstream (`origin/main` for a plain clone) has commits the running server does not. **Settings → Connection** lists them and flags whether they bring migrations or dependency changes.
+Updates are [GitHub Releases](https://github.com/monopolo11/mergeatron/releases). The server reads them through `gh`, so the logged-in account needs access to the repository.
 
-**Update and restart** fast-forwards the checkout, runs `bun install` if `bun.lock` moved, then restarts: launchd restarts the agent, `bun --hot` reloads on its own, and a plain `bun index.ts` spawns a replacement before exiting. Migrations apply on that start. A checkout with uncommitted changes cannot be updated from the UI. `GET /api/update` returns the same check.
+- **Stable**: published on every push to `main`, a patch bump of the previous stable (`v0.1.4`).
+- **Nightly**: published by hand from any branch with the Release workflow's **Run workflow** button. A prerelease of the next stable (`v0.1.5-nightly.20261027.12`).
+
+**Settings → Connection** shows the running version and the **Channel** to follow, stable by default. Stable offers stable releases only. Nightly offers the highest of both, so a nightly install moves onto a stable once it passes the nightly. An update never goes to a lower version: switching from nightly to stable waits for the next stable newer than the running nightly.
+
+The server checks releases on start and every 30 minutes. The sidebar shows **update · v0.1.5** when one is available. Connection links its release notes and flags whether it brings migrations or dependency changes. **Recheck** fetches now. `GET /api/update` returns the same check; add `?refresh=1` to fetch first.
+
+**Update and restart** fetches tags, checks out the release tag (a detached HEAD), runs `bun install` if `bun.lock` changed, then restarts: launchd restarts the agent, `bun --hot` reloads on its own, and a plain `bun index.ts` spawns a replacement before exiting. Migrations apply on that start. If the checkout or the install fails, it goes back to what was checked out before.
+
+The version is the release tag at the running commit. Anything else is a development build and is not updated from the UI: a checkout with uncommitted changes, or a commit no release points at. A clean checkout of `main`, as installs from before releases are, moves onto the latest stable that contains it. To leave releases and develop, `git switch main`.
 
 ## Data
 

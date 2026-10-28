@@ -51,7 +51,8 @@ const NEW_RULE: RuleInput = {
   presetId: null,
 };
 
-const UPDATE_CHECK_INTERVAL = 30 * 60 * 1000;
+/** How often the UI rereads the update check. Cheap: the server answers from releases it fetches on its own every 30 minutes. */
+const UPDATE_CHECK_INTERVAL = 5 * 60 * 1000;
 /** Remembers whether the run panel is open across reloads. */
 const RUNS_PANEL_KEY = "mergeatron.runs-panel";
 
@@ -88,8 +89,8 @@ function App() {
   };
 
   const refreshRuns = () => void api<Run[]>("/api/runs").then(setRuns).catch(() => {});
-  const recheckUpdate = () =>
-    api<UpdateStatus>("/api/update")
+  const recheckUpdate = (refresh = false) =>
+    api<UpdateStatus>(`/api/update${refresh ? "?refresh=1" : ""}`)
       .then((next) => { setUpdate(next); setUpdateError(null); })
       .catch((error: Error) => { setUpdate(null); setUpdateError(error.message); });
   const saveSettings = (next: Settings) => api<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(next) }).then(setSettings);
@@ -101,11 +102,14 @@ function App() {
     api<Settings>("/api/settings").then(setSettings).catch(() => {});
     api<Rule[]>("/api/rules").then((all) => { setRules(all); setSelectedId(all[0]?.id ?? null); }).catch(() => setRules([]));
     void refreshRuns();
-    void recheckUpdate();
     const runsTimer = setInterval(refreshRuns, 5000);
     const updateTimer = setInterval(() => void recheckUpdate(), UPDATE_CHECK_INTERVAL);
     return () => { clearInterval(runsTimer); clearInterval(updateTimer); };
   }, []);
+
+  // The target depends on the channel: read the check on load and again whenever the channel is saved.
+  const updateChannel = settings?.updateChannel;
+  useEffect(() => void recheckUpdate(), [updateChannel]);
 
   const replaceRule = (updated: Rule) => setRules((all) => (all ?? []).map((rule) => (rule.id === updated.id ? updated : rule)));
 

@@ -1,35 +1,40 @@
 import { describe, expect, test } from "bun:test";
-import { summarize, summarizeRelease } from "./update.ts";
+import { describeBuild, summarizeRelease, targetFor } from "./update.ts";
+import type { ReleaseInfo } from "./version.ts";
 
-const git = { upstream: "origin/main", current: "aaaaaaaaaaaa", latest: "bbbbbbbbbbbb", log: "", changedFiles: "", dirty: "" };
+describe("describeBuild", () => {
+  const clean = { tags: [], dirty: "", branch: null };
 
-describe("summarize", () => {
-  test("lists commits and flags migrations, dependencies and a dirty checkout", () => {
-    const status = summarize(
-      {
-        ...git,
-        log: "bbbbbbb feat: analytics\naaaaaa1 fix: slack retry\n",
-        changedFiles: "drizzle/0006_x.sql\nsrc/store.ts\nbun.lock\n",
-        dirty: " M src/handler.ts\n",
-      },
-      "launchd",
-    );
-    expect(status).toMatchObject({
-      current: "aaaaaaa",
-      latest: "bbbbbbb",
-      commits: [
-        { sha: "bbbbbbb", subject: "feat: analytics" },
-        { sha: "aaaaaa1", subject: "fix: slack retry" },
-      ],
-      migrations: true,
-      dependencies: true,
-      dirty: true,
-      restart: "launchd",
-    });
+  test("a clean release checkout is that release, the stable when a nightly shares its commit", () => {
+    expect(describeBuild({ ...clean, tags: ["v0.1.3-nightly.20261020.4", "v0.1.3", "not-a-release"] })).toEqual({ kind: "release", version: "v0.1.3" });
   });
 
-  test("is quiet when nothing changed", () => {
-    expect(summarize(git, "hot")).toMatchObject({ commits: [], migrations: false, dependencies: false, dirty: false });
+  test("uncommitted changes make any checkout a development build", () => {
+    expect(describeBuild({ tags: ["v0.1.3"], dirty: " M src/handler.ts\n", branch: null })).toEqual({ kind: "development", reason: "dirty" });
+  });
+
+  test("main on no release may update; any other untagged commit may not", () => {
+    expect(describeBuild({ ...clean, branch: "main" })).toEqual({ kind: "main" });
+    expect(describeBuild({ ...clean, branch: "feat/x" })).toEqual({ kind: "development", reason: "untagged" });
+    expect(describeBuild(clean)).toEqual({ kind: "development", reason: "untagged" });
+  });
+});
+
+describe("targetFor", () => {
+  const release = (tag: string, prerelease = tag.includes("nightly")): ReleaseInfo => ({ tag, url: `https://github.com/o/r/releases/tag/${tag}`, prerelease });
+  const releases = [release("v0.1.2"), release("v0.1.3-nightly.20261027.9")];
+
+  test("main moves onto the latest stable, whatever the channel", () => {
+    expect(targetFor({ kind: "main" }, "nightly", releases)?.tag).toBe("v0.1.2");
+  });
+
+  test("development builds never update", () => {
+    expect(targetFor({ kind: "development", reason: "untagged" }, "nightly", releases)).toBeNull();
+  });
+
+  test("a release follows its channel", () => {
+    expect(targetFor({ kind: "release", version: "v0.1.1" }, "stable", releases)?.tag).toBe("v0.1.2");
+    expect(targetFor({ kind: "release", version: "v0.1.1" }, "nightly", releases)?.tag).toBe("v0.1.3-nightly.20261027.9");
   });
 });
 

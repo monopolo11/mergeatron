@@ -16,6 +16,7 @@ import {
   RUN_SOURCES,
   RUN_STATUSES,
   RUNTIME_MODES,
+  UPDATE_CHANNELS,
   WEBHOOK_SLUG_PATTERN,
   WORKSPACE_MODES,
   inboxSource,
@@ -143,6 +144,7 @@ export const SettingsInput = Schema.Struct({
     sentry: PollSourceSchema.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING.sentry))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING))),
   sentryFilters: Schema.Struct({ projects: names, environments: names, tags: names }).pipe(Schema.withDecodingDefault(Effect.succeed(EMPTY_SENTRY_FILTERS))),
+  updateChannel: Schema.Literals(UPDATE_CHANNELS).pipe(Schema.withDecodingDefault(Effect.succeed("stable" as const))),
 });
 export type SettingsInput = typeof SettingsInput.Type;
 
@@ -286,6 +288,7 @@ export const DEFAULT_SETTINGS: Settings = {
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,
   sentryFilters: EMPTY_SENTRY_FILTERS,
+  updateChannel: "stable",
 };
 
 // The decoded payloads must be storable as rows: a schema that drifts from its table fails to compile here.

@@ -30,6 +30,10 @@ export const RUNTIME_MODES = [
 ] as const;
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
+/** Which GitHub Releases this install updates to: stable only, or nightly prereleases too (see version.ts). */
+export const UPDATE_CHANNELS = ["stable", "nightly"] as const;
+export type UpdateChannel = (typeof UPDATE_CHANNELS)[number];
+
 /**
  * How a run was triggered: `github` is the webhook endpoint, `slack` the Socket
  * Mode connection, `poll` an inbox automation (see poller.ts), `webhook` a

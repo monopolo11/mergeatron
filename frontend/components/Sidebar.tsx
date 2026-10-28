@@ -62,10 +62,10 @@ export function Sidebar({
             {item.label}
           </Link>
         ))}
-        {update && update.commits.length > 0 && (
+        {update?.target && (
           <Link to="/settings" hash="connection" className="text-foreground hover:underline">
             <Dot tone="warn" />
-            update · {update.commits.length}
+            update · {update.target.tag}
           </Link>
         )}
         {onToggleRuns && (

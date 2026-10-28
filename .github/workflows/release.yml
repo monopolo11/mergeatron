@@ -1,0 +1,80 @@
+# Publishes the GitHub Releases installs update to (see docs/getting-started.md, "Updating").
+#
+# Stable: every push to main tags the merged commit with the next patch version
+# and publishes it as the latest release. Nightly: run by hand on any ref, so an
+# unmerged branch can reach nightly testers; it publishes a prerelease of the
+# next stable and is never latest. Versions live only in tags
+# (scripts/release-version.ts); nothing is committed back to main.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to ship to nightly
+        type: string
+        required: true
+        default: main
+
+permissions:
+  contents: write
+
+# One release per channel at a time, so two runs never compute the same version.
+# Stable and nightly tags cannot collide, so the channels do not wait on each
+# other. A stable push waiting here is replaced by a newer one, whose notes
+# cover both.
+concurrency:
+  group: release-${{ github.event_name == 'push' && 'stable' || 'nightly' }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CHANNEL: ${{ github.event_name == 'push' && 'stable' || 'nightly' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || inputs.ref }}
+          # Full history and every tag: the version and the notes start from earlier tags.
+          fetch-depth: 0
+          # Install and tests run code from the ref; only Publish gets a token, and it tags through the API.
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Pick version
+        id: version
+        run: |
+          if [ "$CHANNEL" = stable ] && git tag --points-at HEAD | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "HEAD is already a stable release, nothing to publish"
+            exit 0
+          fi
+          bun scripts/release-version.ts "$CHANNEL" "$GITHUB_RUN_NUMBER" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Install
+        if: steps.version.outputs.version != ''
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        if: steps.version.outputs.version != ''
+        run: bunx tsc --noEmit
+
+      - name: Test
+        if: steps.version.outputs.version != ''
+        run: bun test
+
+      - name: Publish
+        if: steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          args=(--target "$(git rev-parse HEAD)" --title "$VERSION" --generate-notes)
+          if [ -n "$PREVIOUS" ]; then args+=(--notes-start-tag "$PREVIOUS"); fi
+          if [ "$CHANNEL" = stable ]; then args+=(--latest); else args+=(--prerelease --latest=false); fi
+          gh release create "$VERSION" "${args[@]}"

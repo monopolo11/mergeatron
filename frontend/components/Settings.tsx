@@ -46,12 +46,13 @@ import {
   REVIEW_MESSAGE_VARS,
   RUNTIME_MODES,
   TEMPLATE_VARS,
+  UPDATE_CHANNELS,
   WEBHOOK_SECRET_HEADER,
   sentryQuery,
   type InboxSource,
 } from "../../src/shared.ts";
 import { schemaVariables } from "../../src/template.ts";
-import type { UpdateResult } from "../../src/update.ts";
+import type { Build, UpdateResult } from "../../src/update.ts";
 
 const SECTIONS = [
   { id: "connection", label: "Connection" },
@@ -124,7 +125,7 @@ function SettingsForm({ shell, settings }: { shell: Shell; settings: Settings })
           )}
         </Toolbar>
         <div className="p-4">
-          {section.id === "connection" && <Connection shell={shell} />}
+          {section.id === "connection" && <Connection shell={shell} form={form} />}
 
           {section.id === "defaults" && (
             <div className="grid gap-x-6 gap-y-3 @3xl:grid-cols-[minmax(0,28rem)_12rem_16rem]">
@@ -293,8 +294,8 @@ function MessageSection({ title, hint, value, fallback, onChange }: { title: str
 /** Variables the handoff prompt can use: the PR's context plus the review history. */
 const HANDOFF_VARS = [...TEMPLATE_VARS.filter((name) => name.startsWith("pr_") || ["repo", "repo_url", "default_branch", "labels"].includes(name)), ...HANDOFF_TEMPLATE_VARS];
 
-/** What the service talks to, plus the two actions: Test thread and Update. */
-function Connection({ shell }: { shell: Shell }) {
+/** What the service talks to and what it runs, plus the two actions: Test thread and Update. */
+function Connection({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> }) {
   const { status, projects, update, webhookUrl } = shell;
   const environment = status?.t3.environment ?? null;
   const withRemote = projects.filter((project) => project.repositoryIdentity?.provider === "github").length;
@@ -328,6 +329,26 @@ function Connection({ shell }: { shell: Shell }) {
 
       <dt className="text-muted-foreground">Projects</dt>
       <dd>{projects.length} in T3 · {withRemote} with a GitHub remote</dd>
+
+      <dt className="text-muted-foreground">Version</dt>
+      <dd>
+        {update ? buildLabel(update.build) : "…"}
+        {update && <span className={cn("ml-2 text-muted-foreground", mono)}>{update.commit}</span>}
+      </dd>
+
+      <dt className="text-muted-foreground">Channel</dt>
+      <dd>
+        <form.Field name="updateChannel">
+          {(field) => (
+            <Select value={field.state.value} onValueChange={(value) => field.handleChange(value as typeof field.state.value)}>
+              <SelectTrigger size="sm" className="w-32"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {UPDATE_CHANNELS.map((channel) => <SelectItem key={channel} value={channel}>{channel}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
+        </form.Field>
+      </dd>
 
       <dt className="text-muted-foreground">Update</dt>
       <dd><UpdateRow update={update} error={shell.updateError} recheck={shell.recheckUpdate} /></dd>
@@ -365,18 +386,41 @@ function TestThread({ projects, onStarted }: { projects: Shell["projects"]; onSt
   );
 }
 
-/** Upstream check with the pull-install-restart action; the page reloads itself once the server is back. */
-function UpdateRow({ update, error, recheck }: { update: Shell["update"]; error: string | null; recheck: () => Promise<void> }) {
+/** How the running code shows in Connection: its release, or why it takes no updates. */
+function buildLabel(build: Build): string {
+  switch (build.kind) {
+    case "release":
+      return build.version;
+    case "main":
+      return "main, moves to the next stable release";
+    case "development":
+      return build.reason === "dirty" ? "development build, uncommitted changes" : "development build, not on a release";
+  }
+}
+
+/** The release to move to, with the checkout-install-restart action; the page reloads itself once the server is back. */
+function UpdateRow({ update, error, recheck }: { update: Shell["update"]; error: string | null; recheck: Shell["recheckUpdate"] }) {
   const [state, setState] = useState<{ kind: "idle" } | { kind: "busy" } | { kind: "restarting" } | { kind: "error"; message: string }>({ kind: "idle" });
+  const busy = state.kind === "busy" || state.kind === "restarting";
+  const recheckButton = <Button size="xs" variant="ghost" className="ml-2 text-primary" onClick={() => void recheck(true)} disabled={busy}>Recheck</Button>;
   if (!update) {
     return (
       <span className="text-muted-foreground">
-        {error ? `check failed: ${error}` : "checking upstream…"}
-        {error && <Button size="xs" variant="ghost" className="ml-2 text-primary" onClick={() => void recheck()}>Recheck</Button>}
+        {error ? `check failed: ${error}` : "checking releases…"}
+        {error && recheckButton}
       </span>
     );
   }
-  const busy = state.kind === "busy" || state.kind === "restarting";
+  if (update.build.kind === "development") return <span className="text-muted-foreground"><Dot tone="idle" />off for development builds</span>;
+  const { target } = update;
+  if (!target) {
+    return (
+      <span>
+        <Dot tone="ok" />up to date <span className="text-muted-foreground">· checked {timeAgo(update.checkedAt)}</span>
+        {recheckButton}
+      </span>
+    );
+  }
   const apply = () => {
     setState({ kind: "busy" });
     api<UpdateResult>("/api/update", { method: "POST" })
@@ -386,35 +430,21 @@ function UpdateRow({ update, error, recheck }: { update: Shell["update"]; error:
       })
       .catch((e: Error) => setState({ kind: "error", message: e.message }));
   };
-  if (update.commits.length === 0) {
-    return (
-      <span>
-        <Dot tone="ok" />up to date with {update.upstream} <span className="text-muted-foreground">· checked {timeAgo(update.checkedAt)}</span>
-        <Button size="xs" variant="ghost" className="ml-2 text-primary" onClick={() => void recheck()}>Recheck</Button>
-      </span>
-    );
-  }
   return (
     <div className="grid gap-1.5">
       <div className="flex flex-wrap items-center gap-2">
         <span>
-          <Dot tone="warn" />{update.commits.length} commits behind {update.upstream}
-          <span className={cn("ml-2 text-muted-foreground", mono)}>{update.current} → {update.latest}</span>
+          <Dot tone="warn" /><span className={mono}>{target.tag}</span>
+          <ExternalLink href={target.url} className="ml-2">release notes</ExternalLink>
         </span>
         <span className="text-muted-foreground">
-          {[update.migrations && "runs migrations on start", update.dependencies && "installs dependencies", update.restart === "launchd" ? "launchd restarts the service" : update.restart === "hot" ? "bun --hot reloads in place" : "the process respawns itself"].filter(Boolean).join(" · ")}
+          {[target.migrations && "runs migrations on start", target.dependencies && "installs dependencies", update.restart === "launchd" ? "launchd restarts the service" : update.restart === "hot" ? "bun --hot reloads in place" : "the process respawns itself"].filter(Boolean).join(" · ")}
         </span>
-        <Button size="xs" variant="ghost" className="text-primary" onClick={() => void recheck()} disabled={busy}>Recheck</Button>
-        <Button size="xs" onClick={apply} disabled={busy || update.dirty}>
-          {state.kind === "busy" ? "Pulling…" : state.kind === "restarting" ? "Restarting, page reloads when back…" : "Update and restart"}
+        {recheckButton}
+        <Button size="xs" onClick={apply} disabled={busy}>
+          {state.kind === "busy" ? "Updating…" : state.kind === "restarting" ? "Restarting, page reloads when back…" : "Update and restart"}
         </Button>
       </div>
-      <ul className={cn("max-h-32 space-y-0.5 overflow-auto", mono)}>
-        {update.commits.map((commit) => (
-          <li key={commit.sha} className="truncate"><span className="text-muted-foreground">{commit.sha}</span> {commit.subject}</li>
-        ))}
-      </ul>
-      {update.dirty && <p className="text-warn">The checkout has uncommitted changes. Commit or discard them, then recheck.</p>}
       {state.kind === "error" && <p className="text-destructive">{state.message}</p>}
     </div>
   );
