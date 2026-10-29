@@ -140,6 +140,7 @@ export function Runs() {
               })}
               <ToolbarDivider />
               <Count value={count((run) => run.ratedAt === null)} label="unrated" active={!!unrated} onClick={() => setSearch({ unrated: unrated ? undefined : true })} />
+              <RefreshFailed ids={visible.filter((run) => run.status === "failed" && run.threadId).map((run) => run.id)} stale={list.isPlaceholderData} />
             </>
           }
         />
@@ -399,24 +400,33 @@ function CloseButton({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** Reads a settled run's thread in T3 again (see refreshRun on the server) and returns the run as stored afterwards. */
+const refreshRun = (id: string) => api<Run>(`/api/runs/${id}/refresh`, { method: "POST" });
+
+/**
+ * Refreshing changes the status of every view that shows a run: the drawer,
+ * table, facet counts, PRs, analytics, the inbox's last run, and the shell's
+ * live run log.
+ */
+function useRefreshedRuns() {
+  const queryClient = useQueryClient();
+  const { refreshRuns } = use(ShellContext)!;
+  return () => {
+    for (const queryKey of [["run"], ["runs", "history"], ["facets"], ["pulls"], ["analytics"], ["inbox"]]) {
+      void queryClient.invalidateQueries({ queryKey });
+    }
+    refreshRuns();
+  };
+}
+
 /**
  * Reads a settled run's thread in T3 again, for a thread rescued by hand
  * after the run failed. The run then shows the thread's status, or watches it
  * while it is still working. A failure shows on the button.
  */
 function RefreshRun({ id }: { id: string }) {
-  const queryClient = useQueryClient();
-  const { refreshRuns } = use(ShellContext)!;
-  const refresh = useMutation({
-    mutationFn: () => api<Run>(`/api/runs/${id}/refresh`, { method: "POST" }),
-    onSuccess: () => {
-      // Everything that shows a run's status: the drawer, table, facet counts, PRs, analytics, the inbox's last run, and the shell's live run log.
-      for (const queryKey of [["run", id], ["runs", "history"], ["facets"], ["pulls"], ["analytics"], ["inbox"]]) {
-        void queryClient.invalidateQueries({ queryKey });
-      }
-      refreshRuns();
-    },
-  });
+  const invalidate = useRefreshedRuns();
+  const refresh = useMutation({ mutationFn: () => refreshRun(id), onSuccess: invalidate });
   return (
     <Button
       size="xs"
@@ -427,6 +437,39 @@ function RefreshRun({ id }: { id: string }) {
       onClick={() => refresh.mutate()}
     >
       {refresh.isPending ? "Refreshing…" : refresh.error ? "Refresh failed" : "Refresh"}
+    </Button>
+  );
+}
+
+/**
+ * Refreshes the listed failed runs one after another, so a batch of threads
+ * rescued by hand updates in one click without flooding T3. One that cannot
+ * be refreshed does not stop the rest; the button reports how many did not.
+ * `stale` holds it while the list still shows the previous range.
+ */
+function RefreshFailed({ ids, stale }: { ids: string[]; stale: boolean }) {
+  const invalidate = useRefreshedRuns();
+  const refresh = useMutation({
+    mutationFn: async () => {
+      let failed = 0;
+      for (const id of ids) {
+        await refreshRun(id).catch(() => void failed++);
+      }
+      return failed;
+    },
+    onSettled: () => invalidate(),
+  });
+  if (ids.length === 0 && !refresh.isPending) return null;
+  return (
+    <Button
+      size="xs"
+      variant="ghost"
+      className={cn("ml-auto", refresh.data ? "text-destructive" : "text-muted-foreground")}
+      title="Read the thread of every failed run in the list from T3 again"
+      disabled={refresh.isPending || stale}
+      onClick={() => refresh.mutate()}
+    >
+      {refresh.isPending ? "Refreshing…" : refresh.data ? `${refresh.data} not refreshed` : "Refresh all failed"}
     </Button>
   );
 }
