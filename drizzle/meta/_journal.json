@@ -239,6 +239,13 @@
       "when": 1793133488535,
       "tag": "0033_settings_update_channel",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1793310948811,
+      "tag": "0034_rule_filter_query",
+      "breakpoints": true
     }
   ]
 }

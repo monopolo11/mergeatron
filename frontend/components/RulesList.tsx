@@ -34,7 +34,7 @@ export function RulesList({
       {rules && rules.length === 0 && <Empty>No rules yet. A rule maps GitHub, Slack or inbox events to a T3 thread with your prompt.</Empty>}
       <ul>
         {rules?.map((rule) => {
-          const scope = `${rule.events.join(", ") || "no events"} · ${rule.repos.length ? rule.repos.join(", ") : "any repo"}`;
+          const scope = `${rule.events.join(", ") || "no events"} · ${rule.filters.query || "any"}`;
           return (
             <li
               key={rule.id}

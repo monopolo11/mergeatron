@@ -26,7 +26,6 @@ function setup() {
       name: "review",
       enabled: true,
       events: ["slack.message", "slack.second_pass"],
-      repos: [],
       reviewer: null,
       channel: null,
       allowBots: false,

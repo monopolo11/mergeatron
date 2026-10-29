@@ -107,23 +107,19 @@ export function inboxSource(event: string): InboxSource | null {
 }
 
 /**
- * Filters a rule applies on top of its event, matched against the delivery's
- * template variables (`reasons`, `labels`, `state`/`state_type`, `team`), so
- * they work for webhook deliveries that carry those variables too. An empty
- * list or expression matches anything.
+ * Filters a rule applies on top of its event. `query` is one expression over
+ * the delivery's template variables (labels, `state`, `team`, `reason`,
+ * `repo`, `has:parent`, `has:sub-issues`; see `filterQuery.ts`), so it works
+ * for webhook deliveries that carry those variables too. Empty matches
+ * anything.
  */
 export type RuleFilters = {
-  reasons: InboxReason[];
-  /** Label expression such as `(bug or p0) and !wontfix`; see `labelQuery.ts`. Empty matches anything. */
-  labels: string;
-  /** GitHub: `open` or `draft`. Linear: state name (`Todo`) or type (`unstarted`). Sentry: substatus (`escalating`) or status (`unresolved`). */
-  states: string[];
-  /** Linear team keys, or Sentry project slugs. */
-  teams: string[];
+  /** Filter expression such as `reason:assigned and state:Todo and (bug or p0)`. */
+  query: string;
   /** Inbox PR rules: run again when the PR head moves, like `pull_request.synchronize`. */
   rerunOnPush: boolean;
 };
-export const EMPTY_FILTERS: RuleFilters = { reasons: [], labels: "", states: [], teams: [], rerunOnPush: true };
+export const EMPTY_FILTERS: RuleFilters = { query: "", rerunOnPush: true };
 
 /**
  * Threads one rule may have running at once. Matches past the limit are
@@ -299,6 +295,8 @@ export const TEMPLATE_VARS = [
   "team",
   "priority",
   "issue_identifier",
+  "issue_parent",
+  "issue_children",
   "branch",
   "review_decision",
   "slack_channel",

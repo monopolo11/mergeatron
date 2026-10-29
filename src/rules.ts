@@ -1,7 +1,7 @@
 import { Effect, Schema, SchemaGetter } from "effect";
 import type { promptVersions, prompts, queuePauses, reviewRequests, rules, runPullRequests, runUsage, runs, settings, webhooks } from "./db/schema.ts";
 import type { PromptKey, RunScope } from "./store.ts";
-import { parseLabels } from "./labelQuery.ts";
+import { parseQuery } from "./filterQuery.ts";
 import { compileSchema } from "./jsonSchema.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
@@ -11,7 +11,6 @@ import {
   DEFAULT_SECOND_PASS_MESSAGE,
   EMPTY_FILTERS,
   EMPTY_SENTRY_FILTERS,
-  INBOX_REASONS,
   PROMPT_VERSION_OWNERS,
   RUN_SOURCES,
   RUN_STATUSES,
@@ -71,13 +70,10 @@ const ModelSelectionSchema = Schema.Struct({
 });
 
 const RuleFiltersSchema = Schema.Struct({
-  reasons: Schema.Array(Schema.Literals(INBOX_REASONS)).pipe(Schema.mutable, Schema.withDecodingDefault(Effect.succeed([]))),
-  labels: Schema.Trim.check(Schema.makeFilter((text: string) => {
-    const parsed = parseLabels(text);
+  query: Schema.Trim.check(Schema.makeFilter((text: string) => {
+    const parsed = parseQuery(text);
     return parsed.ok ? undefined : parsed.error;
   })).pipe(Schema.withDecodingDefault(Effect.succeed(""))),
-  states: names,
-  teams: names,
   rerunOnPush: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 
@@ -85,7 +81,6 @@ const ruleFields = {
   name: nonEmpty,
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   events: Schema.Array(nonEmpty).pipe(Schema.mutable).check(Schema.isMinLength(1)),
-  repos: names,
   reviewer: optionalName,
   channel: optionalName,
   allowBots: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),

@@ -42,8 +42,6 @@ export const rules = sqliteTable("rules", {
   enabled: integer({ mode: "boolean" }).notNull().default(true),
   /** Event keys this rule fires on, e.g. `pull_request.review_requested`, `slack.message`. */
   events: text({ mode: "json" }).$type<string[]>().notNull().default([]),
-  /** `owner/name` filters. Empty means every repository. */
-  repos: text({ mode: "json" }).$type<string[]>().notNull().default([]),
   /** Only fire when this login (or team slug) is the requested reviewer. */
   reviewer: text(),
   /** Slack rules only: fire for messages in this channel id. Null means any channel the bot is in. */
@@ -56,7 +54,7 @@ export const rules = sqliteTable("rules", {
   allowBots: integer("allow_bots", { mode: "boolean" }).notNull().default(true),
   /** Skip PRs authored by the GitHub login in settings: reviewing your own PR is bad practice. */
   skipSelfReview: integer("skip_self_review", { mode: "boolean" }).notNull().default(true),
-  /** Filters on the delivery's template variables, mainly for inbox rules; see RuleFilters. */
+  /** The filter expression on the delivery's template variables, repository included; see RuleFilters. */
   filters: text({ mode: "json" }).$type<RuleFilters>().notNull().default(EMPTY_FILTERS),
   /** Threads of this rule running at once; further matches queue. 0 means no limit. */
   maxConcurrent: integer("max_concurrent").notNull().default(DEFAULT_MAX_CONCURRENT),
@@ -189,6 +187,10 @@ export const inboxItems = sqliteTable("inbox_items", {
   reasons: text({ mode: "json" }).$type<InboxReason[]>().notNull().default([]),
   /** Linear team key, or Sentry project slug. */
   team: text(),
+  /** Linear: identifier of the parent issue (`ENG-12`) when this is a sub-issue. */
+  parent: text(),
+  /** Linear: identifiers of the sub-issues, up to 50. */
+  children: text({ mode: "json" }).$type<string[]>().notNull().default([]),
   /** Linear priority label (`Urgent`, `High`, ...), or Sentry priority (`high`, ...). */
   priority: text(),
   /** PR head branch, or Linear's suggested branch name. */

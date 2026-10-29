@@ -42,7 +42,7 @@ The fields suggest the instance's projects, their environments and the top value
 2. Pick the T3 project (auto by git remote, or explicit; Linear and Sentry issues have no repository, so pick one), workspace, model and how many threads to run at a time.
 3. Dispatch. One thread starts per item.
 
-The message is a template the server renders per item with the same variables webhook deliveries get (`pr_url`, `issue_url`, ...) plus `labels`, `reasons`, `state`, `state_type`, `team`, `priority`, `issue_identifier`, `branch` and `review_decision`.
+The message is a template the server renders per item with the same variables webhook deliveries get (`pr_url`, `issue_url`, ...) plus `labels`, `reasons`, `state`, `state_type`, `team`, `priority`, `issue_identifier`, `branch` and `review_decision`. Linear issues add `issue_parent` (the parent's identifier) and `issue_children` (sub-issue identifiers, comma separated).
 
 Presets are edited in **Settings → Dispatch presets** (`/api/prompts`, seeded with "Review PR", "Implement issue" and "Address review feedback"): one row per preset, click to open it, rename it or save its body as a new version ([Prompt versions](rules.md#prompt-versions)).
 
@@ -52,38 +52,42 @@ A dispatch by hand reviews a PR even when its automated reviews are paused; one 
 
 An automation is a rule on an inbox event: **Inbox: GitHub PR**, **Inbox: GitHub issue**, **Inbox: Linear issue** or **Inbox: Sentry issue**. A rule polls one source: picking an inbox event of one source drops the others'.
 
-On top of the repository list the editor gets:
+The rule's **Filter** decides which items it fires on, and **Re-run on push** (PR rules, default on) fires it again for each new head commit, like `pull_request.synchronize`.
 
-| Filter | Notes |
+### Filter expressions
+
+`reason:assigned and state:Todo and (bug or p0) and !has:parent`
+
+| Term | Matches |
 | --- | --- |
-| **Reasons** | Token field with values seen in the inbox and their counts; type to add one not seen yet |
-| **States** | Same. Linear state name or type, Sentry substatus or status, GitHub `open`/`draft`. A done Linear issue only matches a rule that names its state (`Done`) or type (`completed`), so rules without a state filter skip finished work |
-| **Teams** | Linear teams or Sentry projects (within what the Sentry filters let in), instead of repositories |
-| **Labels** | An expression, see below |
-| **Re-run on push** | PR rules. Default on: fires again for each new head commit, like `pull_request.synchronize` |
-
-Label and state filters work on webhook rules too, since PR and issue payloads carry `labels` and `state`.
-
-### Label expressions
-
-`(bug or p0) and !wontfix`
+| `bug`, `Ready For Dev` | A label. Bare words are labels |
+| `state:Todo` | Linear state name or type (`state:unstarted`), Sentry substatus or status, GitHub `open`/`draft` |
+| `team:ENG` | Linear team or Sentry project (within what the Sentry filters let in) |
+| `reason:assigned` | Why the item is in your inbox: `review_requested`, `assigned`, `mentioned`, `authored`, `watching` |
+| `repo:acme/widgets` | The repository |
+| `has:parent`, `has:sub-issues` | Linear only: the issue is a sub-issue, or has sub-issues |
+| `label:type:bug` | A label that looks like a key. Unknown prefixes such as `priority:high` are labels already |
 
 - `and`, `or` (or a comma) and parentheses, with `and` binding tighter.
-- `!label` or `not:label` skips items carrying the label, and negates a group too.
-- Consecutive words are one label (`Ready For Dev`). Quote a label holding an operator, a parenthesis or a comma (`"Bugs and Fixes"`).
-- The label at the caret autocompletes. An expression that does not parse is shown and refused on save.
+- `!term` or `not:term` negates a term, and a group too.
+- Consecutive words are one value (`Ready For Dev`, `state:To Do`). Quote one holding an operator, a parenthesis or a comma (`"Bugs and Fixes"`, `state:"Ready or Not"`), and write `\"` for a quote inside quotes (`state:"QA \"Ready\""`).
+- Values compare case-insensitively. An empty filter matches everything.
+- A done Linear issue only matches a filter with a `state:` term that names its state (`state:Done`) or type (`state:completed`), so other rules skip finished work, and `state:Todo or bug` does not catch a done bug.
+- Keys are highlighted. Focusing the empty field lists the keys and common labels; after `key:` it suggests that key's values with their counts. An expression that does not parse is shown and refused on save.
 
-Labels come from the source itself: after a poll, labels older than an hour are synced from every GitHub repository with inbox items or named in a rule, and from Linear's workspace and team labels. The editor suggests those within the rule's repositories or teams.
+The filter works on webhook and Slack rules too, since their deliveries carry `repo`, and PR and issue payloads carry `labels` and `state`.
+
+Labels come from the source itself: after a poll, labels older than an hour are synced from every GitHub repository with inbox items or named in a `repo:` term, and from Linear's workspace and team labels. The editor suggests those within the repositories or teams the filter names.
 
 ### Examples
 
-- Review every PR where my review is requested in `acme/widgets`: **Inbox: GitHub PR**, repo `acme/widgets`, reason `review requested`.
-- Implement Linear issues in Todo assigned to me with label ready-for-dev: **Inbox: Linear issue**, team `ENG`, reason `assigned to me`, state `Todo`, label `ready for dev`, with the project set.
-- Investigate escalating fatal errors in checkout: **Inbox: Sentry issue**, project `checkout-api`, state `escalating`, label `fatal`, with the project set.
+- Review every PR where my review is requested in `acme/widgets`: **Inbox: GitHub PR**, `repo:acme/widgets and reason:review_requested`.
+- Implement Linear leaf issues in Todo assigned to me with label ready for dev: **Inbox: Linear issue**, `team:ENG and reason:assigned and state:Todo and ready for dev and !has:sub-issues`, with the project set.
+- Investigate escalating fatal errors in checkout: **Inbox: Sentry issue**, `team:checkout-api and state:escalating and fatal`, with the project set.
 
 ### Previewing and firing
 
-**Matches now** in the editor lists the inbox items for the rule's events, matching ones first with what the rule did for them, the rest with the matcher's reason ("labels needs design include none of ready for dev", "state In Progress is not Todo").
+**Matches now** in the editor lists the inbox items for the rule's events, matching ones first with what the rule did for them, the rest with the first part of the filter they fail ("labels needs design does not match ready for dev", "no parent issue does not match has:parent").
 
 After every poll each armed rule fires on the items it matches. A rule is armed for an item when the item saw activity after the rule was last saved, so a new or re-enabled rule does not fan out over everything already in the inbox. **Run on N now** backfills (`POST /api/rules/:id/run-now`).
 

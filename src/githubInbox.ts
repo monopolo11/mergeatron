@@ -139,6 +139,8 @@ export function parseSearchNodes(nodes: unknown[], reason: InboxReason): PolledI
         labels: full.labels.nodes.map((label) => label.name),
         reasons: [reason],
         team: null,
+        parent: null,
+        children: [],
         priority: null,
         branch: full.headRefName ?? null,
         headSha: full.headRefOid ?? null,

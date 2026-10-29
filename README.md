@@ -50,7 +50,7 @@ Then [create a rule](docs/rules.md) and [connect GitHub](docs/webhooks.md#github
 | [Rules](docs/rules.md) | Events, filters, prompts and versions, concurrency, stuck PRs |
 | [Webhooks](docs/webhooks.md) | GitHub and custom webhooks |
 | [Slack and MCP](docs/slack.md) | Slack app, second passes, reactions, MCP tools for agents |
-| [Inbox](docs/inbox.md) | Sources, dispatch, automations, label expressions |
+| [Inbox](docs/inbox.md) | Sources, dispatch, automations, filter expressions |
 | [Runs and analytics](docs/runs.md) | Scores, usage and cost, related PRs, filters, API |
 | [Development](docs/development.md) | Architecture, tests, observability |
 | [Upgrading from T3 Review](docs/upgrading.md) | Renamed MCP server, launchd agent, database |

@@ -9,7 +9,7 @@ A rule says: when this event happens, start a T3 thread with this prompt. Everyt
 | Field | Meaning |
 | --- | --- |
 | **Events** | One or more keys the rule fires on, picked by source (GitHub, Slack, Inbox, Webhooks) with each source's count of picks. One rule can serve several sources |
-| **Repositories** | Optional `owner/name` list. Empty matches every repo. For Slack rules, the repository of the PR linked in the message |
+| **Filter** | Optional expression over labels, `repo:`, `state:`, `team:`, `reason:` and `has:`, such as `repo:acme/widgets and !wip`. Empty matches everything. For Slack rules, `repo:` is the repository of the PR linked in the message. See [Filter expressions](inbox.md#filter-expressions) |
 | **Requested reviewer** | GitHub only. A login or team slug, so only reviews requested from you fire, not every review request on the repo |
 | **Slack channel** | Slack only. A channel id. Empty matches any channel the bot is in |
 | **Skip my own PRs** | On by default. When the PR author is the GitHub login in **Settings → Defaults**, the run is recorded as skipped |

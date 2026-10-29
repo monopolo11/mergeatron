@@ -54,7 +54,7 @@ export function extractContext(eventName: string, payload: unknown): WebhookCont
     set(ctx, "pr_head", str(rec(pr.head).ref));
     set(ctx, "pr_head_sha", str(rec(pr.head).sha));
     set(ctx, "pr_base", str(rec(pr.base).ref));
-    // Same shape as inbox items, so label and state filters work on webhook rules too.
+    // Same shape as inbox items, so filter terms on labels and state work on webhook rules too.
     set(ctx, "labels", labelNames(pr.labels));
     set(ctx, "state", pr.draft === true ? "draft" : str(pr.state));
   }

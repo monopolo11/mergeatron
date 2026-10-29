@@ -183,6 +183,8 @@ export function sentryItem(issue: SentryIssue, me: string | null): PolledItem {
     labels: [issue.level],
     reasons,
     team: issue.project.slug,
+    parent: null,
+    children: [],
     priority: issue.priority ?? null,
     branch: null,
     headSha: null,

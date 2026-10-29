@@ -18,23 +18,15 @@ export function eventKinds(events: string[]) {
 /**
  * The draft as it should be saved: text trimmed, and every matching field the
  * editor hides for these events cleared. A hidden value still filters
- * deliveries (a repository left over from a GitHub event blocks every Linear
- * issue), and nothing in the form could show or remove it.
+ * deliveries (a reviewer left over from a GitHub event blocks every Slack
+ * message), and nothing in the form could show or remove it.
  */
 export function applicable(draft: RuleDraft): RuleDraft {
-  const { isSlack, isInbox, isWebhook, inboxLinear, inboxSentry, inboxGitHub } = eventKinds(draft.events);
-  const { filters } = draft;
+  const { isSlack, isInbox, isWebhook } = eventKinds(draft.events);
   return {
     ...draft,
-    repos: isWebhook || isSlack || inboxGitHub ? draft.repos : [],
     reviewer: (isWebhook && draft.reviewer?.trim()) || null,
     channel: (isSlack && draft.channel?.trim()) || null,
-    filters: {
-      ...filters,
-      teams: inboxLinear || inboxSentry ? filters.teams : [],
-      reasons: isInbox ? filters.reasons : [],
-      states: isInbox ? filters.states : [],
-      labels: isInbox || isWebhook ? filters.labels : "",
-    },
+    filters: { ...draft.filters, query: isInbox || isWebhook || isSlack ? draft.filters.query.trim() : "" },
   };
 }

@@ -35,7 +35,7 @@ describe("resolveSecondPassTarget", () => {
 
 describe("botPostIgnored", () => {
   const rule = {
-    name: "review", enabled: true, events: ["slack.message"], repos: [], reviewer: null, channel: "C1", allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
+    name: "review", enabled: true, events: ["slack.message"], reviewer: null, channel: "C1", allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
     projectId: null, workspace: "worktree" as const, model: null, prompt: "x", presetId: null,
   };
   const ctx = { repo: "acme/widgets", slack_channel: "C1" };
@@ -59,7 +59,7 @@ describe("handleSlackEvent", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const rule = yield* store.createRule({
-          name: "review", enabled: true, events: ["slack.second_pass"], repos: [pr.repo], reviewer: null, channel: null, allowBots: true, skipSelfReview: true, filters: EMPTY_FILTERS, maxConcurrent: 0,
+          name: "review", enabled: true, events: ["slack.second_pass"], reviewer: null, channel: null, allowBots: true, skipSelfReview: true, filters: { ...EMPTY_FILTERS, query: `repo:${pr.repo}` }, maxConcurrent: 0,
           projectId: null, workspace: "worktree", model: null, prompt: "x", presetId: null,
         });
         // Still running, so the second pass is recorded as skipped without reaching T3 or GitHub.

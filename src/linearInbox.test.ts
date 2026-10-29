@@ -19,6 +19,8 @@ const issue = (patch: Partial<LinearIssue>): LinearIssue => ({
   labels: { nodes: [{ name: "ready for dev" }] },
   assignee: { id: "me", displayName: "Me" },
   creator: { id: "u2", displayName: "Alice" },
+  parent: null,
+  children: { nodes: [] },
   ...patch,
 });
 
@@ -33,7 +35,12 @@ describe("LinearInbox.fetch", () => {
         if (query.includes("query Mine")) {
           return {
             viewer: { id: "me", displayName: "Me" },
-            issues: { nodes: [issue({}), issue({ id: "i2", identifier: "ENG-8", assignee: null, creator: { id: "me", displayName: "Me" } })] },
+            issues: {
+              nodes: [
+                issue({ children: { nodes: [{ identifier: "ENG-12" }] } }),
+                issue({ id: "i2", identifier: "ENG-8", assignee: null, creator: { id: "me", displayName: "Me" }, parent: { identifier: "ENG-7" } }),
+              ],
+            },
           };
         }
         return {
@@ -56,7 +63,8 @@ describe("LinearInbox.fetch", () => {
       ["ENG-8", ["authored"]],
       ["ENG-9", ["mentioned"]],
     ]);
-    expect(items[0]).toMatchObject({ key: "linear:ENG-7", source: "linear", kind: "issue", repo: null, state: "Todo", stateType: "unstarted", team: "ENG", priority: "High", branch: "me/eng-7-rate-limit", author: "Alice", labels: ["ready for dev"] });
+    expect(items[0]).toMatchObject({ key: "linear:ENG-7", source: "linear", kind: "issue", repo: null, state: "Todo", stateType: "unstarted", team: "ENG", priority: "High", branch: "me/eng-7-rate-limit", author: "Alice", labels: ["ready for dev"], parent: null, children: ["ENG-12"] });
+    expect(items[1]).toMatchObject({ parent: "ENG-7", children: [] });
   });
 
   test("keeps assigned issues when the notifications query fails", async () => {

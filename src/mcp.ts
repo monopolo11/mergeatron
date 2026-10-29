@@ -14,7 +14,7 @@ import { createRule, deleteRule, updateRule, type RuleCreate, type RulePatch } f
 import { getRun, listRuns, rateRun, runAnalytics } from "./runHistory.ts";
 import { syncPullRequests } from "./runPullRequests.ts";
 import { startBackfill } from "./usage.ts";
-import { INBOX_REASONS, PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES, SUGGESTED_EVENTS, WORKSPACE_MODES } from "./shared.ts";
+import { PROMPT_OWNERS, PROMPT_VERSION_OWNERS, RUN_SOURCES, RUN_STATUSES, SUGGESTED_EVENTS, WORKSPACE_MODES } from "./shared.ts";
 import { Store } from "./store.ts";
 import { SlackClient } from "./slack.ts";
 
@@ -68,22 +68,18 @@ const ruleFields = z.object({
     .array(z.string())
     .min(1)
     .describe(`Event keys it fires on: ${SUGGESTED_EVENTS.map((event) => event.key).join(", ")}, or webhook.<slug> for a custom webhook defined in Settings. An inbox rule takes the inbox events of one source only`),
-  repos: z.array(z.string()).describe("owner/name repositories; empty means every repository"),
   reviewer: z.string().nullable().describe("Only fire when this GitHub login or team slug is the requested reviewer"),
   channel: z.string().nullable().describe("Slack events: the channel id to listen in; null means any channel the bot is in"),
   allowBots: z.boolean().describe("Slack events: also fire for posts by other bots and apps. Default true"),
   skipSelfReview: z.boolean().describe("Skip PRs authored by the GitHub login in Settings. Default true"),
   filters: z
     .object({
-      reasons: z.array(z.enum(INBOX_REASONS)).optional().describe("Inbox: why the item is in the inbox; empty matches any"),
-      labels: z
+      query: z
         .string()
         .optional()
         .describe(
-          'Label expression such as "(bug or p0) and !wontfix": and, or (or a comma), parentheses, ! or not: to negate; quote a label holding an operator. Case-insensitive; empty matches anything. Names from list_labels',
+          'Filter expression such as \'reason:assigned and state:"To Do" and (bug or p0) and !has:parent\'. Bare words are labels (names from list_labels); key:value tests state (name or type), team (Linear team key or Sentry project), reason (review_requested, assigned, mentioned, authored, watching), repo (owner/name) or has (parent, sub-issues: Linear issue relations). and, or (or a comma), parentheses, ! or not: to negate; quote a value holding an operator, with \\\" for a quote inside quotes. Case-insensitive; empty matches anything. A done Linear issue only matches a filter with a state: term naming its state or type',
         ),
-      states: z.array(z.string()).optional().describe("GitHub: open or draft. Linear: state name or type. Sentry: substatus or status"),
-      teams: z.array(z.string()).optional().describe("Linear team keys, or Sentry project slugs"),
       rerunOnPush: z.boolean().optional().describe("Inbox PR rules: run again when the PR head moves. Default true"),
     })
     .describe("Filters on top of the event; an empty filter matches anything"),
@@ -359,7 +355,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "list_rules",
       {
         description:
-          "List the rules: what each fires on (events, repos, reviewer, channel, filters), whether it is enabled, how its threads start (projectId, workspace, model, maxConcurrent) and its live prompt (prompt, livePromptVersion; presetId when a preset's prompt replaces it).",
+          "List the rules: what each fires on (events, reviewer, channel, filters), whether it is enabled, how its threads start (projectId, workspace, model, maxConcurrent) and its live prompt (prompt, livePromptVersion; presetId when a preset's prompt replaces it).",
         inputSchema: {},
         annotations: { readOnlyHint: true },
       },
@@ -381,7 +377,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "update_rule",
       {
         description:
-          "Change a rule: only the fields given change, e.g. { enabled: false } to disable it or { filters: { labels: \"bug and !wontfix\" } } to change its label filter. A raised maxConcurrent starts queued runs. The prompt changes through create_prompt_version (owner rule). Returns the rule.",
+          "Change a rule: only the fields given change, e.g. { enabled: false } to disable it or { filters: { query: \"bug and !wontfix\" } } to change its filter. A raised maxConcurrent starts queued runs. The prompt changes through create_prompt_version (owner rule). Returns the rule.",
         inputSchema: { id: ruleId, ...rulePatch.shape },
         annotations: { destructiveHint: false, idempotentHint: true },
       },
@@ -402,7 +398,7 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "list_labels",
       {
         description:
-          "Labels synced from each inbox source (github, linear, sentry), with the repository or team each belongs to: the names a rule's filters.labels expression can use.",
+          "Labels synced from each inbox source (github, linear, sentry), with the repository or team each belongs to: the names a rule's filters.query expression can use as labels.",
         inputSchema: {},
         annotations: { readOnlyHint: true },
       },

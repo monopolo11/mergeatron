@@ -120,4 +120,4 @@ The backend is Effect v4 (`effect`, `@effect/platform-bun`). Conventions:
 - Log with `logger(scope)` from `src/log.ts` (returns effects; fields become `key=value` annotations). Wrap meaningful operations in `Effect.fn("name")` or `Effect.withSpan` so they trace.
 - API payloads are Effect `Schema`s in `src/rules.ts`; zod is only used for MCP tool inputs, which the MCP SDK requires.
 - Tests build services from `src/testing.ts` (`testLayer`, `fakeT3`, `fakeSlack`, `settle`) and run bodies with `runWith`.
-- `src/inbox.ts`, `src/labelQuery.ts`, `src/match.ts`, `src/shared.ts`, `src/template.ts` and `src/verdict.ts` are imported by the frontend bundle: keep them free of Effect and server imports.
+- `src/inbox.ts`, `src/filterQuery.ts`, `src/match.ts`, `src/shared.ts`, `src/template.ts` and `src/verdict.ts` are imported by the frontend bundle: keep them free of Effect and server imports.

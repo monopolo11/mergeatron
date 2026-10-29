@@ -284,7 +284,6 @@ const api = HttpRouter.use((router) =>
             name,
             enabled: true,
             events: [],
-            repos: [],
             reviewer: null,
             channel: null,
             allowBots: true,

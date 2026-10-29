@@ -71,6 +71,8 @@ export function itemContext(item: PolledItem): WebhookContext {
       : {
           issue_number: item.source === "github" ? item.identifier.replace(/^#/, "") : null,
           issue_identifier: item.identifier,
+          issue_parent: item.parent,
+          issue_children: item.children.join(", ") || null,
           issue_title: item.title,
           issue_url: item.url,
           issue_body: item.body,

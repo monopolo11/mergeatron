@@ -2,6 +2,7 @@ import { Clock, Context, Duration, Effect, FiberMap, Layer, Metric, Option, Reda
 import { Background } from "./background.ts";
 import { AppConfig } from "./config.ts";
 import { errorMessage } from "./errors.ts";
+import { termValues } from "./filterQuery.ts";
 import { GitHubInbox } from "./githubInbox.ts";
 import { runRules, type HandlerServices } from "./handler.ts";
 import { automationsFor, itemContext, itemDeliveryId, itemEvent, rulesLeftBy, type InboxItem, type InboxLabel, type ItemRuns, type LabelsResponse, type PolledItem } from "./inbox.ts";
@@ -93,11 +94,11 @@ export const makePoller = (sources: Record<InboxSource, InboxSourceClient | null
 
     const list: PollerShape["list"] = (options = {}) => store.listInbox(options);
 
-    /** Repositories GitHub labels are synced for: those of inbox items (active, or left after a run) and of rule filters, lowercased. */
+    /** Repositories GitHub labels are synced for: those of inbox items (active, or left after a run) and the `repo:` terms of rule filters, lowercased. */
     const labelRepos = Effect.gen(function* () {
       const items = yield* list({ gone: true });
       const rules = yield* store.listRules();
-      const repos = [...items.flatMap((item) => item.repo ?? []), ...rules.flatMap((rule) => rule.repos)];
+      const repos = [...items.flatMap((item) => item.repo ?? []), ...rules.flatMap((rule) => termValues(rule.filters.query, "repo"))];
       return [...new Set(repos.map((repo) => repo.toLowerCase()).filter((repo) => REPO_NAME.test(repo)))].toSorted();
     });
 

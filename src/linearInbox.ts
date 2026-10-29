@@ -25,6 +25,8 @@ const ISSUE_FIELDS = `fragment IssueFields on Issue {
   labels { nodes { name } }
   assignee { id displayName }
   creator { id displayName }
+  parent { identifier }
+  children { nodes { identifier } }
 }`;
 
 /** How long a done issue stays in the inbox, as a Linear relative date. */
@@ -82,6 +84,8 @@ export type LinearIssue = {
   labels: { nodes: { name: string }[] };
   assignee: { id: string; displayName: string } | null;
   creator: { id: string; displayName: string } | null;
+  parent: { identifier: string } | null;
+  children: { nodes: { identifier: string }[] };
 };
 
 type MineResult = { viewer: { id: string; displayName: string }; issues: { nodes: LinearIssue[] } };
@@ -169,6 +173,8 @@ export function linearItem(issue: LinearIssue, reasons: InboxReason[]): PolledIt
     labels: issue.labels.nodes.map((label) => label.name),
     reasons,
     team: issue.team.key,
+    parent: issue.parent?.identifier ?? null,
+    children: issue.children.nodes.map((child) => child.identifier),
     priority: issue.priorityLabel,
     branch: issue.branchName,
     headSha: null,

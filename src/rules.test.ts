@@ -7,16 +7,15 @@ describe("RuleInput", () => {
   const decode = Schema.decodeUnknownResult(RuleInput);
 
   test("fills defaults and trims names", () => {
-    const rule = decode({ name: " r ", prompt: "x", events: ["pull_request.opened"], repos: [" acme/widgets "] });
+    const rule = decode({ name: " r ", prompt: "x", events: ["pull_request.opened"], filters: { query: " repo:acme/widgets " } });
     expect(Result.isSuccess(rule) && rule.success).toMatchObject({
       name: "r",
       enabled: true,
-      repos: ["acme/widgets"],
       reviewer: null,
       maxConcurrent: 3,
       workspace: "worktree",
       model: null,
-      filters: { rerunOnPush: true, labels: "" },
+      filters: { rerunOnPush: true, query: "repo:acme/widgets" },
     });
   });
 
@@ -32,8 +31,8 @@ describe("RuleInput", () => {
     expect(Result.isFailure(empty) && empty.failure.message).toContain('at ["name"]');
     const negative = decode({ name: "r", prompt: "x", events: ["a"], maxConcurrent: -1 });
     expect(Result.isFailure(negative) && negative.failure.message).toContain('at ["maxConcurrent"]');
-    const labels = decode({ name: "r", prompt: "x", events: ["a"], filters: { labels: "(bug or p0" } });
-    expect(Result.isFailure(labels) && labels.failure.message).toContain('Missing ) after "bug or p0"');
+    const query = decode({ name: "r", prompt: "x", events: ["a"], filters: { query: "(bug or p0" } });
+    expect(Result.isFailure(query) && query.failure.message).toContain('Missing ) after "bug or p0"');
   });
 });
 

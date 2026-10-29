@@ -19,6 +19,8 @@ export const pr: PolledItem = {
   labels: ["ready", "backend"],
   reasons: ["review_requested", "mentioned"],
   team: null,
+  parent: null,
+  children: [],
   priority: null,
   branch: "feat/widgets",
   headSha: "abc123def456789",
@@ -58,7 +60,6 @@ export const rule: Rule = {
   name: "review",
   enabled: true,
   events: ["inbox.github.pull_request"],
-  repos: [],
   reviewer: null,
   channel: null,
   allowBots: true,
@@ -116,25 +117,39 @@ describe("itemContext", () => {
 });
 
 describe("filterMismatch", () => {
-  test("lists match any value, case-insensitively; empty lists match anything", () => {
+  test("terms test labels and the item's fields, case-insensitively; empty matches anything", () => {
     const ctx = itemContext(linear);
-    expect(filterMismatch(EMPTY_FILTERS, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, reasons: ["assigned"], labels: "Ready For Dev", states: ["todo"], teams: ["eng"] }, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["unstarted"] }, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, reasons: ["review_requested"] }, ctx)).toBe("reasons assigned include none of review_requested");
-    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "bug" }, ctx)).toBe("labels ready for dev do not match bug");
-    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "!bug" }, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, labels: "bug (" }, ctx)).toStartWith("label filter is invalid");
-    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["In Progress"] }, ctx)).toBe("state Todo is not In Progress");
-    expect(filterMismatch({ ...EMPTY_FILTERS, teams: ["OPS"] }, ctx)).toBe("team ENG is not OPS");
+    expect(filterMismatch("", ctx)).toBeNull();
+    expect(filterMismatch("reason:assigned and Ready For Dev and state:todo and team:eng", ctx)).toBeNull();
+    expect(filterMismatch("state:unstarted and !bug", ctx)).toBeNull();
+    expect(filterMismatch("reason:review_requested", ctx)).toBe("reasons assigned does not match reason:review_requested");
+    expect(filterMismatch("bug", ctx)).toBe("labels ready for dev does not match bug");
+    expect(filterMismatch('team:ENG and state:"In Progress"', ctx)).toBe("state Todo does not match state:In Progress");
+    expect(filterMismatch("team:OPS or team:SRE", ctx)).toBe("does not match team:OPS or team:SRE");
+    expect(filterMismatch("bug (", ctx)).toStartWith("filter is invalid");
   });
 
-  test("a done Linear issue matches only rules that name its state or type", () => {
-    const ctx = itemContext({ ...linear, state: "Done", stateType: "completed" });
-    expect(filterMismatch(EMPTY_FILTERS, ctx)).toBe("state Done is done; add it to States to run on done issues");
-    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["Todo"] }, ctx)).toBe("state Done is not Todo");
-    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["done"] }, ctx)).toBeNull();
-    expect(filterMismatch({ ...EMPTY_FILTERS, states: ["completed"] }, ctx)).toBeNull();
+  test("a done Linear issue matches only filters that name its state or type", () => {
+    const ctx = itemContext({ ...linear, labels: ["bug"], state: "Done", stateType: "completed" });
+    expect(filterMismatch("", ctx)).toBe("state Done is done; name it in a state: term to run on done issues");
+    expect(filterMismatch("state:Todo or bug", ctx)).toBe("state Done is done; name it in a state: term to run on done issues");
+    expect(filterMismatch("state:Todo or state:done", ctx)).toBeNull();
+    expect(filterMismatch("state:done", ctx)).toBeNull();
+    expect(filterMismatch("state:completed", ctx)).toBeNull();
+  });
+
+  test("has:parent and has:sub-issues test whether an issue is a sub-issue and whether it has sub-issues", () => {
+    const parent = itemContext({ ...linear, children: ["ENG-8", "ENG-9"] });
+    const child = itemContext({ ...linear, parent: "ENG-6" });
+    const lone = itemContext(linear);
+    expect(child.issue_parent).toBe("ENG-6");
+    expect(parent.issue_children).toBe("ENG-8, ENG-9");
+    expect(filterMismatch("has:parent", child)).toBeNull();
+    expect(filterMismatch("has:parent", lone)).toBe("no parent issue does not match has:parent");
+    expect(filterMismatch("!has:parent", child)).toBe("parent ENG-6 does not match !has:parent");
+    expect(filterMismatch("has:sub-issues", parent)).toBeNull();
+    expect(filterMismatch("!has:sub-issues", parent)).toBe("sub-issues ENG-8, ENG-9 does not match !has:sub-issues");
+    expect(filterMismatch("!has:parent and !has:sub-issues", lone)).toBeNull();
   });
 });
 
@@ -175,14 +190,14 @@ describe("automationsFor", () => {
   });
 
   test("filters apply", () => {
-    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: "backend", reasons: ["review_requested"] } };
+    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, query: "backend and reason:review_requested" } };
     expect(automationsFor(pr, [labelled], runLog())).toHaveLength(1);
-    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, labels: "frontend" } }], runLog())).toEqual([]);
+    expect(automationsFor(pr, [{ ...labelled, filters: { ...labelled.filters, query: "frontend" } }], runLog())).toEqual([]);
   });
 });
 
 describe("rulesLeftBy", () => {
-  const implement: Rule = { ...rule, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, labels: "needs grooming" } };
+  const implement: Rule = { ...rule, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, query: "needs grooming" } };
 
   test("an issue leaves an enabled rule of its event that ran for its current generation and no longer matches", () => {
     expect(rulesLeftBy(linear, [implement], runLog(["linear:ENG-7"]))).toEqual([implement]);
@@ -197,7 +212,7 @@ describe("rulesLeftBy", () => {
   });
 
   test("PRs never leave a rule: they re-run per head instead", () => {
-    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, labels: "frontend" } };
+    const labelled: Rule = { ...rule, filters: { ...EMPTY_FILTERS, query: "frontend" } };
     expect(rulesLeftBy(pr, [labelled], runLog(["github:acme/widgets#42@abc123def456"]))).toEqual([]);
   });
 });

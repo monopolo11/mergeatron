@@ -37,7 +37,6 @@ const NEW_RULE: RuleInput = {
   name: "New rule",
   enabled: false,
   events: ["pull_request.review_requested"],
-  repos: [],
   reviewer: null,
   channel: null,
   allowBots: true,

@@ -8,9 +8,9 @@ describe("updateRule", () => {
     runWith(
       testLayer(),
       Effect.gen(function* () {
-        const rule = yield* createRule({ name: "triage", events: ["inbox.linear.issue"], prompt: "fix {{issue_url}}", filters: { teams: ["ENG"], labels: "bug" } });
-        const updated = yield* updateRule(rule.id, { enabled: false, filters: { labels: "bug and !wontfix" } });
-        expect(updated).toMatchObject({ name: "triage", enabled: false, events: ["inbox.linear.issue"], filters: { teams: ["ENG"], labels: "bug and !wontfix" } });
+        const rule = yield* createRule({ name: "triage", events: ["inbox.linear.issue"], prompt: "fix {{issue_url}}", filters: { query: "team:ENG and bug", rerunOnPush: false } });
+        const updated = yield* updateRule(rule.id, { enabled: false, filters: { query: "team:ENG and bug and !wontfix" } });
+        expect(updated).toMatchObject({ name: "triage", enabled: false, events: ["inbox.linear.issue"], filters: { query: "team:ENG and bug and !wontfix", rerunOnPush: false } });
       }),
     ));
 
@@ -19,7 +19,7 @@ describe("updateRule", () => {
       testLayer(),
       Effect.gen(function* () {
         const rule = yield* createRule({ name: "triage", events: ["inbox.linear.issue"], prompt: "x" });
-        expect((yield* failureOf(updateRule(rule.id, { filters: { labels: "(bug and" } })))._tag).toBe("SchemaError");
+        expect((yield* failureOf(updateRule(rule.id, { filters: { query: "(bug and" } })))._tag).toBe("SchemaError");
         expect((yield* failureOf(updateRule(rule.id, { events: ["inbox.linear.issue", "inbox.sentry.issue"] })))._tag).toBe("SchemaError");
         expect((yield* failureOf(updateRule("nope", { enabled: true })))._tag).toBe("RuleNotFoundError");
       }),

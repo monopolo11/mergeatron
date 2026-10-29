@@ -18,7 +18,6 @@ const rule: Omit<Rule, "id" | "livePromptVersion" | "createdAt" | "updatedAt"> =
   name: "deploys",
   enabled: true,
   events: ["webhook.deploys"],
-  repos: [],
   reviewer: null,
   channel: null,
   allowBots: true,

@@ -66,7 +66,7 @@ describe("Poller", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const poller = yield* Poller;
-        const issueRule = { ...input, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, labels: "ready for dev" }, projectId: "p1", workspace: "local" as const };
+        const issueRule = { ...input, events: ["inbox.linear.issue"], filters: { ...EMPTY_FILTERS, query: "ready for dev" }, projectId: "p1", workspace: "local" as const };
         const implement = yield* store.createRule({ ...issueRule, name: "implement" });
         // A disabled rule that once ran for the issue never re-arms.
         const off = yield* store.createRule({ ...issueRule, name: "off", enabled: false });
@@ -175,7 +175,7 @@ describe("Poller", () => {
         expect(asked).toHaveLength(1);
 
         // A rule naming another repo widens the sync; a failure keeps the last labels.
-        yield* store.createRule({ ...input, repos: ["Acme/Gadgets", "not a repo"] });
+        yield* store.createRule({ ...input, filters: { ...EMPTY_FILTERS, query: 'repo:Acme/Gadgets or repo:"not a repo"' } });
         fail = true;
         yield* poller.syncLabels("github");
         expect(asked[1]).toEqual(["acme/gadgets", "acme/widgets"]);

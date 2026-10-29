@@ -16,7 +16,6 @@ const base: Rule = {
   name: "review",
   enabled: true,
   events: ["pull_request.review_requested"],
-  repos: [],
   reviewer: null,
   channel: null,
   allowBots: false,
@@ -43,9 +42,10 @@ describe("matchRules", () => {
     expect(matchRules([{ ...base, enabled: false }], "pull_request.review_requested", ctx)).toHaveLength(0);
   });
 
-  test("repository filter is case-insensitive and empty means any", () => {
-    expect(matchRules([{ ...base, repos: ["acme/widgets"] }], base.events[0]!, ctx)).toHaveLength(1);
-    expect(matchRules([{ ...base, repos: ["acme/other"] }], base.events[0]!, ctx)).toHaveLength(0);
+  test("repo: terms are case-insensitive and an empty filter means any repository", () => {
+    const repo = (query: string) => ({ ...base, filters: { ...EMPTY_FILTERS, query } });
+    expect(matchRules([repo("repo:acme/widgets")], base.events[0]!, ctx)).toHaveLength(1);
+    expect(matchRules([repo("repo:acme/other")], base.events[0]!, ctx)).toHaveLength(0);
   });
 
   test("channel filter compares against the Slack channel", () => {
@@ -70,7 +70,7 @@ describe("matchRules", () => {
 
   test("ruleMismatch names the first filter that failed", () => {
     expect(ruleMismatch(base, "pull_request.opened", ctx)).toBe("listens to pull_request.review_requested");
-    expect(ruleMismatch({ ...base, repos: ["acme/other"] }, base.events[0]!, ctx)).toBe("repo Acme/Widgets not in acme/other");
+    expect(ruleMismatch({ ...base, filters: { ...EMPTY_FILTERS, query: "repo:acme/other" } }, base.events[0]!, ctx)).toBe("repo Acme/Widgets does not match repo:acme/other");
     expect(ruleMismatch({ ...base, reviewer: "someone" }, base.events[0]!, ctx)).toBe("requested reviewer bernardo is not someone");
     expect(ruleMismatch(base, base.events[0]!, ctx)).toBeNull();
   });
@@ -213,7 +213,7 @@ describe("handleDelivery", () => {
       testLayer(),
       Effect.gen(function* () {
         const store = yield* Store;
-        const rule = yield* store.createRule({ ...base, repos: [], events: ["slack.message"] });
+        const rule = yield* store.createRule({ ...base, events: ["slack.message"] });
         const ctx = { repo: "acme/widgets", pr_number: "42", pr_url: "https://github.com/acme/widgets/pull/42" };
         yield* store.recordRun({
           ruleId: "other-rule", ruleName: "github review", deliveryId: "d1", event: "pull_request.review_requested", repo: "Acme/Widgets",

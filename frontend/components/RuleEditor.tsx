@@ -22,11 +22,11 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { firstAvailableModel } from "@/components/DispatchDialog";
 import { Empty, ExternalLink, Field, GroupLabel, RunStatus } from "@/components/Field";
-import { LabelsInput } from "@/components/LabelsInput";
+import { FilterInput, type FilterOptions } from "@/components/FilterInput";
 import { ModelPicker } from "@/components/ModelPicker";
 import { PromptEditor, type PromptEditorHandle } from "@/components/PromptEditor";
 import { usePromptHistory, usePromptVersions, VersionSelect } from "@/components/PromptVersions";
-import { TokenInput, type TokenOption } from "@/components/TokenInput";
+import type { TokenOption } from "@/components/TokenInput";
 import { Toolbar } from "@/components/Toolbar";
 import { api, timeAgo } from "@/lib/api";
 import { eventsService } from "@/lib/composer";
@@ -35,6 +35,7 @@ import type { RuleDraft } from "@/lib/shell";
 import { useUnsavedGuard } from "@/lib/unsaved";
 import { cn } from "@/lib/utils";
 import { itemContext, itemEvent, type InboxItem, type InboxResponse, type LabelsResponse } from "../../src/inbox.ts";
+import { HAS_VALUES, termValues } from "../../src/filterQuery.ts";
 import { ruleMismatch, sameName } from "../../src/match.ts";
 import type { PromptHistory } from "../../src/promptVersions.ts";
 import type { Prompt, Rule, Run, Webhook } from "../../src/rules.ts";
@@ -145,11 +146,13 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   // Labels synced from the rule's provider, so suggestions cover labels no inbox item carries yet.
   const synced = useQuery({ queryKey: ["labels"], queryFn: () => api<LabelsResponse>("/api/labels"), enabled: isInbox || isWebhook, staleTime: 5 * 60_000 });
   const candidates = (inbox.data?.items ?? []).filter((item) => events.includes(itemEvent(item)));
-  // Labels and states are counted within the chosen repos and teams, so the suggestions fit the rule.
-  const scoped = candidates.filter((item) => within(value.repos, item.repo) && within(value.filters.teams, item.team));
+  // Labels and states are counted within the repos and teams the filter names, so the suggestions fit the rule.
+  const repos = termValues(value.filters.query, "repo");
+  const teams = termValues(value.filters.query, "team");
+  const scoped = candidates.filter((item) => within(repos, item.repo) && within(teams, item.team));
   const syncedLabels = [
-    ...(isWebhook || inboxGitHub ? (synced.data?.github ?? []).filter((label) => within(value.repos, label.scope)) : []),
-    ...(inboxLinear ? (synced.data?.linear ?? []).filter((label) => within(value.filters.teams, label.scope)) : []),
+    ...(isWebhook || inboxGitHub ? (synced.data?.github ?? []).filter((label) => within(repos, label.scope)) : []),
+    ...(inboxLinear ? (synced.data?.linear ?? []).filter((label) => within(teams, label.scope)) : []),
     ...(inboxSentry ? (synced.data?.sentry ?? []) : []),
   ];
   const repoOptions = countOptions([...candidates.flatMap((item) => (item.repo ? [item.repo] : [])), ...runs.flatMap((run) => (run.repo ? [run.repo] : []))]);
@@ -159,6 +162,14 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
     syncedLabels.map((label) => label.name),
   );
   const stateOptions = countOptions(scoped.flatMap((item) => [item.state, ...(item.stateType ? [item.stateType] : [])]));
+  // The keys the filter offers for these events, each with its suggested values.
+  const filterOptions: FilterOptions = {
+    ...((isInbox || isWebhook) && { label: labelOptions, state: stateOptions }),
+    ...((inboxLinear || inboxSentry) && { team: teamOptions }),
+    ...(isInbox && { reason: REASON_OPTIONS }),
+    ...((isWebhook || isSlack || inboxGitHub) && { repo: repoOptions }),
+    ...(inboxLinear && { has: HAS_VALUES.map((value) => ({ value })) }),
+  };
 
   // What the rule as drafted would fire on, with the matcher's own reason for every miss.
   const previewRule: Rule = { ...value, id, createdAt, updatedAt, livePromptVersion, enabled: true };
@@ -261,64 +272,19 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
             )}
           </form.Field>
 
-          {(isWebhook || isSlack || inboxGitHub) && (
-            <form.Field name="repos">
-              {(field) => (
-                <Field label="Repositories" hint={isSlack ? "owner/name of the PR linked in the message. Empty matches any." : "owner/name. Empty matches every repository."}>
-                  <TokenInput value={field.state.value} onChange={field.handleChange} options={repoOptions} placeholder="owner/name" />
-                </Field>
-              )}
-            </form.Field>
-          )}
-          {(inboxLinear || inboxSentry) && (
-            <form.Field name="filters.teams">
-              {(field) => (
-                <Field label={inboxSentry ? "Projects" : "Teams"} hint={inboxSentry ? "Sentry project slugs. Empty matches every project." : "Linear team keys. Empty matches every team."}>
-                  <TokenInput value={field.state.value} onChange={field.handleChange} options={teamOptions} placeholder={inboxSentry ? "checkout-api" : "ENG"} />
-                </Field>
-              )}
-            </form.Field>
-          )}
-          {isInbox && (
-            <form.Field name="filters.reasons">
-              {(field) => (
-                <Field label="Reasons" hint="Why the item is in your inbox; any of the listed. Empty matches any.">
-                  <TokenInput value={field.state.value} onChange={(reasons) => field.handleChange(reasons as typeof field.state.value)} options={REASON_OPTIONS} optionsOnly placeholder="review requested, assigned to me, …" />
-                </Field>
-              )}
-            </form.Field>
-          )}
-          {isInbox && (
-            <form.Field name="filters.states">
+          {(isInbox || isWebhook || isSlack) && (
+            <form.Field name="filters.query">
               {(field) => (
                 <Field
-                  label="States"
-                  hint={
-                    inboxLinear
-                      ? "State name (Todo) or type (unstarted, started). Any of the listed."
-                      : inboxSentry
-                        ? "new, ongoing, escalating or regressed. Any of the listed."
-                        : "open or draft. Any of the listed."
-                  }
+                  label="Filter"
+                  className="@2xl:col-span-2"
+                  hint={`Labels, ${Object.keys(filterOptions).filter((key) => key !== "label").map((key) => `${key}:`).join(", ")} joined with and, or, ! and parentheses. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
                 >
-                  <TokenInput value={field.state.value} onChange={field.handleChange} options={stateOptions} placeholder={inboxLinear ? "Todo" : inboxSentry ? "escalating" : "open"} />
+                  <FilterInput value={field.state.value} onChange={field.handleChange} options={filterOptions} placeholder={inboxLinear ? "reason:assigned and state:Todo and !has:parent" : "(bug or p0) and !wontfix"} />
                 </Field>
               )}
             </form.Field>
           )}
-          {(isInbox || isWebhook) && (
-            <form.Field name="filters.labels">
-              {(field) => (
-                <Field
-                  label="Labels"
-                  hint={`and, or (or a comma), parentheses. !label or not:label skips items carrying it. Quote labels holding an operator. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
-                >
-                  <LabelsInput value={field.state.value} onChange={field.handleChange} options={labelOptions} placeholder="(bug or p0) and !wontfix" />
-                </Field>
-              )}
-            </form.Field>
-          )}
-
           {isSlack && (
             <form.Field name="channel">
               {(field) => (
