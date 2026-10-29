@@ -406,13 +406,15 @@ function CloseButton({ onClose }: { onClose: () => void }) {
  */
 function RefreshRun({ id }: { id: string }) {
   const queryClient = useQueryClient();
+  const { refreshRuns } = use(ShellContext)!;
   const refresh = useMutation({
     mutationFn: () => api<Run>(`/api/runs/${id}/refresh`, { method: "POST" }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["run", id] });
-      void queryClient.invalidateQueries({ queryKey: ["runs", "history"] });
-      void queryClient.invalidateQueries({ queryKey: ["pulls"] });
-      void queryClient.invalidateQueries({ queryKey: ["analytics"] });
+      // Everything that shows a run's status: the drawer, table, facet counts, PRs, analytics, the inbox's last run, and the shell's live run log.
+      for (const queryKey of [["run", id], ["runs", "history"], ["facets"], ["pulls"], ["analytics"], ["inbox"]]) {
+        void queryClient.invalidateQueries({ queryKey });
+      }
+      refreshRuns();
     },
   });
   return (
