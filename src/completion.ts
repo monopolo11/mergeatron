@@ -5,8 +5,9 @@ import { logger } from "./log.ts";
 import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
-import { Store } from "./store.ts";
+import { SETTLED, Store } from "./store.ts";
 import { T3, type T3RunStatus, type T3Thread } from "./t3.ts";
+import { RunActiveError, RunNotFoundError, RunWithoutThreadError } from "./runHistory.ts";
 import { recordPullRequests } from "./runPullRequests.ts";
 import { recordUsage, Usage } from "./usage.ts";
 import { changesRequestedStreak, reviewVerdict, type Verdict } from "./verdict.ts";
@@ -165,6 +166,55 @@ export const resumeWatchers: Effect.Effect<void, never, CompletionServices> = Ef
   yield* Effect.forEach(unsettled, watchCompletion, { discard: true });
   if (unsettled.length > 0) yield* log.info("resumed watchers for unsettled runs", { count: unsettled.length });
 });
+
+/**
+ * Reads a settled run's thread again and makes the run match it, for threads
+ * rescued by hand in T3 after the run settled. A thread that ended
+ * differently settles the run again (Slack gets the new reply and reaction);
+ * a thread still working is watched until it ends. A thread that says the
+ * same as before leaves the run alone. Returns the run as stored afterwards.
+ */
+export const refreshRun = Effect.fn("completion.refresh")(function* (id: string) {
+  const store = yield* Store;
+  const t3 = yield* T3;
+  const run = yield* store.getRun(id);
+  if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
+  if (!SETTLED.has(run.status)) return yield* Effect.fail(new RunActiveError({ message: `Run ${id} is ${run.status}; it updates on its own.` }));
+  // A skipped run may point at the thread of the run it gave way to; that thread's outcome is not its own.
+  const threadId = run.status === "skipped" ? null : run.threadId;
+  if (!threadId) return yield* Effect.fail(new RunWithoutThreadError({ message: `Run ${id} has no T3 thread of its own.` }));
+
+  const now = yield* Clock.currentTimeMillis;
+  const outcome = yield* t3.thread(threadId).pipe(
+    Effect.map((thread) => threadOutcome(thread, now)),
+    Effect.catchIf((error) => error.status === 404, () => Effect.succeed<TurnOutcome>({ status: "failed", detail: "thread no longer exists in T3", result: null })),
+  );
+  if (outcome && outcome.status === run.status && outcome.detail === run.detail && outcome.result === run.result) return run;
+
+  yield* log.info("run refreshed", { run: id, from: run.status, to: outcome?.status ?? "started" });
+  yield* takeBackReaction(run);
+  if (outcome) {
+    yield* settle(id, outcome, Date.parse(run.startedAt ?? run.createdAt));
+  } else {
+    // The thread was picked up again just now, so the give-up deadline counts from here, after a restart too (see resumeWatchers).
+    yield* store.updateRun(id, { status: "started", detail: "thread working again", result: null, startedAt: new Date(now).toISOString() });
+    yield* (yield* Background).watch(id, watcher(id, threadId, now));
+  }
+  return (yield* store.getRun(id)) ?? run;
+});
+
+/** Removes the reaction a review's earlier settle left on its Slack message, so the next one replaces it. */
+const takeBackReaction = (run: Run) =>
+  Effect.gen(function* () {
+    const origin = slackOrigin(run.context);
+    if (!origin || run.event === HANDOFF_EVENT) return;
+    const slack = yield* SlackClient;
+    const verdict = reviewVerdict(run.result);
+    const names = run.status === "failed" ? ["x"] : verdict === "approved" ? [VERDICT_REACTION.approved, APPROVED_FALLBACK] : [VERDICT_REACTION[verdict]];
+    yield* Effect.forEach(names, (name) => slack.unreact(origin, name), { discard: true }).pipe(
+      Effect.catch((error) => log.warn("slack unreact failed", { run: run.id, error: error.message })),
+    );
+  });
 
 /**
  * Records the outcome and, for Slack runs, posts the reply. A review then

@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { QUIET_MS, changesRequestedStreak, pausedReview, reactVerdict, reviewVerdict, threadOutcome } from "./completion.ts";
+import { QUIET_MS, changesRequestedStreak, pausedReview, reactVerdict, refreshRun, reviewVerdict, threadOutcome } from "./completion.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackApiError, type SlackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import type { T3Thread } from "./t3.ts";
-import { failureOf, runWith, testLayer } from "./testing.ts";
+import { Background } from "./background.ts";
+import { fakeSlack, fakeT3, failureOf, runWith, testLayer } from "./testing.ts";
 
 const T0 = Date.parse("2026-09-21T22:56:00.000Z");
 const at = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
@@ -191,6 +192,63 @@ describe("pausedReview", () => {
         expect(yield* pausedReview("acme/widgets", "43")).toBeNull();
         yield* store.saveSettings({ ...(yield* store.getSettings()), maxChangesRequestedRounds: 0 });
         expect(yield* pausedReview("acme/widgets", "42")).toBeNull();
+      }),
+    ));
+});
+
+describe("refreshRun", () => {
+  const origin = { slack_channel: "C1", slack_ts: "1.0" };
+  const failedRun = Effect.gen(function* () {
+    return yield* (yield* Store).recordRun({
+      ruleId: "r1", ruleName: "review", deliveryId: crypto.randomUUID(), event: "slack.message", repo: "acme/widgets", source: "slack", author: "alice",
+      status: "failed", detail: "provider crashed", threadId: "t1", threadUrl: "http://t3/t1", context: origin, result: null,
+    });
+  });
+
+  test("a thread rescued by hand settles the run again and swaps the Slack reaction", async () => {
+    const slack: string[] = [];
+    const rescued = thread({ runs: [run(1, "failed"), run(2, "completed")], messages: [reply("b1", "run2", "Review published: **APPROVE**")], subagents: [] });
+    const layer = testLayer({
+      t3: fakeT3({ thread: () => Effect.succeed(rescued) }),
+      slack: fakeSlack({
+        react: (_origin, name) => Effect.sync(() => void slack.push(`+${name}`)),
+        unreact: (_origin, name) => Effect.sync(() => void slack.push(`-${name}`)),
+        reply: (_origin, text) => Effect.sync(() => void slack.push(text)),
+      }),
+    });
+    await runWith(
+      layer,
+      Effect.gen(function* () {
+        const { id } = yield* failedRun;
+        expect(yield* refreshRun(id)).toMatchObject({ status: "done", result: "Review published: **APPROVE**" });
+        expect(slack).toEqual(["-x", "Review published: **APPROVE**", "-eyes", "+chayanne-approved"]);
+        // Nothing changed since, so a second refresh leaves Slack alone.
+        yield* refreshRun(id);
+        expect(slack).toHaveLength(4);
+      }),
+    );
+  });
+
+  test("a thread working again is watched", () =>
+    runWith(
+      testLayer({ t3: fakeT3({ thread: () => Effect.succeed(thread({ runs: [run(1, "failed"), run(2, "running", null)] })) }) }),
+      Effect.gen(function* () {
+        const { id } = yield* failedRun;
+        const before = Date.now();
+        const refreshed = yield* refreshRun(id);
+        expect(refreshed).toMatchObject({ status: "started", detail: "thread working again" });
+        // A restart resumes the watch from the refresh, not from when the thread first opened.
+        const startedAt = Date.parse(refreshed.startedAt!);
+        expect(startedAt).toBeGreaterThanOrEqual(before);
+        expect(startedAt).toBeLessThanOrEqual(Date.now());
+        expect(yield* (yield* Background).isWatching(id)).toBe(true);
+        expect((yield* failureOf(refreshRun(id)))._tag).toBe("RunActiveError");
+        // A run skipped while that thread runs points at it, but its outcome is not the skipped run's.
+        const skipped = yield* (yield* Store).recordRun({
+          ruleId: "r1", ruleName: "review", deliveryId: crypto.randomUUID(), event: "slack.message", repo: "acme/widgets", source: "slack", author: "alice",
+          status: "skipped", detail: "thread already running", threadId: "t1", threadUrl: "http://t3/t1", context: origin, result: null,
+        });
+        expect((yield* failureOf(refreshRun(skipped.id)))._tag).toBe("RunWithoutThreadError");
       }),
     ));
 });

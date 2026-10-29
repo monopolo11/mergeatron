@@ -4,7 +4,7 @@ import { FetchHttpClient, HttpRouter, HttpServerRequest, HttpServerResponse, typ
 import { Otlp, OtlpSerialization, PrometheusMetrics } from "effect/observability";
 import index from "./frontend/index.html";
 import { Background, RunEvents } from "./src/background.ts";
-import { resumeWatchers, reviewVerdict, watchCompletion } from "./src/completion.ts";
+import { refreshRun, resumeWatchers, reviewVerdict, watchCompletion } from "./src/completion.ts";
 import { AppConfig } from "./src/config.ts";
 import { Database } from "./src/db/index.ts";
 import { copyLegacyDatabase } from "./src/db/legacy.ts";
@@ -55,7 +55,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409, QueueNotPausedError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, RunWithoutThreadError: 409, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409, QueueNotPausedError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -458,6 +458,8 @@ const api = HttpRouter.use((router) =>
     yield* router.add("GET", "/api/runs/:id", route(Effect.map(Effect.flatMap(param("id"), getRun), json)));
     /** PRs linked to the run's thread, read from T3 again (see src/runPullRequests.ts). */
     yield* router.add("GET", "/api/runs/:id/pull-requests", route(Effect.map(Effect.flatMap(param("id"), syncPullRequests), json)));
+    /** Reads the run's thread in T3 again, for a thread rescued by hand after the run settled (see refreshRun). */
+    yield* router.add("POST", "/api/runs/:id/refresh", route(Effect.map(Effect.flatMap(param("id"), refreshRun), json)));
     yield* router.add("DELETE", "/api/runs/:id", route(Effect.as(Effect.flatMap(param("id"), deleteRun), HttpServerResponse.empty({ status: 204 }))));
     yield* router.add(
       "PUT",

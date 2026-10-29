@@ -15,6 +15,9 @@ export class InvalidFollowUpError extends Data.TaggedError("InvalidFollowUpError
 /** The run is queued or its thread is still working, so it holds a slot in its rule's queue. */
 export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonly message: string }> {}
 
+/** The run never opened a T3 thread of its own (it failed to start, or was skipped), so there is nothing to read its status from. */
+export class RunWithoutThreadError extends Data.TaggedError("RunWithoutThreadError")<{ readonly message: string }> {}
+
 /**
  * The run history behind the MCP tools: every run with the trigger, prompt
  * versions and model it started with, what its thread spent, the PRs linked

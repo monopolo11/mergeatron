@@ -232,6 +232,7 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
           {run.url && <ExternalLink href={run.url}>{run.ref ?? "link"}</ExternalLink>}
           {run.threadUrl && <ExternalLink href={run.threadUrl}>thread</ExternalLink>}
         </span>
+        {RATABLE.has(run.status) && run.threadId && <RefreshRun id={run.id} />}
         {!UNSETTLED.has(run.status) && <DeleteRun id={run.id} onDeleted={onClose} />}
         <CloseButton onClose={onClose} />
       </Toolbar>
@@ -394,6 +395,36 @@ function CloseButton({ onClose }: { onClose: () => void }) {
   return (
     <Button size="icon-xs" variant="ghost" className="text-muted-foreground" onClick={onClose} aria-label="Close run">
       <XIcon />
+    </Button>
+  );
+}
+
+/**
+ * Reads a settled run's thread in T3 again, for a thread rescued by hand
+ * after the run failed. The run then shows the thread's status, or watches it
+ * while it is still working. A failure shows on the button.
+ */
+function RefreshRun({ id }: { id: string }) {
+  const queryClient = useQueryClient();
+  const refresh = useMutation({
+    mutationFn: () => api<Run>(`/api/runs/${id}/refresh`, { method: "POST" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["run", id] });
+      void queryClient.invalidateQueries({ queryKey: ["runs", "history"] });
+      void queryClient.invalidateQueries({ queryKey: ["pulls"] });
+      void queryClient.invalidateQueries({ queryKey: ["analytics"] });
+    },
+  });
+  return (
+    <Button
+      size="xs"
+      variant="ghost"
+      className={cn(refresh.error ? "text-destructive" : "text-muted-foreground")}
+      title={refresh.error?.message ?? "Read the thread's status from T3 again"}
+      disabled={refresh.isPending}
+      onClick={() => refresh.mutate()}
+    >
+      {refresh.isPending ? "Refreshing…" : refresh.error ? "Refresh failed" : "Refresh"}
     </Button>
   );
 }
