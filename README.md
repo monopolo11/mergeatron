@@ -56,3 +56,7 @@ Then [create a rule](docs/rules.md) and [connect GitHub](docs/webhooks.md#github
 | [Upgrading from T3 Review](docs/upgrading.md) | Renamed MCP server, launchd agent, database |
 
 ![Runs](docs/images/runs.png)
+
+## License
+
+[MIT](LICENSE)
