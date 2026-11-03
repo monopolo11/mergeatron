@@ -124,4 +124,4 @@ The backend is Effect v4 (`effect`, `@effect/platform-bun`). Conventions:
 
 ## Reviews
 
-Never ask for review in Slack (no `request-review` skill, no `request_review` or `slack_post_message` MCP tools). Open the PR and leave review requests to the human.
+Never ask for review in Slack (no `request_review` or `slack_post_message` MCP tools). Open the PR and leave review requests to the human.

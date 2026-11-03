@@ -112,7 +112,7 @@ The agent runs `bun index.ts` from this directory, so `.env` is the same one you
 
 ## Updating
 
-Updates are [GitHub Releases](https://github.com/monopolo11/mergeatron/releases). The server reads them through `gh`, so the logged-in account needs access to the repository.
+Updates are [GitHub Releases](https://github.com/monopolo11/mergeatron/releases). The server reads them through `gh`, so it needs a logged-in `gh`.
 
 - **Stable**: published on every push to `main`, a patch bump of the previous stable (`v0.1.4`).
 - **Nightly**: published by hand from any branch with the Release workflow's **Run workflow** button. A prerelease of the next stable (`v0.1.5-nightly.20261027.12`).
