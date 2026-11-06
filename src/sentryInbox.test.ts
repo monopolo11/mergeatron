@@ -135,6 +135,25 @@ describe("SentryInbox.fetch", () => {
     expect(await Effect.runPromise(list(500, 2))).toEqual({ items: 200, pages: [["100", undefined], ["100", "100"]] });
   });
 
+  test("an issue repeated across pages does not take a slot", async () => {
+    const one = (n: number) => issue({ id: String(n), shortId: `CHECKOUT-${n}` });
+    const pages = [
+      [one(1), one(2)],
+      [one(2), one(3)],
+    ];
+    const asked: (string | string[] | undefined)[] = [];
+    const request: SentryRequest = (path, query = {}) =>
+      Effect.suspend(() => {
+        if (path === "") return Effect.succeed({ data: { user: null } as never, next: null });
+        if (TAGS.test(path)) return Effect.succeed({ data: [] as never, next: null });
+        asked.push(query.limit);
+        return Effect.succeed({ data: pages[Number(query.cursor ?? 0)] as never, next: query.cursor ? null : "1" });
+      });
+    const { items } = await Effect.runPromise(inboxWith(EMPTY_SENTRY_FILTERS, request, 3).pipe(Effect.flatMap((inbox) => inbox.fetch())));
+    expect(items.map(({ key }) => key)).toEqual(["sentry:CHECKOUT-1", "sentry:CHECKOUT-2", "sentry:CHECKOUT-3"]);
+    expect(asked).toEqual(["3", "1"]);
+  });
+
   test("items carry tags with few values, and a tag is only read again after a new event", async () => {
     let lastSeen = "2026-10-02T10:00:00Z";
     const { calls, request } = fake({

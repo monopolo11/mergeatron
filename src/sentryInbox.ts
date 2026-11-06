@@ -139,19 +139,23 @@ export const makeSentryInbox = (instance: SentryInstance, settings: Effect.Effec
       CACHE,
     );
 
-    /** The newest matching issues, paging until `limit` or the last page. */
+    /**
+     * The newest matching issues, paging until `limit` or the last page. An issue
+     * that arrives between pages shifts the list, so a later page can repeat one;
+     * keying by id stops the repeat from taking a slot.
+     */
     const loadIssues = (query: Record<string, string | string[]>, limit: number) =>
       Effect.gen(function* () {
-        const issues: SentryIssue[] = [];
+        const issues = new Map<string, SentryIssue>();
         let cursor: string | null = null;
-        while (issues.length < limit) {
-          const page = { ...query, limit: String(Math.min(limit - issues.length, ISSUES_PAGE)) };
+        while (issues.size < limit) {
+          const page = { ...query, limit: String(Math.min(limit - issues.size, ISSUES_PAGE)) };
           const { data, next }: { data: SentryIssue[]; next: string | null } = yield* request<SentryIssue[]>(`${org}/issues/`, cursor ? { ...page, cursor } : page);
-          issues.push(...data);
+          for (const issue of data) if (!issues.has(issue.id)) issues.set(issue.id, issue);
           if (!next) break;
           cursor = next;
         }
-        return issues;
+        return [...issues.values()];
       });
 
     // Tags only change with a new event, so an issue whose lastSeen stands costs no request.

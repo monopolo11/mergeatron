@@ -48,7 +48,6 @@ import {
   TEMPLATE_VARS,
   UPDATE_CHANNELS,
   WEBHOOK_SECRET_HEADER,
-  DEFAULT_SENTRY_LIMIT,
   MAX_SENTRY_LIMIT,
   sentryQuery,
   type InboxSource,
@@ -582,14 +581,7 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
       <form.Field name="sentryLimit">
         {(field) => (
           <Field label="Limit" hint={`How many of the newest issues the inbox keeps, up to ${MAX_SENTRY_LIMIT}. Above 100 every poll pages through more of Sentry.`}>
-            <Input
-              type="number"
-              min={1}
-              max={MAX_SENTRY_LIMIT}
-              className={cn("h-7 w-20", mono)}
-              value={field.state.value}
-              onChange={(e) => field.handleChange(Math.min(MAX_SENTRY_LIMIT, Math.max(1, Math.floor(Number(e.target.value) || DEFAULT_SENTRY_LIMIT))))}
-            />
+            <LimitInput value={field.state.value} onChange={field.handleChange} />
           </Field>
         )}
       </form.Field>
@@ -601,6 +593,26 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
       </Field>
       {options.error && <p className="text-xs text-destructive">Suggestions unavailable: {options.error.message}</p>}
     </div>
+  );
+}
+
+/** Keeps what is typed as text so the field can be cleared, saves only a limit in range, and shows the saved one again on blur. */
+function LimitInput({ value, onChange }: { value: number; onChange: (limit: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return (
+    <Input
+      type="number"
+      min={1}
+      max={MAX_SENTRY_LIMIT}
+      className={cn("h-7 w-20", mono)}
+      value={draft ?? value}
+      onChange={(e) => {
+        const limit = Number(e.target.value);
+        setDraft(e.target.value);
+        if (Number.isInteger(limit) && limit >= 1 && limit <= MAX_SENTRY_LIMIT) onChange(limit);
+      }}
+      onBlur={() => setDraft(null)}
+    />
   );
 }
 
