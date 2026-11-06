@@ -10,11 +10,11 @@ Besides webhooks and Slack, the service polls for the open PRs and issues that i
 | --- | --- | --- |
 | **GitHub** | The `gh` CLI, logged in (private repos included) | PRs where your review is requested, PRs and issues assigned to you, PRs and issues that mention you, PRs you authored. One GraphQL search per reason |
 | **Linear** | `LINEAR_API_KEY` in `.env` (personal API key) | Issues assigned to or created by you that are open or were done in the last 7 days, plus issues whose description or comments mention you (from your notifications). Canceled and duplicate issues are left out |
-| **Sentry** | `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` in `.env`; `SENTRY_URL` for self-hosted or a region such as `https://de.sentry.io` | Unresolved issues seen in the last 14 days that pass the [filters](#sentry-filters), newest first, up to 100. The token needs `event:read`, `org:read` and `project:read` |
+| **Sentry** | `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` in `.env`; `SENTRY_URL` for self-hosted or a region such as `https://de.sentry.io` | Unresolved issues seen in the last 14 days that pass the [filters](#sentry-filters), newest first, up to the limit (100 by default). The token needs `event:read`, `org:read` and `project:read` |
 
 Without a key, Linear and Sentry are off. **Settings → Polling** turns each source on or off and sets its interval in minutes; the counts in the inbox bar poll on click.
 
-Each item carries its `reasons` (`review_requested`, `assigned`, `mentioned`, `authored`, `watching`), labels, state (`open`/`draft`, or the Linear state name and type), Linear team and priority, and for PRs the head branch and commit. A Sentry issue is `watching`, plus `assigned` when it is assigned to the token's user; its label is its level (`error`, `fatal`, ...), its state the substatus (`new`, `escalating`, `regressed`, `ongoing`), its team the Sentry project slug, and `{{issue_body}}` holds the exception, culprit and event counts. The inbox shows the latest run on each item from any trigger.
+Each item carries its `reasons` (`review_requested`, `assigned`, `mentioned`, `authored`, `watching`), labels, state (`open`/`draft`, or the Linear state name and type), Linear team and priority, and for PRs the head branch and commit. A Sentry issue is `watching`, plus `assigned` when it is assigned to the token's user; its label is its level (`error`, `fatal`, ...), its state the substatus (`new`, `escalating`, `regressed`, `ongoing`), its team the Sentry project slug, its tags the issue's tags, and `{{issue_body}}` holds the exception, culprit and event counts. The inbox shows the latest run on each item from any trigger.
 
 Items are stored in SQLite, so the inbox is full the moment the service starts and every poll is a diff:
 
@@ -32,6 +32,8 @@ The same data is at `GET /api/inbox` (`?gone=1` appends departed items). `POST /
 - **Environments**: any of the listed.
 - **Tags**: Sentry search terms, typically `key:value` such as `service:checkout`. Values of one key match any of them, different keys must all match: `service:checkout`, `service:billing` and `region:us` search `service:[checkout,billing] region:us`. Any other search term works too (`level:fatal`, `!release:beta`, free text).
 
+**Limit** caps how many of the newest issues the inbox keeps: 100 by default, up to 1000. The Sentry API returns 100 issues a page, so a higher limit pages through more of it on every poll. Lowering the limit drops the older issues at the next poll.
+
 The fields suggest the instance's projects, their environments and the top values of tags with few values. The search the next poll sends is shown under the fields, and saving polls Sentry right away, so issues outside the new filters leave the inbox at once.
 
 ## Dispatch
@@ -42,7 +44,7 @@ The fields suggest the instance's projects, their environments and the top value
 2. Pick the T3 project (auto by git remote, or explicit; Linear and Sentry issues have no repository, so pick one), workspace, model and how many threads to run at a time.
 3. Dispatch. One thread starts per item.
 
-The message is a template the server renders per item with the same variables webhook deliveries get (`pr_url`, `issue_url`, ...) plus `labels`, `reasons`, `state`, `state_type`, `team`, `priority`, `issue_identifier`, `branch` and `review_decision`. Linear issues add `issue_parent` (the parent's identifier) and `issue_children` (sub-issue identifiers, comma separated).
+The message is a template the server renders per item with the same variables webhook deliveries get (`pr_url`, `issue_url`, ...) plus `labels`, `reasons`, `state`, `state_type`, `team`, `priority`, `issue_identifier`, `branch` and `review_decision`. Linear issues add `issue_parent` (the parent's identifier) and `issue_children` (sub-issue identifiers, comma separated). Sentry issues add `tags` (`key:value`, one per line).
 
 Presets are edited in **Settings → Dispatch presets** (`/api/prompts`, seeded with "Review PR", "Implement issue" and "Address review feedback"): one row per preset, click to open it, rename it or save its body as a new version ([Prompt versions](rules.md#prompt-versions)).
 
@@ -65,6 +67,7 @@ The rule's **Filter** decides which items it fires on, and **Re-run on push** (P
 | `team:ENG` | Linear team or Sentry project (within what the Sentry filters let in) |
 | `reason:assigned` | Why the item is in your inbox: `review_requested`, `assigned`, `mentioned`, `authored`, `watching` |
 | `repo:acme/widgets` | The repository |
+| `tag:service:checkout` | Sentry only: the issue carries the tag with that value. Tags with more than 10 values on the issue, such as `url`, are left out |
 | `has:parent`, `has:sub-issues` | Linear only: the issue is a sub-issue, or has sub-issues |
 | `label:type:bug` | A label that looks like a key. Unknown prefixes such as `priority:high` are labels already |
 
@@ -84,6 +87,7 @@ Labels come from the source itself: after a poll, labels older than an hour are 
 - Review every PR where my review is requested in `acme/widgets`: **Inbox: GitHub PR**, `repo:acme/widgets and reason:review_requested`.
 - Implement Linear leaf issues in Todo assigned to me with label ready for dev: **Inbox: Linear issue**, `team:ENG and reason:assigned and state:Todo and ready for dev and !has:sub-issues`, with the project set.
 - Investigate escalating fatal errors in checkout: **Inbox: Sentry issue**, `team:checkout-api and state:escalating and fatal`, with the project set.
+- One rule per service in a shared Sentry project: **Inbox: Sentry issue**, `tag:service:checkout`, with that service's T3 project set.
 
 ### Previewing and firing
 

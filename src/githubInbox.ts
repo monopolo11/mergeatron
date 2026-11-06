@@ -141,6 +141,7 @@ export function parseSearchNodes(nodes: unknown[], reason: InboxReason): PolledI
         team: null,
         parent: null,
         children: [],
+        tags: [],
         priority: null,
         branch: full.headRefName ?? null,
         headSha: full.headRefOid ?? null,

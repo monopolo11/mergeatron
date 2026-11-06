@@ -162,12 +162,14 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
     syncedLabels.map((label) => label.name),
   );
   const stateOptions = countOptions(scoped.flatMap((item) => [item.state, ...(item.stateType ? [item.stateType] : [])]));
+  const tagOptions = countOptions(scoped.flatMap((item) => item.tags));
   // The keys the filter offers for these events, each with its suggested values.
   const filterOptions: FilterOptions = {
     ...((isInbox || isWebhook) && { label: labelOptions, state: stateOptions }),
     ...((inboxLinear || inboxSentry) && { team: teamOptions }),
     ...(isInbox && { reason: REASON_OPTIONS }),
     ...((isWebhook || isSlack || inboxGitHub) && { repo: repoOptions }),
+    ...(inboxSentry && { tag: tagOptions }),
     ...(inboxLinear && { has: HAS_VALUES.map((value) => ({ value })) }),
   };
 
@@ -278,7 +280,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 <Field
                   label="Filter"
                   className="@2xl:col-span-2"
-                  hint={`Labels, ${Object.keys(filterOptions).filter((key) => key !== "label").map((key) => `${key}:`).join(", ")} joined with and, or, ! and parentheses. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level." : ""}`}
+                  hint={`Labels, ${Object.keys(filterOptions).filter((key) => key !== "label").map((key) => `${key}:`).join(", ")} joined with and, or, ! and parentheses. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level; tag: takes a tag and its value, like tag:service:checkout." : ""}`}
                 >
                   <FilterInput value={field.state.value} onChange={field.handleChange} options={filterOptions} placeholder={inboxLinear ? "reason:assigned and state:Todo and !has:parent" : "(bug or p0) and !wontfix"} />
                 </Field>

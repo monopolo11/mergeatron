@@ -37,6 +37,15 @@ describe("RuleInput", () => {
 });
 
 describe("SettingsInput", () => {
+  test("the Sentry limit defaults to 100 and stays within 1 and 1000", () => {
+    const decode = Schema.decodeUnknownResult(SettingsInput);
+    const { sentryLimit: _, ...saved } = DEFAULT_SETTINGS;
+    expect(Result.isSuccess(decode(saved)) && Result.getOrThrow(decode(saved)).sentryLimit).toBe(100);
+    expect(Result.isSuccess(decode({ ...DEFAULT_SETTINGS, sentryLimit: 1000 }))).toBe(true);
+    expect(Result.isFailure(decode({ ...DEFAULT_SETTINGS, sentryLimit: 0 }))).toBe(true);
+    expect(Result.isFailure(decode({ ...DEFAULT_SETTINGS, sentryLimit: 1001 }))).toBe(true);
+  });
+
   test("clears emptied names and strips the @ from the GitHub login and Slack user", () => {
     const settings = Schema.decodeUnknownResult(SettingsInput)({ ...DEFAULT_SETTINGS, githubLogin: " @Bernardo ", reviewChannel: "  ", slackUserId: "<@U0BERNARDO|bernardo>" });
     expect(Result.isSuccess(settings) && settings.success).toMatchObject({ githubLogin: "Bernardo", reviewChannel: null, slackUserId: "U0BERNARDO" });

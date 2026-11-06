@@ -10,7 +10,9 @@ import {
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
   EMPTY_FILTERS,
+  DEFAULT_SENTRY_LIMIT,
   EMPTY_SENTRY_FILTERS,
+  MAX_SENTRY_LIMIT,
   PROMPT_VERSION_OWNERS,
   RUN_SOURCES,
   RUN_STATUSES,
@@ -139,6 +141,7 @@ export const SettingsInput = Schema.Struct({
     sentry: PollSourceSchema.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING.sentry))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_POLLING))),
   sentryFilters: Schema.Struct({ projects: names, environments: names, tags: names }).pipe(Schema.withDecodingDefault(Effect.succeed(EMPTY_SENTRY_FILTERS))),
+  sentryLimit: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(MAX_SENTRY_LIMIT)).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SENTRY_LIMIT))),
   updateChannel: Schema.Literals(UPDATE_CHANNELS).pipe(Schema.withDecodingDefault(Effect.succeed("stable" as const))),
 });
 export type SettingsInput = typeof SettingsInput.Type;
@@ -283,6 +286,7 @@ export const DEFAULT_SETTINGS: Settings = {
   secondPassMessage: DEFAULT_SECOND_PASS_MESSAGE,
   polling: DEFAULT_POLLING,
   sentryFilters: EMPTY_SENTRY_FILTERS,
+  sentryLimit: DEFAULT_SENTRY_LIMIT,
   updateChannel: "stable",
 };
 

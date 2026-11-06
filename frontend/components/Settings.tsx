@@ -48,6 +48,7 @@ import {
   TEMPLATE_VARS,
   UPDATE_CHANNELS,
   WEBHOOK_SECRET_HEADER,
+  MAX_SENTRY_LIMIT,
   sentryQuery,
   type InboxSource,
 } from "../../src/shared.ts";
@@ -522,6 +523,7 @@ function Polling({ form }: { form: AutosaveForm<Settings> }) {
  */
 function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> }) {
   const filters = useStore(form.store, (s) => s.values.sentryFilters);
+  const limit = useStore(form.store, (s) => s.values.sentryLimit);
   const config = shell.status?.sentry ?? null;
   const options = useQuery({ queryKey: ["sentry-options"], queryFn: () => api<SentryOptions>("/api/sentry/options"), enabled: config !== null, staleTime: 5 * 60_000, retry: false });
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: config !== null });
@@ -576,7 +578,14 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
           </Field>
         )}
       </form.Field>
-      <Field label="Search" hint="Unresolved issues seen in the last 14 days, newest first, up to 100.">
+      <form.Field name="sentryLimit">
+        {(field) => (
+          <Field label="Limit" hint={`How many of the newest issues the inbox keeps, up to ${MAX_SENTRY_LIMIT}. Above 100 every poll pages through more of Sentry.`}>
+            <LimitInput value={field.state.value} onChange={field.handleChange} />
+          </Field>
+        )}
+      </form.Field>
+      <Field label="Search" hint={`Unresolved issues seen in the last 14 days, newest first, up to ${limit}.`}>
         <code className={cn("break-words", mono)}>
           {sentryQuery(filters.tags)}
           {scope.length > 0 && <span className="text-muted-foreground"> · {scope.join(" · ")}</span>}
@@ -584,6 +593,33 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
       </Field>
       {options.error && <p className="text-xs text-destructive">Suggestions unavailable: {options.error.message}</p>}
     </div>
+  );
+}
+
+/**
+ * Edits the limit as text and saves on blur or Enter, never mid-typing: the "2"
+ * of 250 would poll with limit 2 and mark the rest of the inbox gone. A draft out
+ * of range shows as invalid and gives way to the saved limit on blur.
+ */
+function LimitInput({ value, onChange }: { value: number; onChange: (limit: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const limit = Number(draft);
+  const valid = Number.isInteger(limit) && limit >= 1 && limit <= MAX_SENTRY_LIMIT;
+  return (
+    <Input
+      type="number"
+      min={1}
+      max={MAX_SENTRY_LIMIT}
+      className={cn("h-7 w-20", mono)}
+      aria-invalid={draft !== null && !valid}
+      value={draft ?? value}
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+      onBlur={() => {
+        if (valid && limit !== value) onChange(limit);
+        setDraft(null);
+      }}
+    />
   );
 }
 

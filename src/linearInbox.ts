@@ -175,6 +175,7 @@ export function linearItem(issue: LinearIssue, reasons: InboxReason[]): PolledIt
     team: issue.team.key,
     parent: issue.parent?.identifier ?? null,
     children: issue.children.nodes.map((child) => child.identifier),
+    tags: [],
     priority: issue.priorityLabel,
     branch: issue.branchName,
     headSha: null,

@@ -78,7 +78,7 @@ const ruleFields = z.object({
         .string()
         .optional()
         .describe(
-          'Filter expression such as \'reason:assigned and state:"To Do" and (bug or p0) and !has:parent\'. Bare words are labels (names from list_labels); key:value tests state (name or type), team (Linear team key or Sentry project), reason (review_requested, assigned, mentioned, authored, watching), repo (owner/name) or has (parent, sub-issues: Linear issue relations). and, or (or a comma), parentheses, ! or not: to negate; quote a value holding an operator, with \\\" for a quote inside quotes. Case-insensitive; empty matches anything. A done Linear issue only matches a filter with a state: term naming its state or type',
+          'Filter expression such as \'reason:assigned and state:"To Do" and (bug or p0) and !has:parent\'. Bare words are labels (names from list_labels); key:value tests state (name or type), team (Linear team key or Sentry project), reason (review_requested, assigned, mentioned, authored, watching), repo (owner/name), tag (a Sentry tag with its value: tag:service:checkout) or has (parent, sub-issues: Linear issue relations). and, or (or a comma), parentheses, ! or not: to negate; quote a value holding an operator, with \\\" for a quote inside quotes. Case-insensitive; empty matches anything. A done Linear issue only matches a filter with a state: term naming its state or type',
         ),
       rerunOnPush: z.boolean().optional().describe("Inbox PR rules: run again when the PR head moves. Default true"),
     })

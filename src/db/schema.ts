@@ -6,6 +6,7 @@ import {
   DEFAULT_REVIEW_REQUEST_MESSAGE,
   DEFAULT_SECOND_PASS_MESSAGE,
   EMPTY_FILTERS,
+  DEFAULT_SENTRY_LIMIT,
   EMPTY_SENTRY_FILTERS,
   INBOX_KINDS,
   INBOX_SOURCES,
@@ -136,6 +137,8 @@ export const settings = sqliteTable("settings", {
   polling: text({ mode: "json" }).$type<PollingSettings>().notNull().default(DEFAULT_POLLING),
   /** Which Sentry issues reach the inbox: projects, environments, tags. */
   sentryFilters: text("sentry_filters", { mode: "json" }).$type<SentryFilters>().notNull().default(EMPTY_SENTRY_FILTERS),
+  /** How many of the newest Sentry issues a poll keeps. */
+  sentryLimit: integer("sentry_limit").notNull().default(DEFAULT_SENTRY_LIMIT),
   /** Which GitHub Releases the update check offers (see update.ts). */
   updateChannel: text("update_channel", { enum: UPDATE_CHANNELS }).notNull().default("stable"),
 });
@@ -191,6 +194,8 @@ export const inboxItems = sqliteTable("inbox_items", {
   parent: text(),
   /** Linear: identifiers of the sub-issues, up to 50. */
   children: text({ mode: "json" }).$type<string[]>().notNull().default([]),
+  /** Sentry: the issue's tags as `key:value`, one entry per common value. */
+  tags: text({ mode: "json" }).$type<string[]>().notNull().default([]),
   /** Linear priority label (`Urgent`, `High`, ...), or Sentry priority (`high`, ...). */
   priority: text(),
   /** PR head branch, or Linear's suggested branch name. */

@@ -57,6 +57,7 @@ export function querySubject(ctx: WebhookContext): QuerySubject {
     team: values(ctx.team),
     reason: values(ctx.reasons),
     repo: values(ctx.repo),
+    tag: (ctx.tags ?? "").split("\n"),
     has: [...(ctx.issue_parent ? ["parent"] : []), ...(ctx.issue_children ? ["sub-issues"] : [])],
   };
 }
@@ -74,6 +75,8 @@ function has(key: QueryKey, value: string, ctx: WebhookContext): string {
       return `reasons ${ctx.reasons || "(none)"}`;
     case "repo":
       return `repo ${ctx.repo || "(none)"}`;
+    case "tag":
+      return `tags ${ctx.tags?.replaceAll("\n", ", ") || "(none)"}`;
     case "has":
       if (value.toLowerCase() === "parent") return ctx.issue_parent ? `parent ${ctx.issue_parent}` : "no parent issue";
       return ctx.issue_children ? `sub-issues ${ctx.issue_children}` : "no sub-issues";

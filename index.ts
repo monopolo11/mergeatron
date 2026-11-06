@@ -197,10 +197,11 @@ const api = HttpRouter.use((router) =>
       route(
         Effect.gen(function* () {
           const settings = yield* body(SettingsInput);
-          const filtersChanged = !Bun.deepEquals((yield* store.getSettings()).sentryFilters, settings.sentryFilters);
+          const before = yield* store.getSettings();
+          const filtersChanged = before.sentryLimit !== settings.sentryLimit || !Bun.deepEquals(before.sentryFilters, settings.sentryFilters);
           yield* store.saveSettings(settings);
           yield* poller.reschedule;
-          // New Sentry filters change what belongs in the inbox: poll now rather than at the next tick.
+          // New Sentry filters or a new limit change what belongs in the inbox: poll now rather than at the next tick.
           if (filtersChanged) yield* background.fork(poller.pollNow("sentry"));
           return json(settings);
         }),

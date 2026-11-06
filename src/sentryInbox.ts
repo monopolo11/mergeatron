@@ -5,17 +5,19 @@ import type { InboxLabel, PolledItem } from "./inbox.ts";
 import { InboxSourceError, type InboxSourceClient } from "./inboxSource.ts";
 import { logger } from "./log.ts";
 import { memoSuccess } from "./memo.ts";
-import { sentryQuery, type InboxReason, type SentryFilters } from "./shared.ts";
+import type { Settings } from "./rules.ts";
+import { sentryQuery, type InboxReason } from "./shared.ts";
 import { Store } from "./store.ts";
 
 const log = logger("sentry");
 
 /**
- * Polls Sentry, sentry.io or a self-hosted instance, for unresolved issues
- * seen in the last 14 days that pass the Sentry filters in Settings:
- * projects, environments and tags. Every issue is `watching`; those assigned
- * to the token's user are `assigned` too. Uses an auth token
- * (`SENTRY_AUTH_TOKEN`) with event:read, org:read and project:read.
+ * Polls Sentry, sentry.io or a self-hosted instance, for the newest unresolved
+ * issues seen in the last 14 days that pass the Sentry filters in Settings:
+ * projects, environments and tags, up to the limit set there. Every issue is
+ * `watching`; those assigned to the token's user are `assigned` too, and each
+ * carries its tags for rule filters. Uses an auth token (`SENTRY_AUTH_TOKEN`)
+ * with event:read, org:read and project:read.
  */
 
 /** The instance the inbox polls, as Settings shows it. */
@@ -46,6 +48,8 @@ export type SentryIssue = {
   assignedTo: { type: string; id: string } | null;
 };
 
+/** One entry of an issue's tags; `topValues` is most common first. */
+type SentryIssueTag = { key: string; topValues: { value: string | null }[] };
 type SentryProject = { id: string; slug: string; environments?: string[] };
 type SentryUser = { id: string; name?: string; email?: string };
 
@@ -69,13 +73,17 @@ const LEVELS = ["fatal", "error", "warning", "info", "debug"];
 const CACHE = Duration.hours(1);
 /** Stops paging a runaway project list; 20 pages is 2000 projects. */
 const MAX_PROJECT_PAGES = 20;
+/** The most issues the issues list returns at once. */
+const ISSUES_PAGE = 100;
+/** Tags an issue carries have at most this many values: more means a poor filter (`url`, `user`), and they would only bloat every item. */
+const ISSUE_TAG_VALUES = 10;
 /** Tags suggested in Settings: up to this many keys with at most this many values each. */
 const TAG_KEYS = 25;
 const TAG_VALUES = 100;
 
 const failed = (message: string) => new InboxSourceError({ source: "sentry", message });
 
-export const makeSentryInbox = (instance: SentryInstance, filters: Effect.Effect<SentryFilters>, request: SentryRequest) =>
+export const makeSentryInbox = (instance: SentryInstance, settings: Effect.Effect<Pick<Settings, "sentryFilters" | "sentryLimit">>, request: SentryRequest) =>
   Effect.gen(function* () {
     const org = `organizations/${encodeURIComponent(instance.org)}`;
 
@@ -131,23 +139,65 @@ export const makeSentryInbox = (instance: SentryInstance, filters: Effect.Effect
       CACHE,
     );
 
+    /**
+     * The newest matching issues, paging until `limit` or the last page. An issue
+     * that arrives between pages shifts the list, so a later page can repeat one;
+     * keying by id stops the repeat from taking a slot.
+     */
+    const loadIssues = (query: Record<string, string | string[]>, limit: number) =>
+      Effect.gen(function* () {
+        const issues = new Map<string, SentryIssue>();
+        let cursor: string | null = null;
+        while (issues.size < limit) {
+          const page = { ...query, limit: String(Math.min(limit - issues.size, ISSUES_PAGE)) };
+          const { data, next }: { data: SentryIssue[]; next: string | null } = yield* request<SentryIssue[]>(`${org}/issues/`, cursor ? { ...page, cursor } : page);
+          for (const issue of data) if (!issues.has(issue.id)) issues.set(issue.id, issue);
+          if (!next) break;
+          cursor = next;
+        }
+        return [...issues.values()];
+      });
+
+    // Tags only change with a new event, so an issue whose lastSeen stands costs no request.
+    const knownTags = new Map<string, { lastSeen: string; tags: string[] }>();
+
+    /**
+     * `key:value` for the issue's tags, which the issues list leaves out. A
+     * failure fails the poll: without tags, a rule's `!tag:` term would fire on
+     * the issue. What was read stays in `knownTags`, so the next poll resumes.
+     */
+    const issueTags = (issue: SentryIssue) =>
+      Effect.gen(function* () {
+        const known = knownTags.get(issue.id);
+        if (known?.lastSeen === issue.lastSeen) return known.tags;
+        const { data } = yield* request<SentryIssueTag[]>(`${org}/issues/${encodeURIComponent(issue.id)}/tags/`, { limit: String(ISSUE_TAG_VALUES + 1) });
+        const tags = data.filter((tag) => tag.topValues.length <= ISSUE_TAG_VALUES).flatMap(({ key, topValues }) => topValues.flatMap(({ value }) => (value ? [`${key}:${value}`] : [])));
+        knownTags.set(issue.id, { lastSeen: issue.lastSeen, tags });
+        return tags;
+      });
+
     const shape: SentryInboxShape = {
       instance,
       fetch: () =>
         Effect.gen(function* () {
-          const current = yield* filters;
+          const { sentryFilters: current, sentryLimit } = yield* settings;
           const [user, ids] = yield* Effect.all([me, projectIds(current.projects)], { concurrency: "unbounded" });
-          const { data } = yield* request<SentryIssue[]>(`${org}/issues/`, {
-            query: sentryQuery(current.tags),
-            // -1 is every project the token can see; without it Sentry picks the user's own projects.
-            project: ids.length > 0 ? ids : ["-1"],
-            environment: current.environments,
-            statsPeriod: PERIOD,
-            sort: "date",
-            limit: "100",
-            // No `collapse=stats`: it also drops firstSeen, lastSeen, count and userCount, which every item needs.
-          });
-          return { login: user?.name || user?.email || null, items: data.map((issue) => sentryItem(issue, user?.id ?? null)) };
+          const issues = yield* loadIssues(
+            {
+              query: sentryQuery(current.tags),
+              // -1 is every project the token can see; without it Sentry picks the user's own projects.
+              project: ids.length > 0 ? ids : ["-1"],
+              environment: current.environments,
+              statsPeriod: PERIOD,
+              sort: "date",
+              // No `collapse=stats`: it also drops firstSeen, lastSeen, count and userCount, which every item needs.
+            },
+            sentryLimit,
+          );
+          const tags = yield* Effect.forEach(issues, issueTags, { concurrency: 5 });
+          const polled = new Set(issues.map((issue) => issue.id));
+          for (const id of knownTags.keys()) if (!polled.has(id)) knownTags.delete(id);
+          return { login: user?.name || user?.email || null, items: issues.map((issue, index) => sentryItem(issue, user?.id ?? null, tags[index]!)) };
         }).pipe(Effect.withSpan("sentry.inbox.fetch")),
 
       /** Sentry has no labels; issues carry their level instead. */
@@ -165,7 +215,7 @@ export const makeSentryInbox = (instance: SentryInstance, filters: Effect.Effect
     return shape;
   });
 
-export function sentryItem(issue: SentryIssue, me: string | null): PolledItem {
+export function sentryItem(issue: SentryIssue, me: string | null, tags: string[]): PolledItem {
   const assigned = me !== null && issue.assignedTo?.type === "user" && String(issue.assignedTo.id) === me;
   const reasons: InboxReason[] = assigned ? ["assigned", "watching"] : ["watching"];
   return {
@@ -181,6 +231,7 @@ export function sentryItem(issue: SentryIssue, me: string | null): PolledItem {
     state: issue.substatus ?? issue.status,
     stateType: issue.status,
     labels: [issue.level],
+    tags,
     reasons,
     team: issue.project.slug,
     parent: null,
@@ -235,7 +286,7 @@ export const sentryTransport = (config: SentryConfig): Effect.Effect<SentryReque
 /**
  * The Sentry inbox when `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` are set: the
  * poller polls it, Settings asks it for filter suggestions. It reads the
- * filters from the store on every poll.
+ * filters and the limit from the store on every poll.
  */
 export class Sentry extends Context.Service<Sentry, Option.Option<SentryInboxShape>>()("Sentry") {
   static readonly layer = Layer.effect(
@@ -245,8 +296,7 @@ export class Sentry extends Context.Service<Sentry, Option.Option<SentryInboxSha
       if (Option.isNone(sentry)) return Option.none();
       const store = yield* Store;
       const request = yield* sentryTransport(sentry.value);
-      const filters = Effect.map(store.getSettings(), (settings) => settings.sentryFilters);
-      return Option.some(yield* makeSentryInbox({ url: sentry.value.url, org: sentry.value.org }, filters, request));
+      return Option.some(yield* makeSentryInbox({ url: sentry.value.url, org: sentry.value.org }, store.getSettings(), request));
     }),
   );
 }
