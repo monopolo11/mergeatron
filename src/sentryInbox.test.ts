@@ -137,21 +137,19 @@ describe("SentryInbox.fetch", () => {
 
   test("an issue repeated across pages does not take a slot", async () => {
     const one = (n: number) => issue({ id: String(n), shortId: `CHECKOUT-${n}` });
-    const pages = [
-      [one(1), one(2)],
-      [one(2), one(3)],
-    ];
+    const pages = [Array.from({ length: 100 }, (_, index) => one(index + 1)), [one(100)], [one(101)]];
     const asked: (string | string[] | undefined)[] = [];
     const request: SentryRequest = (path, query = {}) =>
       Effect.suspend(() => {
         if (path === "") return Effect.succeed({ data: { user: null } as never, next: null });
         if (TAGS.test(path)) return Effect.succeed({ data: [] as never, next: null });
         asked.push(query.limit);
-        return Effect.succeed({ data: pages[Number(query.cursor ?? 0)] as never, next: query.cursor ? null : "1" });
+        const at = Number(query.cursor ?? 0);
+        return Effect.succeed({ data: pages[at] as never, next: at + 1 < pages.length ? String(at + 1) : null });
       });
-    const { items } = await Effect.runPromise(inboxWith(EMPTY_SENTRY_FILTERS, request, 3).pipe(Effect.flatMap((inbox) => inbox.fetch())));
-    expect(items.map(({ key }) => key)).toEqual(["sentry:CHECKOUT-1", "sentry:CHECKOUT-2", "sentry:CHECKOUT-3"]);
-    expect(asked).toEqual(["3", "1"]);
+    const { items } = await Effect.runPromise(inboxWith(EMPTY_SENTRY_FILTERS, request, 101).pipe(Effect.flatMap((inbox) => inbox.fetch())));
+    expect(items.map(({ key }) => key)).toEqual(Array.from({ length: 101 }, (_, index) => `sentry:CHECKOUT-${index + 1}`));
+    expect(asked).toEqual(["100", "1", "1"]);
   });
 
   test("items carry tags with few values, and a tag is only read again after a new event", async () => {

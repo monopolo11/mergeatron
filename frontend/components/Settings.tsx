@@ -596,22 +596,29 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
   );
 }
 
-/** Keeps what is typed as text so the field can be cleared, saves only a limit in range, and shows the saved one again on blur. */
+/**
+ * Edits the limit as text and saves on blur or Enter, never mid-typing: the "2"
+ * of 250 would poll with limit 2 and mark the rest of the inbox gone. A draft out
+ * of range shows as invalid and gives way to the saved limit on blur.
+ */
 function LimitInput({ value, onChange }: { value: number; onChange: (limit: number) => void }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const limit = Number(draft);
+  const valid = Number.isInteger(limit) && limit >= 1 && limit <= MAX_SENTRY_LIMIT;
   return (
     <Input
       type="number"
       min={1}
       max={MAX_SENTRY_LIMIT}
       className={cn("h-7 w-20", mono)}
+      aria-invalid={draft !== null && !valid}
       value={draft ?? value}
-      onChange={(e) => {
-        const limit = Number(e.target.value);
-        setDraft(e.target.value);
-        if (Number.isInteger(limit) && limit >= 1 && limit <= MAX_SENTRY_LIMIT) onChange(limit);
+      onChange={(e) => setDraft(e.target.value)}
+      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+      onBlur={() => {
+        if (valid && limit !== value) onChange(limit);
+        setDraft(null);
       }}
-      onBlur={() => setDraft(null)}
     />
   );
 }
