@@ -55,6 +55,8 @@ export function itemContext(item: PolledItem): WebhookContext {
     priority: item.priority,
     branch: item.branch,
     review_decision: item.reviewDecision,
+    // One per line: a tag's value can hold a comma.
+    tags: item.tags.join("\n") || null,
   };
   const specific =
     item.kind === "pull_request"

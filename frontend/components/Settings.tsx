@@ -48,6 +48,8 @@ import {
   TEMPLATE_VARS,
   UPDATE_CHANNELS,
   WEBHOOK_SECRET_HEADER,
+  DEFAULT_SENTRY_LIMIT,
+  MAX_SENTRY_LIMIT,
   sentryQuery,
   type InboxSource,
 } from "../../src/shared.ts";
@@ -522,6 +524,7 @@ function Polling({ form }: { form: AutosaveForm<Settings> }) {
  */
 function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> }) {
   const filters = useStore(form.store, (s) => s.values.sentryFilters);
+  const limit = useStore(form.store, (s) => s.values.sentryLimit);
   const config = shell.status?.sentry ?? null;
   const options = useQuery({ queryKey: ["sentry-options"], queryFn: () => api<SentryOptions>("/api/sentry/options"), enabled: config !== null, staleTime: 5 * 60_000, retry: false });
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: config !== null });
@@ -576,7 +579,21 @@ function Sentry({ shell, form }: { shell: Shell; form: AutosaveForm<Settings> })
           </Field>
         )}
       </form.Field>
-      <Field label="Search" hint="Unresolved issues seen in the last 14 days, newest first, up to 100.">
+      <form.Field name="sentryLimit">
+        {(field) => (
+          <Field label="Limit" hint={`How many of the newest issues the inbox keeps, up to ${MAX_SENTRY_LIMIT}. Above 100 every poll pages through more of Sentry.`}>
+            <Input
+              type="number"
+              min={1}
+              max={MAX_SENTRY_LIMIT}
+              className={cn("h-7 w-20", mono)}
+              value={field.state.value}
+              onChange={(e) => field.handleChange(Math.min(MAX_SENTRY_LIMIT, Math.max(1, Math.floor(Number(e.target.value) || DEFAULT_SENTRY_LIMIT))))}
+            />
+          </Field>
+        )}
+      </form.Field>
+      <Field label="Search" hint={`Unresolved issues seen in the last 14 days, newest first, up to ${limit}.`}>
         <code className={cn("break-words", mono)}>
           {sentryQuery(filters.tags)}
           {scope.length > 0 && <span className="text-muted-foreground"> · {scope.join(" · ")}</span>}

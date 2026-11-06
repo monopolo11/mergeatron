@@ -109,7 +109,7 @@ export function inboxSource(event: string): InboxSource | null {
 /**
  * Filters a rule applies on top of its event. `query` is one expression over
  * the delivery's template variables (labels, `state`, `team`, `reason`,
- * `repo`, `has:parent`, `has:sub-issues`; see `filterQuery.ts`), so it works
+ * `repo`, `tag`, `has:parent`, `has:sub-issues`; see `filterQuery.ts`), so it works
  * for webhook deliveries that carry those variables too. Empty matches
  * anything.
  */
@@ -143,6 +143,10 @@ export const DEFAULT_POLLING: PollingSettings = {
  */
 export type SentryFilters = { projects: string[]; environments: string[]; tags: string[] };
 export const EMPTY_SENTRY_FILTERS: SentryFilters = { projects: [], environments: [], tags: [] };
+
+/** How many of the newest Sentry issues the inbox keeps (Settings → Sentry), by default and at most. */
+export const DEFAULT_SENTRY_LIMIT = 100;
+export const MAX_SENTRY_LIMIT = 1000;
 
 /**
  * The issue search for the tag filters, as Sentry's own search would read
@@ -297,6 +301,7 @@ export const TEMPLATE_VARS = [
   "issue_identifier",
   "issue_parent",
   "issue_children",
+  "tags",
   "branch",
   "review_decision",
   "slack_channel",

@@ -90,7 +90,7 @@ export function Inbox() {
       (!search.kind || search.kind.includes(item.kind)) &&
       (!search.reason || item.reasons.some((reason) => search.reason!.includes(reason))) &&
       (!scope.repo || (item.repo !== null && scope.repo.includes(item.repo))) &&
-      (!needle || [item.repo, item.identifier, item.title, item.author, item.state, item.team, ...item.labels].some((field) => field?.toLowerCase().includes(needle))),
+      (!needle || [item.repo, item.identifier, item.title, item.author, item.state, item.team, ...item.labels, ...item.tags].some((field) => field?.toLowerCase().includes(needle))),
   );
   // An item sits under its first reason in display order and notes the others; departed items close the list.
   const groups = [

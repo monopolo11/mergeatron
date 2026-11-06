@@ -8,6 +8,7 @@ import { INBOX_REASONS } from "./shared.ts";
  *
  * - Bare words are labels. `key:value` tests another field; see QUERY_KEYS.
  *   Unknown prefixes stay labels (`priority:high`); `label:` forces one.
+ *   A `tag:` value is a Sentry tag with its value: `tag:service:checkout`.
  * - `and`, `or` (or a comma) and parentheses; `and` binds tighter than `or`.
  * - `!term` or `not:term` negates a term; both also negate a group.
  * - Consecutive words form one value (`Ready For Dev`, `state:To Do`); quote
@@ -17,7 +18,7 @@ import { INBOX_REASONS } from "./shared.ts";
  */
 
 /** What a term tests: `label` for bare words, the rest as `key:value`. */
-export const QUERY_KEYS = ["label", "state", "team", "reason", "repo", "has"] as const;
+export const QUERY_KEYS = ["label", "state", "team", "reason", "repo", "tag", "has"] as const;
 export type QueryKey = (typeof QUERY_KEYS)[number];
 
 /** The values `has:` takes: whether the issue is a sub-issue, and whether it has sub-issues. */

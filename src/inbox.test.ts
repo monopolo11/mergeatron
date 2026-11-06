@@ -21,6 +21,7 @@ export const pr: PolledItem = {
   team: null,
   parent: null,
   children: [],
+  tags: [],
   priority: null,
   branch: "feat/widgets",
   headSha: "abc123def456789",
@@ -136,6 +137,16 @@ describe("filterMismatch", () => {
     expect(filterMismatch("state:Todo or state:done", ctx)).toBeNull();
     expect(filterMismatch("state:done", ctx)).toBeNull();
     expect(filterMismatch("state:completed", ctx)).toBeNull();
+  });
+
+  test("tag: tests a Sentry tag with its value, also one holding a comma", () => {
+    const ctx = itemContext({ ...linear, tags: ["service:checkout", "route:a,b"] });
+    expect(ctx.tags).toBe("service:checkout\nroute:a,b");
+    expect(filterMismatch("tag:service:Checkout", ctx)).toBeNull();
+    expect(filterMismatch('tag:"route:a,b"', ctx)).toBeNull();
+    expect(filterMismatch("tag:service:billing", ctx)).toBe("tags service:checkout, route:a,b does not match tag:service:billing");
+    expect(filterMismatch("!tag:service:checkout", ctx)).toBe("tags service:checkout, route:a,b does not match !tag:service:checkout");
+    expect(filterMismatch("tag:service:checkout", itemContext(linear))).toBe("tags (none) does not match tag:service:checkout");
   });
 
   test("has:parent and has:sub-issues test whether an issue is a sub-issue and whether it has sub-issues", () => {
