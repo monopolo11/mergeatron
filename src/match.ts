@@ -59,10 +59,11 @@ export function querySubject(ctx: WebhookContext): QuerySubject {
     repo: values(ctx.repo),
     tag: (ctx.tags ?? "").split("\n"),
     has: [...(ctx.issue_parent ? ["parent"] : []), ...(ctx.issue_children ? ["sub-issues"] : [])],
+    any: Object.values(ctx).filter((value) => value !== undefined),
   };
 }
 
-/** What the delivery has for a key, for mismatch messages: `state Todo`, `no parent issue`. */
+/** What the delivery has for a key, for mismatch messages: `state Todo`, `no parent issue`, `issue_title has i9`. */
 function has(key: QueryKey, value: string, ctx: WebhookContext): string {
   switch (key) {
     case "label":
@@ -80,6 +81,10 @@ function has(key: QueryKey, value: string, ctx: WebhookContext): string {
     case "has":
       if (value.toLowerCase() === "parent") return ctx.issue_parent ? `parent ${ctx.issue_parent}` : "no parent issue";
       return ctx.issue_children ? `sub-issues ${ctx.issue_children}` : "no sub-issues";
+    case "any": {
+      const field = Object.entries(ctx).find(([, text]) => text?.toLowerCase().includes(value.toLowerCase()));
+      return field ? `${field[0]} has ${value}` : `no field has ${value}`;
+    }
   }
 }
 

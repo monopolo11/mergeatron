@@ -171,6 +171,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
     ...((isWebhook || isSlack || inboxGitHub) && { repo: repoOptions }),
     ...(inboxSentry && { tag: tagOptions }),
     ...(inboxLinear && { has: HAS_VALUES.map((value) => ({ value })) }),
+    any: [],
   };
 
   // What the rule as drafted would fire on, with the matcher's own reason for every miss.
@@ -280,7 +281,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 <Field
                   label="Filter"
                   className="@2xl:col-span-2"
-                  hint={`Labels, ${Object.keys(filterOptions).filter((key) => key !== "label").map((key) => `${key}:`).join(", ")} joined with and, or, ! and parentheses. Empty matches any.${inboxSentry ? " A Sentry issue's label is its level; tag: takes a tag and its value, like tag:service:checkout." : ""}`}
+                  hint={`Labels, ${Object.keys(filterOptions).filter((key) => key !== "label").map((key) => `${key}:`).join(", ")} joined with and, or, ! and parentheses. Empty matches any. any: is text in any field, like !any:i9.${inboxSentry ? " A Sentry issue's label is its level; tag: takes a tag and its value, like tag:service:checkout." : ""}`}
                 >
                   <FilterInput value={field.state.value} onChange={field.handleChange} options={filterOptions} placeholder={inboxLinear ? "reason:assigned and state:Todo and !has:parent" : "(bug or p0) and !wontfix"} />
                 </Field>

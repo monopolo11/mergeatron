@@ -144,7 +144,7 @@ function suggest(fragment: string, options: FilterOptions): Suggestion[] {
   }
   const query = fragment.trim().toLowerCase();
   const fields = Object.entries(options).flatMap(([name, offered]): Suggestion[] =>
-    name !== "label" && `${name}:`.startsWith(query) ? [{ group: "Fields", text: `${name}:`, hint: hintFor(offered), insert: `${name}:` }] : [],
+    name !== "label" && `${name}:`.startsWith(query) ? [{ group: "Fields", text: `${name}:`, hint: name === "any" ? "text in any field" : hintFor(offered), insert: `${name}:` }] : [],
   );
   const labels = (options.label ?? [])
     .filter((option) => option.value.toLowerCase().includes(query) && option.value.toLowerCase() !== query)

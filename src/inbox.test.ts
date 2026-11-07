@@ -118,6 +118,13 @@ describe("itemContext", () => {
 });
 
 describe("filterMismatch", () => {
+  test("any: searches every field and names the one that hit", () => {
+    const ctx = itemContext({ ...linear, title: "Fix the I9Form upload", body: "Blocks W4 too" });
+    expect(filterMismatch("any:i9form and any:w4", ctx)).toBeNull();
+    expect(filterMismatch("!any:i9", ctx)).toBe("issue_title has i9 does not match !any:i9");
+    expect(filterMismatch("any:w9", ctx)).toBe("no field has w9 does not match any:w9");
+  });
+
   test("terms test labels and the item's fields, case-insensitively; empty matches anything", () => {
     const ctx = itemContext(linear);
     expect(filterMismatch("", ctx)).toBeNull();

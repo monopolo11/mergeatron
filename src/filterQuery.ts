@@ -9,6 +9,7 @@ import { INBOX_REASONS } from "./shared.ts";
  * - Bare words are labels. `key:value` tests another field; see QUERY_KEYS.
  *   Unknown prefixes stay labels (`priority:high`); `label:` forces one.
  *   A `tag:` value is a Sentry tag with its value: `tag:service:checkout`.
+ *   `any:i9` holds when any field of the delivery contains the text.
  * - `and`, `or` (or a comma) and parentheses; `and` binds tighter than `or`.
  * - `!term` or `not:term` negates a term; both also negate a group.
  * - Consecutive words form one value (`Ready For Dev`, `state:To Do`); quote
@@ -18,7 +19,7 @@ import { INBOX_REASONS } from "./shared.ts";
  */
 
 /** What a term tests: `label` for bare words, the rest as `key:value`. */
-export const QUERY_KEYS = ["label", "state", "team", "reason", "repo", "tag", "has"] as const;
+export const QUERY_KEYS = ["label", "state", "team", "reason", "repo", "tag", "has", "any"] as const;
 export type QueryKey = (typeof QUERY_KEYS)[number];
 
 /** The values `has:` takes: whether the issue is a sub-issue, and whether it has sub-issues. */
@@ -31,7 +32,7 @@ export type FilterQuery =
 
 export type ParsedQuery = { ok: true; query: FilterQuery | null } | { ok: false; error: string };
 
-/** What a delivery offers each key, e.g. `{ label: ["bug"], state: ["Todo", "unstarted"] }`. Missing keys have no values. */
+/** What a delivery offers each key, e.g. `{ label: ["bug"], state: ["Todo", "unstarted"] }`. Missing keys have no values; `any` holds every field's text. */
 export type QuerySubject = Partial<Record<QueryKey, string[]>>;
 
 type Token = ({ type: "(" | ")" | "or" | "and" | "not" } | { type: "word"; text: string; quoted: boolean }) & { start: number; end: number };
@@ -114,8 +115,11 @@ export function matchesQuery(query: FilterQuery | null, subject: QuerySubject): 
   const present = Object.fromEntries(Object.entries(subject).map(([key, values]) => [key, new Set(values.map((value) => value.trim().toLowerCase()))]));
   const test = (q: FilterQuery): boolean => {
     switch (q.type) {
-      case "term":
-        return present[q.key]?.has(q.value.toLowerCase()) ?? false;
+      case "term": {
+        const value = q.value.toLowerCase();
+        if (q.key === "any") return [...(present.any ?? [])].some((text) => text.includes(value));
+        return present[q.key]?.has(value) ?? false;
+      }
       case "not":
         return !test(q.query);
       case "and":
