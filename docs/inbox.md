@@ -69,6 +69,7 @@ The rule's **Filter** decides which items it fires on, and **Re-run on push** (P
 | `repo:acme/widgets` | The repository |
 | `tag:service:checkout` | Sentry only: the issue carries the tag with that value. Tags with more than 10 values on the issue, such as `url`, are left out |
 | `has:parent`, `has:sub-issues` | Linear only: the issue is a sub-issue, or has sub-issues |
+| `any:i9`, `any:"out of memory"` | Any field of the event contains the text, even inside a word: title, body, labels, tags, identifier, URL and the rest. Sentry's body holds the exception and the culprit |
 | `label:type:bug` | A label that looks like a key. Unknown prefixes such as `priority:high` are labels already |
 
 - `and`, `or` (or a comma) and parentheses, with `and` binding tighter.
@@ -88,10 +89,11 @@ Labels come from the source itself: after a poll, labels older than an hour are 
 - Implement Linear leaf issues in Todo assigned to me with label ready for dev: **Inbox: Linear issue**, `team:ENG and reason:assigned and state:Todo and ready for dev and !has:sub-issues`, with the project set.
 - Investigate escalating fatal errors in checkout: **Inbox: Sentry issue**, `team:checkout-api and state:escalating and fatal`, with the project set.
 - One rule per service in a shared Sentry project: **Inbox: Sentry issue**, `tag:service:checkout`, with that service's T3 project set.
+- Skip every Sentry issue that mentions I-9 or W-4 forms: **Inbox: Sentry issue**, `!any:i9 and !any:w4`.
 
 ### Previewing and firing
 
-**Matches now** in the editor lists the inbox items for the rule's events, matching ones first with what the rule did for them, the rest with the first part of the filter they fail ("labels needs design does not match ready for dev", "no parent issue does not match has:parent").
+**Matches now** in the editor lists the inbox items for the rule's events, matching ones first with what the rule did for them, the rest with the first part of the filter they fail ("labels needs design does not match ready for dev", "no parent issue does not match has:parent", "issue_title has i9 does not match !any:i9").
 
 After every poll each armed rule fires on the items it matches. A rule is armed for an item when the item saw activity after the rule was last saved, so a new or re-enabled rule does not fan out over everything already in the inbox. **Run on N now** backfills (`POST /api/rules/:id/run-now`).
 

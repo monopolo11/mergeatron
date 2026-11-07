@@ -39,6 +39,15 @@ describe("filter expressions", () => {
     expect(holds("state:x", issue)).toBe(false);
   });
 
+  test("any: finds text anywhere in any field, whole values or not", () => {
+    const issue: QuerySubject = { any: ["Submit I9Form failed", "FOUNTAIN-12"] };
+    expect(holds("any:i9", issue)).toBe(true);
+    expect(holds('any:"form failed"', issue)).toBe(true);
+    expect(holds("!any:i9 and !any:w4", issue)).toBe(false);
+    expect(holds("!any:w4", issue)).toBe(true);
+    expect(holds("any:w4", {})).toBe(false);
+  });
+
   test("termValues lists a key's values outside negations", () => {
     expect(termValues("(team:ENG or team:OPS) and !team:SRE and bug", "team")).toEqual(["ENG", "OPS"]);
     expect(termValues("bug (", "team")).toEqual([]);
