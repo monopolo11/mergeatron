@@ -89,7 +89,7 @@ Labels come from the source itself: after a poll, labels older than an hour are 
 - Implement Linear leaf issues in Todo assigned to me with label ready for dev: **Inbox: Linear issue**, `team:ENG and reason:assigned and state:Todo and ready for dev and !has:sub-issues`, with the project set.
 - Investigate escalating fatal errors in checkout: **Inbox: Sentry issue**, `team:checkout-api and state:escalating and fatal`, with the project set.
 - One rule per service in a shared Sentry project: **Inbox: Sentry issue**, `tag:service:checkout`, with that service's T3 project set.
-- Skip every Sentry issue that mentions I-9 or W-4 forms: **Inbox: Sentry issue**, `!any:i9 and !any:w4`.
+- Skip every Sentry issue that mentions i9 or w4: **Inbox: Sentry issue**, `!any:i9 and !any:w4`.
 
 ### Previewing and firing
 
