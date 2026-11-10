@@ -3,7 +3,6 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Cause, Effect, Exit } from "effect";
 import { z } from "zod";
-import { assertChannelAllowed } from "./channels.ts";
 import { errorMessage } from "./errors.ts";
 import { logger } from "./log.ts";
 import { notifyUser } from "./notify.ts";
@@ -19,8 +18,8 @@ import { Store } from "./store.ts";
 import { SlackClient } from "./slack.ts";
 
 /**
- * MCP tools for other agents: post as the Slack bot, DM the user for their
- * attention (see notify.ts), and send PRs for review with tracked threads and
+ * MCP tools for other agents: post any message as the Slack bot, DM the user
+ * for their attention (see notify.ts), and send PRs for review with tracked threads and
  * rounds, and mark those threads merged (see reviewRequests.ts), read and
  * version the prompts rules and dispatches use (see promptVersions.ts),
  * list, create, edit and delete rules (see ruleAdmin.ts), and read, rate and
@@ -141,15 +140,15 @@ export const makeMcpHandler: Effect.Effect<(request: Request) => Promise<Respons
       "slack_post_message",
       {
         description:
-          "Post a message to Slack as the bot. Only the review channel in Settings and channels set on enabled rules are allowed; no DMs (use notify_user). The bot must be a member of the channel. Returns the message ts; pass it as thread_ts to reply in that thread.",
+          "Post any message to Slack as the bot: to a channel, or as a DM to any user. To get your own user's attention, use notify_user. The bot must be a member of a channel to post there. Returns the message ts; pass it as thread_ts to reply in that thread.",
         inputSchema: {
-          channel: z.string().describe("Channel id (C0123...) or #name of a public channel"),
+          channel: z.string().describe("Channel id (C0123...), #name of a public channel, a user id (U0123...) to DM that user, or a DM id (D0123...)"),
           text: z.string().min(1).describe("Message body in Markdown; raw Slack syntax such as <@U123> passes through"),
           thread_ts: z.string().optional().describe("ts of the parent message to reply in its thread"),
         },
         annotations: { destructiveHint: false, openWorldHint: true },
       },
-      ({ channel, text, thread_ts }) => result("slack_post_message", assertChannelAllowed(channel).pipe(Effect.andThen(slack.post(channel, text, thread_ts)))),
+      ({ channel, text, thread_ts }) => result("slack_post_message", slack.post(channel, text, thread_ts)),
     );
 
     server.registerTool(

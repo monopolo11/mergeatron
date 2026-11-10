@@ -7,19 +7,18 @@ export class ChannelNotAllowedError extends Data.TaggedError("ChannelNotAllowedE
 
 const bare = (channel: string) => channel.trim().replace(/^#/, "");
 
-/** Slack user ids (U…, W…) and DM ids (D…): only `notify_user` may post there. */
+/** Slack user ids (U…, W…) and DM ids (D…): review requests never go there. */
 const isDirectMessage = (channel: string) => /^[UWD][A-Z0-9]{6,}$/.test(bare(channel));
 
 /**
- * Gate for every MCP tool that posts to a channel (`slack_post_message`,
- * `request_review`). Agents may post only to the review channel in Settings or
- * a channel set on an enabled rule; DMs are reserved for `notify_user`, which
- * does not go through here. Compare in the form the channel was saved
- * (`#name` or id): a name is not resolved to an id.
+ * Gate for the MCP `request_review` tool: a review request may open only in the
+ * review channel in Settings or a channel set on an enabled rule, never a DM.
+ * `slack_post_message` and `notify_user` post anywhere and skip it. Compare in
+ * the form the channel was saved (`#name` or id): a name is not resolved to an id.
  */
 export const assertChannelAllowed = Effect.fn("channels.assertAllowed")(function* (channel: string) {
   if (isDirectMessage(channel)) {
-    return yield* Effect.fail(new ChannelNotAllowedError({ message: "Agents cannot send direct messages with this tool. Use notify_user to DM your user." }));
+    return yield* Effect.fail(new ChannelNotAllowedError({ message: "Review requests cannot go to a direct message. Use slack_post_message or notify_user to DM someone." }));
   }
   const store = yield* Store;
   const { reviewChannel } = yield* store.getSettings();
