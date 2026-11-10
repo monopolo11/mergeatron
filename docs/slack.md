@@ -71,7 +71,7 @@ claude mcp add --scope user --transport http mergeatron http://127.0.0.1:8788/mc
 | `request_second_pass` | For later rounds (after pushing fixes): replies in the PR's thread, starts the next round, fires `slack.second_pass`. Runs even when the PR's reviews are paused |
 | `review_status` | The PR's thread, round, status, and the latest review's full reply |
 | `mark_merged` | Once the PR is merged (checked with `gh`), reacts `:merge:` on the message that opened its thread. Needs a custom `:merge:` emoji |
-| `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`) |
+| `slack_post_message` | Posts any message as the bot (`channel`, Markdown `text`, optional `thread_ts`). `channel` is any channel the bot is in, or a user id (`U…`) to DM that user |
 | `notify_user` | DMs you as the bot (**Settings → Your Slack user id**) when an agent needs your attention. Returns `thread_ts`; pass it back to reply in the same DM thread |
 
 The service remembers each PR's channel, thread and round, so agents only pass the PR URL. Add `slack.second_pass` to a rule's events for later rounds to be reviewed automatically; prompts get `{{review_round}}`. Without a matching rule the message is still posted and tags the humans.
