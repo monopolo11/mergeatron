@@ -3,6 +3,7 @@ import type { promptVersions, prompts, queuePauses, reviewRequests, rules, runPu
 import type { PromptKey, RunScope } from "./store.ts";
 import { parseQuery } from "./filterQuery.ts";
 import { compileSchema } from "./jsonSchema.ts";
+import { renderJsonTemplate } from "./template.ts";
 import {
   DEFAULT_HANDOFF_PROMPT,
   DEFAULT_MAX_CONCURRENT,
@@ -93,6 +94,8 @@ const ruleFields = {
   workspace: Schema.Literals(WORKSPACE_MODES).pipe(Schema.withDecodingDefault(Effect.succeed("worktree"))),
   model: Schema.NullOr(ModelSelectionSchema).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   presetId: optionalName,
+  /** A T3 workflow to start instead of a thread; the prompt is then its JSON input. */
+  workflow: optionalName,
 };
 
 /** One inbox source per rule keeps its filters and label suggestions to one provider. */
@@ -104,8 +107,15 @@ const oneInboxSource = Schema.makeFilter((rule: { readonly events: readonly stri
 
 const promptBody = Schema.String.check(Schema.isMinLength(1));
 
+/** A workflow rule's prompt is the workflow's input, so it must be a JSON object. */
+const workflowInput = Schema.makeFilter((rule: { readonly workflow: string | null; readonly prompt: string }) => {
+  if (rule.workflow === null) return undefined;
+  const input = renderJsonTemplate(rule.prompt);
+  return input.ok ? undefined : { path: ["prompt"], issue: input.error };
+});
+
 /** Payload accepted from the UI when creating a rule; `prompt` becomes version 1, live. */
-export const RuleInput = Schema.Struct({ ...ruleFields, prompt: promptBody }).check(oneInboxSource);
+export const RuleInput = Schema.Struct({ ...ruleFields, prompt: promptBody }).check(oneInboxSource, workflowInput);
 export type RuleInput = typeof RuleInput.Type;
 
 /** Payload for updating a rule: everything but its prompt, which changes through versions (PromptVersionInput). */

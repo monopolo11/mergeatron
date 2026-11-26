@@ -8,7 +8,7 @@ When someone requests your review on a PR, drops a PR link in Slack, or an error
 
 ## What it does
 
-- **Rules** turn events into threads: pick events, filters, a project, a model and a prompt. Prompts are versioned, so you can promote, roll back and compare.
+- **Rules** turn events into threads: pick events, filters, a project, a model and a prompt. Prompts are versioned, so you can promote, roll back and compare. A rule can start a T3 workflow instead, and its run's steps show live in the run details.
 - **Inbox** polls the PRs and issues that involve you (GitHub, Linear, Sentry). Dispatch one by hand, or let a rule on the inbox fire automatically.
 - **Slack and MCP** let teammates and other agents request reviews and second passes in a thread.
 - **Runs and analytics** show what every thread did, what it cost, and how good it was.

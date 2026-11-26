@@ -253,7 +253,7 @@ describe("run history", () => {
         const store = yield* Store;
         const p1 = yield* store.createPrompt({ name: "review", body: "x" });
         const own = { owner: "preset" as const, id: p1.id, version: 1 };
-        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, promptRefs: [own] };
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, workflow: null, promptRefs: [own] };
         const queued = yield* store.recordRun(run({ status: "queued", action }));
         expect(yield* store.getRunAction(queued.id)).toEqual(action);
 
@@ -268,7 +268,7 @@ describe("run history", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const model = { instanceId: "claudeAgent", model: "claude-opus-5-5", options: [{ id: "effort", value: "high" }] };
-        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model, presetId: null, maxConcurrent: 1, promptRefs: [] };
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model, presetId: null, maxConcurrent: 1, workflow: null, promptRefs: [] };
         const queued = yield* store.recordRun(run({ status: "queued", action }));
         expect((yield* store.getRunAction(queued.id))?.model).toEqual(model);
       }),
@@ -280,7 +280,7 @@ describe("run history", () => {
       Effect.gen(function* () {
         const store = yield* Store;
         const p1 = yield* store.createPrompt({ name: "review", body: "x" });
-        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, promptRefs: [{ ...preset(1), id: p1.id }] };
+        const action = { name: "review", skipSelfReview: true, projectId: null, workspace: "worktree" as const, model: null, presetId: p1.id, maxConcurrent: 1, workflow: null, promptRefs: [{ ...preset(1), id: p1.id }] };
         const done = yield* store.recordRun(run({ status: "done", action }));
         const started = yield* store.recordRun(run({ status: "started" }));
 

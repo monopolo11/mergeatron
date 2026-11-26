@@ -161,8 +161,8 @@ export type NewPromptVersion = Pick<PromptVersion, "body" | "note" | "source">;
 
 type Tx = Parameters<Parameters<AppDatabase["transaction"]>[0]>[0];
 
-/** Filled in once a thread starts (see StartResult in handler.ts), when the run settles, when it is rated, or when its PRs are read. */
-type RunOutcome = "modelInstanceId" | "modelId" | "reasoning" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt" | "usageUnmeasurableAt";
+/** Filled in once a thread or workflow starts (see StartResult in handler.ts), when the run settles, when it is rated, or when its PRs are read. */
+type RunOutcome = "modelInstanceId" | "modelId" | "reasoning" | "workflowRunId" | "rating" | "feedback" | "followUpOf" | "ratedAt" | "startedAt" | "settledAt" | "elapsedMs" | "pullRequestsCheckedAt" | "usageUnmeasurableAt";
 
 /** Statuses that end a run. */
 export const SETTLED = new Set<Run["status"]>(["done", "skipped", "failed"]);

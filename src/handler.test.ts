@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Result, Schema } from "effect";
 import { CommandError } from "./exec.ts";
 import { findProject, handleDelivery, hostsRepository, matchRules, resolveProject, ruleMismatch, runRules } from "./handler.ts";
 import { itemContext, itemEvent } from "./inbox.ts";
 import { linear } from "./inbox.test.ts";
-import { DEFAULT_SETTINGS, type Rule } from "./rules.ts";
+import { workflowOutcome } from "./completion.ts";
+import { DEFAULT_SETTINGS, RuleInput, type Rule } from "./rules.ts";
 import { EMPTY_FILTERS, HANDOFF_EVENT } from "./shared.ts";
 import { getRun } from "./runHistory.ts";
 import { Store } from "./store.ts";
-import type { StartThreadInput, T3Project } from "./t3.ts";
+import type { StartThreadInput, StartWorkflowInput, T3Project, T3WorkflowRun } from "./t3.ts";
 import { fakeSlack, fakeT3, runWith, settle, testLayer } from "./testing.ts";
 
 const base: Rule = {
@@ -27,6 +28,7 @@ const base: Rule = {
   prompt: "x",
   livePromptVersion: 1,
   presetId: null,
+  workflow: null,
   createdAt: "",
   updatedAt: "",
 };
@@ -335,5 +337,49 @@ describe("worktrees for issues", () => {
         expect(fallback.detail).toBe("checkout /w (no default branch for a worktree: fatal: ref refs/remotes/origin/HEAD is not a symbolic ref)");
       }),
     );
+  });
+});
+
+describe("workflow rules", () => {
+  const workflowRun = (status: T3WorkflowRun["status"], result: unknown = null): T3WorkflowRun => ({
+    runId: "wf1", workflow: "ship", version: 1, title: "ship", status, detail: status === "cancelled" ? "by hand" : null, result,
+    resumesAt: null, startedAt: "2026-11-26T00:00:00.000Z", updatedAt: "2026-11-26T00:00:00.000Z", endedAt: status === "running" ? null : "2026-11-26T00:01:00.000Z",
+  });
+
+  test("start the workflow with the input rendered from the delivery, then settle when the workflow run ends", async () => {
+    const starts: StartWorkflowInput[] = [];
+    const t3 = fakeT3({
+      startWorkflow: (input) => Effect.sync(() => (starts.push(input), { run: workflowRun("running"), steps: [] })),
+      workflowRun: () => Effect.succeed({ run: workflowRun("completed", { pr: "done" }), steps: [] }),
+    });
+    await runWith(
+      testLayer({ t3 }),
+      Effect.gen(function* () {
+        const store = yield* Store;
+        yield* store.createRule({ ...base, workflow: "ship", prompt: '{ "task": "{{pr_title}}", "tags": ["{{repo}}"], "rounds": 2 }' });
+        const pr = { ...ctx, pr_number: "9", pr_title: 'Say "hi"\nplease' };
+        yield* handleDelivery({ deliveryId: "d9", event: base.events[0]!, ctx: pr });
+        yield* settle;
+
+        const run = (yield* store.listRuns())[0]!;
+        // Quotes and newlines in a value stay inside their JSON string.
+        expect(starts).toEqual([{ workflow: "ship", input: { task: 'Say "hi"\nplease', tags: ["Acme/Widgets"], rounds: 2 }, key: `mergeatron-${run.id}` }]);
+        expect(run).toMatchObject({ status: "done", workflowRunId: "wf1", threadId: null, threadUrl: "http://t3/workflows?env=env1&run=wf1", detail: "" });
+        expect(JSON.parse(run.result!)).toEqual({ pr: "done" });
+      }),
+    );
+  });
+
+  test("a cancelled workflow run fails the run; one still going has no outcome", () => {
+    expect(workflowOutcome(workflowRun("cancelled"))).toEqual({ status: "failed", detail: "cancelled: by hand", result: null });
+    expect(workflowOutcome(workflowRun("stopped", "Not approved"))).toMatchObject({ status: "done", result: "Not approved" });
+    expect(workflowOutcome(workflowRun("running"))).toBeNull();
+  });
+
+  test("an input that is not a JSON object is refused when the rule is saved", () => {
+    const decode = Schema.decodeUnknownResult(RuleInput);
+    expect(Result.isFailure(decode({ ...base, workflow: "ship", prompt: "review {{pr_url}}" }))).toBe(true);
+    expect(Result.isFailure(decode({ ...base, workflow: "ship", prompt: '["{{pr_url}}"]' }))).toBe(true);
+    expect(Result.isSuccess(decode({ ...base, workflow: "ship", prompt: '{ "url": "{{pr_url}}" }' }))).toBe(true);
   });
 });

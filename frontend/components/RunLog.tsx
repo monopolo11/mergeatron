@@ -47,12 +47,12 @@ export function RunLog({ runs, rules, webhookUrl }: { runs: Run[]; rules: Rule[]
                   <span title={new Date(run.createdAt).toLocaleString()}>{timeAgo(run.createdAt)}</span>
                   <span className="font-mono"> · {run.repo || run.context?.slack_channel || run.event}{pr ? ` #${pr}` : ""}</span>
                 </div>
-                <div className={cn("wrap-anywhere text-muted-foreground", run.status === "failed" && "text-destructive/90")}>
-                  {run.detail}
+                <div className="wrap-anywhere text-muted-foreground">
+                  <span className={cn(run.status === "failed" && "text-destructive/90")}>{run.detail}</span>
                   {run.threadUrl && (
                     <>
-                      {" · "}
-                      <ExternalLink href={run.threadUrl}>open thread</ExternalLink>
+                      {run.detail && " · "}
+                      <ExternalLink href={run.threadUrl} className="underline decoration-muted-foreground/70 underline-offset-2 hover:decoration-foreground">{run.workflowRunId ? "open workflow" : "open thread"}</ExternalLink>
                     </>
                   )}
                 </div>

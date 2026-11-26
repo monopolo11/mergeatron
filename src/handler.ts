@@ -1,7 +1,8 @@
-import { Cause, Clock, Effect, Metric, Queue, Schedule, Semaphore } from "effect";
+import { Cause, Clock, Data, Effect, Metric, Queue, Schedule, Semaphore } from "effect";
 import { Background, RunEvents } from "./background.ts";
-import { pausedReview, watchCompletion, type CompletionServices } from "./completion.ts";
+import { pausedReview, watchCompletion, workflowDetail, type CompletionServices } from "./completion.ts";
 import { errorMessage } from "./errors.ts";
+import type { CommandError } from "./exec.ts";
 import type { WebhookContext } from "./github.ts";
 import { logger } from "./log.ts";
 import { matchRules, ruleMismatch, sameName } from "./match.ts";
@@ -10,7 +11,7 @@ import { CUSTOM_WEBHOOK_EVENT_PREFIX, HANDOFF_EVENT, INBOX_EVENT_PREFIX, SLACK_E
 import { SECOND_PASS_EVENT, SlackClient, slackOrigin } from "./slack.ts";
 import { Store } from "./store.ts";
 import { T3, type T3Error, type T3HttpError, type T3Project } from "./t3.ts";
-import { joinPrompts, renderTemplate } from "./template.ts";
+import { joinPrompts, renderJsonTemplate, renderTemplate } from "./template.ts";
 
 export { matchRules, ruleMismatch } from "./match.ts";
 
@@ -239,7 +240,7 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
           // Slack deliveries only learn the PR author once `complete` has run.
           const ctx = yield* context;
           yield* store.updateRun(run.id, { context: ctx, author: runAuthor(ctx) });
-          const result = yield* startThreadForRule(actionOf(rule, promptRefs), ctx);
+          const result = yield* startThreadForRule(actionOf(rule, promptRefs), ctx, run.id);
           yield* finishStart(run, delivery.ctx, result, runAt);
         }).pipe(
           Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.void : failStart(run, delivery.ctx, Cause.squash(cause), runAt))),
@@ -253,12 +254,14 @@ export const runRules = Effect.fn("handler.runRules")(function* (delivery: Deliv
 });
 
 /**
- * A started thread also records what it started with, for the run history;
+ * A started thread also records what it started with, for the run history; a
+ * started workflow records its run instead of a thread (see `startWorkflow`);
  * a run held for a paused provider records which one, so `startQueued` passes
  * over it until that provider resumes. Every field is a RunPatch field.
  */
 type StartResult =
   | ({ status: "started"; detail: string; threadId: string; threadUrl: string; startedAt: string; promptRefs?: PromptRef[]; context?: WebhookContext } & Pick<Run, "modelInstanceId" | "modelId" | "reasoning">)
+  | { status: "started"; detail: string; threadId: null; threadUrl: string; workflowRunId: string; startedAt: string; promptRefs: PromptRef[]; context: WebhookContext }
   | ({ status: "queued"; detail: string; threadId: null; threadUrl: null } & Pick<Run, "modelInstanceId" | "modelId" | "reasoning">)
   | { status: "skipped"; detail: string; threadId: null; threadUrl: null };
 
@@ -269,9 +272,10 @@ const finishStart = (run: Run, ctx: WebhookContext, result: StartResult, at: Rec
     const events = yield* RunEvents;
     yield* log.info(`run ${result.status}`, { ...at, detail: result.detail, thread: result.threadId ?? undefined });
     yield* store.updateRun(run.id, result);
+    // Acknowledge before watching: a workflow run can end on its first read, and its settle replaces the 👀.
+    yield* notifySlack(ctx, result);
     if (result.status === "started") yield* watchCompletion({ ...run, ...result });
     else yield* Queue.offer(events, { _tag: "Capacity", ruleId: run.ruleId });
-    yield* notifySlack(ctx, result);
   });
 
 const failStart = (run: Run, ctx: WebhookContext, error: unknown, at: Record<string, unknown>) =>
@@ -287,8 +291,8 @@ const failStart = (run: Run, ctx: WebhookContext, error: unknown, at: Record<str
 
 /** A rule's action; its prompt is the rule's own live version unless `promptRefs` (a dispatch's) say otherwise. */
 function actionOf(rule: Rule, promptRefs: PromptRef[] = [{ owner: "rule", id: rule.id, version: rule.livePromptVersion }]): RunAction {
-  const { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent } = rule;
-  return { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent, promptRefs };
+  const { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent, workflow } = rule;
+  return { name, skipSelfReview, projectId, workspace, model, presetId, maxConcurrent, workflow, promptRefs };
 }
 
 /**
@@ -343,7 +347,7 @@ export const startQueued = Effect.fn("handler.startQueued")(function* (ruleId: s
         const origin = slackOrigin(ctx);
         if (origin) yield* Effect.ignore(slack.unreact(origin, QUEUED_REACTION));
         yield* background.fork(
-          startThreadForRule(action, ctx).pipe(
+          startThreadForRule(action, ctx, next.id).pipe(
             Effect.flatMap((result) => finishStart(next, ctx, result, at)),
             Effect.catchCause((cause) => (Cause.hasInterruptsOnly(cause) ? Effect.void : failStart(next, ctx, Cause.squash(cause), at))),
             Effect.withSpan("handler.startThread", { attributes: { rule: next.ruleName, run: next.id } }),
@@ -376,13 +380,15 @@ const withPreviousReview = (ctx: WebhookContext, repo: string, prNumber: string)
     if (previous.threadUrl) ctx.previous_thread_url = previous.threadUrl;
   });
 
-const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect<StartResult, T3Error, Store | T3> =>
+/** Starts what the rule's action asks for: a T3 thread, or with `workflow` set, a workflow run keyed by the run's id. */
+const startThreadForRule = (rule: RunAction, ctx: WebhookContext, runId: string): Effect.Effect<StartResult, T3Error | CommandError | WorkflowInputError, Store | T3> =>
   Effect.gen(function* () {
     const store = yield* Store;
     const settings = yield* store.getSettings();
     if (rule.skipSelfReview && ctx.pr_author && settings.githubLogin && sameName(ctx.pr_author, settings.githubLogin)) {
       return skipped(`PR by ${ctx.pr_author} is your own; rule skips self review`);
     }
+    if (rule.workflow !== null) return yield* startWorkflow({ ...rule, workflow: rule.workflow }, ctx, runId);
 
     const project = yield* findProject(rule, ctx.repo);
     if (!project) {
@@ -412,6 +418,39 @@ const startThreadForRule = (rule: RunAction, ctx: WebhookContext): Effect.Effect
     });
     const detail = branched.note ? `${started.detail} (${branched.note})` : started.detail;
     return { ...started, detail, promptRefs, context: branched.ctx };
+  });
+
+/** A workflow rule's input does not render to a JSON object, so its workflow is not started. */
+export class WorkflowInputError extends Data.TaggedError("WorkflowInputError")<{ readonly message: string }> {}
+
+/**
+ * Starts the action's workflow with its prompt rendered as the JSON input
+ * (see `renderJsonTemplate`). The run's id is the start key, so a retried
+ * start finds the run it already made. The supervisor then watches the
+ * workflow run (see `watchCompletion`).
+ */
+const startWorkflow = (rule: RunAction & { workflow: string }, ctx: WebhookContext, runId: string) =>
+  Effect.gen(function* () {
+    const store = yield* Store;
+    const t3 = yield* T3;
+    // Always the rule's own input: a preset is a thread prompt, never JSON.
+    const promptRefs = rule.promptRefs;
+    const bodies = promptRefs.length > 0 ? yield* store.promptBodies(promptRefs) : null;
+    if (!bodies) return skipped("no input version to start the workflow with");
+    const input = renderJsonTemplate(joinPrompts(bodies), ctx);
+    if (!input.ok) return yield* Effect.fail(new WorkflowInputError({ message: `workflow input: ${input.error}` }));
+    const { run } = yield* t3.startWorkflow({ workflow: rule.workflow, input: input.value, key: `mergeatron-${runId}` });
+    const started: StartResult = {
+      status: "started",
+      detail: workflowDetail(run),
+      threadId: null,
+      threadUrl: yield* t3.workflowUrl(run.runId),
+      workflowRunId: run.runId,
+      startedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
+      promptRefs,
+      context: ctx,
+    };
+    return started;
   });
 
 /**

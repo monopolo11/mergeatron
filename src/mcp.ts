@@ -97,6 +97,10 @@ const ruleFields = z.object({
     .nullable()
     .describe("Provider instance, model and options; null uses the project's default, then Settings'"),
   presetId: z.string().nullable().describe("Run this preset's live prompt instead of the rule's own; ids from list_prompts"),
+  workflow: z
+    .string()
+    .nullable()
+    .describe('T3 workflow to start instead of a thread, by name. The prompt is then its input: a JSON object whose strings take {{variables}}, like {"title": "{{pr_title}}"}. Project, workspace and model are ignored'),
 });
 const rulePatch = ruleFields.partial().extend({
   filters: ruleFields.shape.filters.optional().describe("Only the filters given change; the rest keep their values"),

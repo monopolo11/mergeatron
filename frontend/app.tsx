@@ -48,6 +48,7 @@ const NEW_RULE: RuleInput = {
   model: null,
   prompt: DEFAULT_PROMPT,
   presetId: null,
+  workflow: null,
 };
 
 /** How often the UI rereads the update check. Cheap: the server answers from releases it fetches on its own every 30 minutes. */

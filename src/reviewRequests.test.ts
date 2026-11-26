@@ -36,6 +36,7 @@ function setup() {
       model: null,
       prompt: "review {{pr_url}} round {{review_round}}",
       presetId: null,
+      workflow: null,
     })),
   );
   return { layer, withRule, posts, reactions, merged };

@@ -29,12 +29,12 @@ export function reviewVerdict(result: string | null): Verdict {
 /**
  * The latest reviews of a PR that asked for changes in a row, newest first, from
  * its finished runs. An approval ends the streak, a reply with no verdict is
- * ignored, and handoffs are not reviews.
+ * ignored, and handoffs and workflow runs are not reviews.
  */
-export function changesRequestedStreak<T extends Pick<Run, "event" | "result">>(finished: T[]): T[] {
+export function changesRequestedStreak<T extends Pick<Run, "event" | "result"> & Partial<Pick<Run, "workflowRunId">>>(finished: T[]): T[] {
   const streak: T[] = [];
   for (const run of finished) {
-    if (run.event === HANDOFF_EVENT) continue;
+    if (run.event === HANDOFF_EVENT || run.workflowRunId) continue;
     const verdict = reviewVerdict(run.result);
     if (verdict === "approved") break;
     if (verdict === "changes_requested") streak.push(run);

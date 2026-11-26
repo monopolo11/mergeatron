@@ -6,7 +6,7 @@ import type { Run } from "./rules.ts";
 import { HANDOFF_EVENT } from "./shared.ts";
 import { SlackClient, slackOrigin, type SlackApiError, type SlackClientShape, type SlackOrigin } from "./slack.ts";
 import { SETTLED, Store } from "./store.ts";
-import { T3, type T3RunStatus, type T3Thread } from "./t3.ts";
+import { T3, type T3RunStatus, type T3Thread, type T3WorkflowRun } from "./t3.ts";
 import { RunActiveError, RunNotFoundError, RunWithoutThreadError } from "./runHistory.ts";
 import { recordPullRequests } from "./runPullRequests.ts";
 import { recordUsage, Usage } from "./usage.ts";
@@ -20,6 +20,8 @@ const log = logger("completion");
 export type CompletionServices = Store | T3 | SlackClient | Background | RunEvents | Usage;
 
 const POLL = Duration.seconds(5);
+/** Workflow runs wait on people and sleep for hours: read them less often, and never give up on one. */
+const WORKFLOW_POLL = Duration.seconds(10);
 /** A review that has run this long is not going to report back; fail it and stop polling. */
 const GIVE_UP = Duration.hours(3);
 /** Time allowed for the first run to appear after the thread was created. */
@@ -102,17 +104,45 @@ export function threadOutcome(thread: T3Thread, now = Date.now()): TurnOutcome |
 }
 
 /**
- * Polls T3 until the thread is done, records the outcome on the run and, for
- * Slack-triggered runs, replies in the Slack thread. Runs as a supervised
- * background watcher keyed by run id, so it returns at once.
+ * What the run log records once a workflow run ended, or null while it goes
+ * on. Completed, stopped (the workflow chose to end) and skipped runs are
+ * done; a cancelled run failed. The result is the run's value as JSON (a
+ * string value as is).
+ */
+export function workflowOutcome(run: T3WorkflowRun): TurnOutcome | null {
+  if (run.endedAt === null) return null;
+  const result = run.result === null || run.result === undefined ? null : typeof run.result === "string" ? run.result : JSON.stringify(run.result, null, 2);
+  return { status: run.status === "cancelled" ? "failed" : "done", detail: workflowDetail(run), result };
+}
+
+/**
+ * `waiting: approve-spec`: the workflow run's state as the run log shows it
+ * while it goes on, and how it ended. A plain completion says nothing the
+ * run's `done` does not.
+ */
+export function workflowDetail(run: Pick<T3WorkflowRun, "status" | "detail">): string {
+  if (run.status === "completed" && !run.detail) return "";
+  return `${run.status}${run.detail ? `: ${run.detail}` : ""}`;
+}
+
+/**
+ * Polls T3 until the thread (or the workflow run) is done, records the
+ * outcome on the run and, for Slack-triggered runs, replies in the Slack
+ * thread. Runs as a supervised background watcher keyed by run id, so it
+ * returns at once.
  * A 404 means the thread was deleted in T3, and a thread still busy after
  * `GIVE_UP` is abandoned: either way the run fails and polling stops,
- * which also releases the PR for a new review.
+ * which also releases the PR for a new review. Workflow runs are watched
+ * until they end, however long they wait (see `workflowWatcher`).
  */
-export const watchCompletion = (run: Pick<Run, "id" | "threadId" | "createdAt" | "startedAt">): Effect.Effect<void, never, CompletionServices> =>
+export const watchCompletion = (run: Pick<Run, "id" | "threadId" | "workflowRunId" | "createdAt" | "startedAt">): Effect.Effect<void, never, CompletionServices> =>
   Effect.gen(function* () {
-    if (!run.threadId) return;
     const background = yield* Background;
+    if (run.workflowRunId) {
+      yield* log.info("watching workflow run", { run: run.id, workflow: run.workflowRunId });
+      return yield* background.watch(run.id, workflowWatcher(run.id, run.workflowRunId, Date.parse(run.startedAt ?? run.createdAt)));
+    }
+    if (!run.threadId) return;
     yield* log.info("watching thread", { run: run.id, thread: run.threadId });
     // Runs from before `startedAt` was recorded fall back to when they were created.
     yield* background.watch(run.id, watcher(run.id, run.threadId, Date.parse(run.startedAt ?? run.createdAt)));
@@ -159,17 +189,54 @@ const watcher = (runId: string, threadId: string, startedAt: number) =>
     Effect.withSpan("completion.watch", { attributes: { run: runId, thread: threadId } }),
   );
 
+/**
+ * Polls a workflow run until it ends, keeping the run's detail on what it
+ * does now (`waiting: approve-spec`) so the run log shows it. A run T3 no
+ * longer has fails the run; a failed read is retried on the next poll.
+ */
+const workflowWatcher = (runId: string, workflowRunId: string, startedAt: number) =>
+  Effect.gen(function* () {
+    yield* Metric.modify(watchersActive, 1);
+    const t3 = yield* T3;
+    const store = yield* Store;
+    const at = { run: runId, workflow: workflowRunId };
+    let shown: string | null = null;
+
+    const poll = Effect.gen(function* () {
+      const read = yield* Effect.result(t3.workflowRun(workflowRunId));
+      if (read._tag === "Failure") {
+        yield* log.warn("workflow read failed", { ...at, error: read.failure.message });
+        return Option.none<TurnOutcome>();
+      }
+      if (read.success === null) return Option.some<TurnOutcome>({ status: "failed", detail: "workflow run no longer exists in T3", result: null });
+      const outcome = workflowOutcome(read.success.run);
+      if (outcome) return Option.some(outcome);
+      const detail = workflowDetail(read.success.run);
+      if (detail !== shown) {
+        shown = detail;
+        yield* store.updateRun(runId, { detail });
+      }
+      return Option.none<TurnOutcome>();
+    });
+
+    const outcome = yield* poll.pipe(Effect.repeat({ schedule: Schedule.spaced(WORKFLOW_POLL), until: Option.isSome }));
+    if (Option.isSome(outcome)) yield* settle(runId, outcome.value, startedAt);
+  }).pipe(
+    Effect.ensuring(Metric.modify(watchersActive, -1)),
+    Effect.withSpan("completion.watchWorkflow", { attributes: { run: runId, workflow: workflowRunId } }),
+  );
+
 /** Re-attaches watchers to runs left `started` by a previous process. */
 export const resumeWatchers: Effect.Effect<void, never, CompletionServices> = Effect.gen(function* () {
   const store = yield* Store;
-  const unsettled = (yield* store.listUnsettledRuns()).filter((run) => run.threadId);
+  const unsettled = (yield* store.listUnsettledRuns()).filter((run) => run.threadId || run.workflowRunId);
   yield* Effect.forEach(unsettled, watchCompletion, { discard: true });
   if (unsettled.length > 0) yield* log.info("resumed watchers for unsettled runs", { count: unsettled.length });
 });
 
 /**
- * Reads a settled run's thread again and makes the run match it, for threads
- * rescued by hand in T3 after the run settled. A thread that ended
+ * Reads a settled run's thread (or workflow run) again and makes the run
+ * match it, for threads rescued by hand in T3 after the run settled. A thread that ended
  * differently settles the run again (Slack gets the new reply and reaction);
  * a thread still working is watched until it ends. A thread that says the
  * same as before leaves the run alone. Returns the run as stored afterwards.
@@ -182,13 +249,18 @@ export const refreshRun = Effect.fn("completion.refresh")(function* (id: string)
   if (!SETTLED.has(run.status)) return yield* Effect.fail(new RunActiveError({ message: `Run ${id} is ${run.status}; it updates on its own.` }));
   // A skipped run may point at the thread of the run it gave way to; that thread's outcome is not its own.
   const threadId = run.status === "skipped" ? null : run.threadId;
-  if (!threadId) return yield* Effect.fail(new RunWithoutThreadError({ message: `Run ${id} has no T3 thread of its own.` }));
+  const workflowRunId = run.status === "skipped" ? null : run.workflowRunId;
+  if (!threadId && !workflowRunId) return yield* Effect.fail(new RunWithoutThreadError({ message: `Run ${id} has no T3 thread of its own.` }));
 
   const now = yield* Clock.currentTimeMillis;
-  const outcome = yield* t3.thread(threadId).pipe(
-    Effect.map((thread) => threadOutcome(thread, now)),
-    Effect.catchIf((error) => error.status === 404, () => Effect.succeed<TurnOutcome>({ status: "failed", detail: "thread no longer exists in T3", result: null })),
-  );
+  const outcome = workflowRunId
+    ? yield* Effect.map(t3.workflowRun(workflowRunId), (read): TurnOutcome | null =>
+        read === null ? { status: "failed", detail: "workflow run no longer exists in T3", result: null } : workflowOutcome(read.run),
+      )
+    : yield* t3.thread(threadId!).pipe(
+        Effect.map((thread) => threadOutcome(thread, now)),
+        Effect.catchIf((error) => error.status === 404, () => Effect.succeed<TurnOutcome>({ status: "failed", detail: "thread no longer exists in T3", result: null })),
+      );
   if (outcome && outcome.status === run.status && outcome.detail === run.detail && outcome.result === run.result) return run;
 
   yield* log.info("run refreshed", { run: id, from: run.status, to: outcome?.status ?? "started" });
@@ -197,8 +269,8 @@ export const refreshRun = Effect.fn("completion.refresh")(function* (id: string)
     yield* settle(id, outcome, Date.parse(run.startedAt ?? run.createdAt));
   } else {
     // The thread was picked up again just now, so the give-up deadline counts from here, after a restart too (see resumeWatchers).
-    yield* store.updateRun(id, { status: "started", detail: "thread working again", result: null, startedAt: new Date(now).toISOString() });
-    yield* (yield* Background).watch(id, watcher(id, threadId, now));
+    yield* store.updateRun(id, { status: "started", detail: workflowRunId ? "workflow running again" : "thread working again", result: null, startedAt: new Date(now).toISOString() });
+    yield* (yield* Background).watch(id, workflowRunId ? workflowWatcher(id, workflowRunId, now) : watcher(id, threadId!, now));
   }
   return (yield* store.getRun(id)) ?? run;
 });
@@ -210,7 +282,8 @@ const takeBackReaction = (run: Run) =>
     if (!origin || run.event === HANDOFF_EVENT) return;
     const slack = yield* SlackClient;
     const verdict = reviewVerdict(run.result);
-    const names = run.status === "failed" ? ["x"] : verdict === "approved" ? [VERDICT_REACTION.approved, APPROVED_FALLBACK] : [VERDICT_REACTION[verdict]];
+    const names =
+      run.status === "failed" ? ["x"] : run.workflowRunId ? [APPROVED_FALLBACK] : verdict === "approved" ? [VERDICT_REACTION.approved, APPROVED_FALLBACK] : [VERDICT_REACTION[verdict]];
     yield* Effect.forEach(names, (name) => slack.unreact(origin, name), { discard: true }).pipe(
       Effect.catch((error) => log.warn("slack unreact failed", { run: run.id, error: error.message })),
     );
@@ -218,7 +291,8 @@ const takeBackReaction = (run: Run) =>
 
 /**
  * Records the outcome and, for Slack runs, posts the reply. A review then
- * flips 👀 to the verdict's reaction; a handoff only posts its document.
+ * flips 👀 to the verdict's reaction, a workflow run to ✅ or ❌; a handoff
+ * only posts its document.
  * What the thread spent is measured, and the PRs linked to it read, in the
  * background (see usage.ts, runPullRequests.ts). The
  * supervisor then advances the rule's queue and checks whether the PR is stuck.
@@ -229,8 +303,7 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
     const slack = yield* SlackClient;
     const events = yield* RunEvents;
     const background = yield* Background;
-    const verdict = outcome.status === "done" ? reviewVerdict(outcome.result) : undefined;
-    yield* log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail, verdict });
+    yield* log.info(`run ${outcome.status}`, { run: runId, detail: outcome.detail });
     yield* Metric.update(Metric.withAttributes(runsSettled, { status: outcome.status }), 1);
     yield* Metric.update(threadDuration, Duration.millis((yield* Clock.currentTimeMillis) - startedAt));
     yield* store.updateRun(runId, { status: outcome.status, detail: outcome.detail, result: outcome.result });
@@ -248,8 +321,10 @@ const settle = (runId: string, outcome: TurnOutcome, startedAt: number) =>
     const review = run.event !== HANDOFF_EVENT;
     const origin = slackOrigin(run.context);
     if (origin) {
+      // A workflow's result is its own data, not a review: it gets ✅ or ❌, never a verdict.
+      const react = run.workflowRunId ? slack.react(origin, outcome.status === "done" ? APPROVED_FALLBACK : "x") : reactVerdict(slack, origin, outcome);
       yield* slack.reply(origin, outcome.status === "done" ? (outcome.result ?? "_(no reply)_") : `Review failed: ${outcome.detail}`).pipe(
-        Effect.andThen(review ? Effect.andThen(slack.unreact(origin, "eyes"), reactVerdict(slack, origin, outcome)) : Effect.void),
+        Effect.andThen(review ? Effect.andThen(slack.unreact(origin, "eyes"), react) : Effect.void),
         Effect.catch((error) => log.warn("slack reply failed", { run: runId, error: error.message })),
       );
     }

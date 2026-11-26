@@ -28,7 +28,7 @@ import { ShellContext } from "@/lib/shell";
 import { prState, runStatus, scoreTone, TONE_BG, TONE_TEXT, type Tone } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import type { PromptRef, Run, RunPullRequest, RunRatingInput, RunUsage } from "../../src/rules.ts";
-import type { RunDetail, RunSummary } from "../../src/runHistory.ts";
+import type { RunDetail, RunSummary, RunWorkflow } from "../../src/runHistory.ts";
 import { HANDOFF_EVENT, RUN_STATUSES } from "../../src/shared.ts";
 import { reviewVerdict } from "../../src/verdict.ts";
 
@@ -140,7 +140,7 @@ export function Runs() {
               })}
               <ToolbarDivider />
               <Count value={count((run) => run.ratedAt === null)} label="unrated" active={!!unrated} onClick={() => setSearch({ unrated: unrated ? undefined : true })} />
-              <RefreshFailed ids={visible.filter((run) => run.status === "failed" && run.threadId).map((run) => run.id)} stale={list.isPlaceholderData} />
+              <RefreshFailed ids={visible.filter((run) => run.status === "failed" && (run.threadId || run.workflowRunId)).map((run) => run.id)} stale={list.isPlaceholderData} />
             </>
           }
         />
@@ -226,14 +226,15 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
   }
 
   const title = run.title ?? target(run);
+  const workflow = run.action?.workflow ?? null;
   return (
     <div className="flex min-h-full flex-col">
       <Toolbar title={<span title={title}>{title}</span>} className="flex-nowrap">
         <span className="ml-auto flex items-center gap-3 font-mono whitespace-nowrap text-muted-foreground">
           {run.url && <ExternalLink href={run.url}>{run.ref ?? "link"}</ExternalLink>}
-          {run.threadUrl && <ExternalLink href={run.threadUrl}>thread</ExternalLink>}
+          {run.threadUrl && !workflow && <ExternalLink href={run.threadUrl}>thread</ExternalLink>}
         </span>
-        {RATABLE.has(run.status) && run.threadId && <RefreshRun id={run.id} />}
+        {RATABLE.has(run.status) && (run.threadId || run.workflowRunId) && <RefreshRun id={run.id} />}
         {!UNSETTLED.has(run.status) && <DeleteRun id={run.id} onDeleted={onClose} />}
         <CloseButton onClose={onClose} />
       </Toolbar>
@@ -255,9 +256,18 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
           <dd>
             {run.ruleName} <span className="font-mono text-muted-foreground">· {run.event} · {run.source}</span>
           </dd>
-          <dt>Model</dt>
-          <dd className="font-mono">{run.modelId ? `${run.modelInstanceId} / ${run.modelId}${run.reasoning ? ` / ${run.reasoning}` : ""}` : <span className="text-muted-foreground">no thread</span>}</dd>
-          <dt>Prompt</dt>
+          {workflow ? (
+            <>
+              <dt>Workflow</dt>
+              <dd className="font-mono">{run.threadUrl ? <ExternalLink href={run.threadUrl} className="underline decoration-muted-foreground/70 underline-offset-2 hover:decoration-foreground">{workflow}</ExternalLink> : workflow}</dd>
+            </>
+          ) : (
+            <>
+              <dt>Model</dt>
+              <dd className="font-mono">{run.modelId ? `${run.modelInstanceId} / ${run.modelId}${run.reasoning ? ` / ${run.reasoning}` : ""}` : <span className="text-muted-foreground">no thread</span>}</dd>
+            </>
+          )}
+          <dt>{workflow ? "Input" : "Prompt"}</dt>
           <dd className="font-mono">
             {run.promptRefs.map(promptLabel).join(" + ") || <span className="text-muted-foreground">none</span>}
             {run.prompt && (
@@ -274,13 +284,15 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
 
         {showPrompt && run.prompt && <pre className="max-h-64 overflow-auto rounded-md border bg-input/20 p-2 font-mono whitespace-pre-wrap text-muted-foreground">{run.prompt}</pre>}
 
+        {run.workflowRunId && <WorkflowSteps run={run} />}
+
         <UsageSection run={run} />
 
-        <section className="grid gap-1">
+        {!(workflow && !run.result && UNSETTLED.has(run.status)) && <section className="grid gap-1">
           {run.result ? (
             <>
               <button type="button" aria-expanded={showReply} className="group flex items-baseline justify-between gap-2 text-left" onClick={() => setShowReply((shown) => !shown)}>
-                <GroupLabel>Reply</GroupLabel>
+                <GroupLabel>{workflow ? "Result" : "Reply"}</GroupLabel>
                 <span className="text-muted-foreground group-hover:text-foreground">
                   <ReplyVerdict run={run} />
                   {run.result.split("\n").length} lines · {showReply ? "collapse" : "expand"}
@@ -290,11 +302,11 @@ function RunPanel({ id, promptLabel, onClose, onNext }: { id: string; promptLabe
             </>
           ) : (
             <>
-              <GroupLabel>Reply</GroupLabel>
-              <p className="text-muted-foreground">{UNSETTLED.has(run.status) ? "Not replied yet." : "No reply."}</p>
+              <GroupLabel>{workflow ? "Result" : "Reply"}</GroupLabel>
+              <p className="text-muted-foreground">{UNSETTLED.has(run.status) ? "Not replied yet." : workflow ? "No result." : "No reply."}</p>
             </>
           )}
-        </section>
+        </section>}
 
         <RatingForm key={run.id} run={run} onNext={onNext} />
       </div>
@@ -344,6 +356,57 @@ function RelatedPullRequests({ run }: { run: RunDetail }) {
   );
 }
 
+/** What a step still going waits on, for steps that wait (a question, a signal, a sleep, a place in a pool). */
+const waiting = (step: RunWorkflow["steps"][number]) => (step.status === "running" && step.kind !== "step" && step.kind !== "agent" ? "waiting" : null);
+
+const STEP_TONE: Record<RunWorkflow["steps"][number]["status"], Tone> = { running: "active", completed: "ok", failed: "err" };
+
+/**
+ * The run's T3 workflow run, read live: one row per step with its kind, what
+ * it waits on or why it failed, and how long it took, aligned with the rows
+ * above. Agent steps link to their thread. Read again every 5s until the
+ * workflow ends; the run's status already says where it is.
+ */
+function WorkflowSteps({ run }: { run: RunDetail }) {
+  const { data, error } = useQuery({
+    queryKey: ["run", run.id, "workflow"],
+    queryFn: () => api<RunWorkflow | null>(`/api/runs/${run.id}/workflow`),
+    refetchInterval: (query) => (query.state.data?.run.endedAt ? false : 5000),
+  });
+  return (
+    <section className="grid gap-1">
+      <GroupLabel>Steps</GroupLabel>
+      {error ? (
+        <p className="text-destructive">{error.message}</p>
+      ) : data === undefined ? (
+        <p className="text-muted-foreground">Loading…</p>
+      ) : data === null ? (
+        <p className="text-muted-foreground">T3 no longer has this workflow run.</p>
+      ) : data.steps.length === 0 ? (
+        <p className="text-muted-foreground">No steps yet.</p>
+      ) : (
+        <ol className="grid grid-cols-[72px_minmax(0,1fr)_auto] gap-x-3 gap-y-1 font-mono">
+          {data.steps.map((step) => (
+            <li key={step.name} className="col-span-3 grid grid-cols-subgrid items-start" title={step.detail ?? undefined}>
+              <span className="font-sans text-muted-foreground">{step.kind}</span>
+              {/* The dot sits in the gap, so names line up with the values above and a long detail wraps under the name. */}
+              <span className="flex">
+                <span className="-ml-[13px] flex h-4 items-center"><Dot tone={STEP_TONE[step.status]} /></span>
+                <span className="min-w-0 wrap-anywhere">
+                <span className="font-medium">{step.threadUrl ? <ExternalLink href={step.threadUrl} className="underline decoration-muted-foreground/70 underline-offset-2 hover:decoration-foreground">{step.name}</ExternalLink> : step.name}</span>
+                {step.attempts > 1 && <span className="text-muted-foreground"> ×{step.attempts}</span>}
+                {(step.detail ?? waiting(step)) && <span className={cn(step.status === "failed" ? "text-destructive" : step.detail ? "text-muted-foreground" : TONE_TEXT.active)}> · {step.detail ?? waiting(step)}</span>}
+                </span>
+              </span>
+              <span className="text-right text-muted-foreground tabular-nums">{step.endedAt ? duration(Date.parse(step.endedAt) - Date.parse(step.startedAt)) : "-"}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 /**
  * What the run's thread spent: cost and tokens, a bar split by token kind,
  * and the models that answered. A settled run with a thread but no usage yet
@@ -385,7 +448,8 @@ function UsageSection({ run }: { run: RunDetail }) {
 
 /** A finished PR review's verdict, ahead of the reply's length; nothing for other runs or a reply without one. */
 function ReplyVerdict({ run }: { run: RunDetail }) {
-  if (run.status !== "done" || run.event === HANDOFF_EVENT || !run.context?.pr_number) return null;
+  // A workflow's result is its own data, not a review.
+  if (run.status !== "done" || run.event === HANDOFF_EVENT || run.workflowRunId || !run.context?.pr_number) return null;
   const verdict = reviewVerdict(run.result);
   if (verdict === "commented") return null;
   const { label, tone } = runStatus({ status: run.status, verdict });
