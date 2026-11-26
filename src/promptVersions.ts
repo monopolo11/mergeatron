@@ -2,7 +2,9 @@ import { Data, Effect } from "effect";
 import { logger } from "./log.ts";
 import type { Prompt, PromptVersion, PromptVersionInput, Rule } from "./rules.ts";
 import type { PromptOwner, PromptVersionSource } from "./shared.ts";
+import { WorkflowInputError } from "./handler.ts";
 import { Store } from "./store.ts";
+import { renderJsonTemplate } from "./template.ts";
 
 const log = logger("prompts");
 
@@ -82,6 +84,16 @@ export const readPrompt = Effect.fn("prompts.read")(function* (owner: PromptOwne
 });
 
 /** Appends a version (see Store.createPromptVersion), promoting it when `promote` is set. */
+/** A workflow rule's live prompt is its workflow's input, so only a JSON object may go live on one (see `saveRule`). */
+const checkLiveBody = (owner: PromptOwner, id: string, body: string) =>
+  Effect.gen(function* () {
+    if (owner !== "rule") return;
+    const rule = yield* (yield* Store).getRule(id);
+    if (!rule?.workflow) return;
+    const input = renderJsonTemplate(body);
+    if (!input.ok) return yield* Effect.fail(new WorkflowInputError({ message: `Rule ${rule.name} starts a workflow, so its live prompt must be a JSON object: ${input.error}` }));
+  });
+
 export const createVersion = Effect.fn("prompts.createVersion")(function* (
   owner: PromptOwner,
   id: string,
@@ -89,6 +101,7 @@ export const createVersion = Effect.fn("prompts.createVersion")(function* (
   source: PromptVersionSource,
 ) {
   const store = yield* Store;
+  if (promote) yield* checkLiveBody(owner, id, input.body);
   const version = yield* store.createPromptVersion(owner, id, { ...input, source }, promote);
   if (!version) return yield* Effect.fail(notFound(owner, id));
   yield* log.info("version saved", { owner, id, version: version.version, promote, source });
@@ -97,6 +110,8 @@ export const createVersion = Effect.fn("prompts.createVersion")(function* (
 
 export const promoteVersion = Effect.fn("prompts.promote")(function* (owner: PromptOwner, id: string, version: number) {
   const store = yield* Store;
+  const [body] = (yield* store.promptBodies([{ owner, id, version }])) ?? [];
+  if (body !== undefined) yield* checkLiveBody(owner, id, body);
   const promoted = yield* store.promotePromptVersion(owner, id, version);
   if (!promoted) return yield* Effect.fail(notFound(owner, id, version));
   yield* log.info("version promoted", { owner, id, version });
