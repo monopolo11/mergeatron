@@ -20,6 +20,7 @@ import { rescheduleResume, resumeProvider, resumeTimersOnStartup } from "./src/q
 import { createVersion, listPresets, promoteVersion, readPrompt } from "./src/promptVersions.ts";
 import { DispatchInput, PromptInput, PromptRename, PromptVersionInput, QueueResumeInput, RuleInput, RuleUpdate, AnalyticsQuery, RunQuery, RunRatingInput, RunScopeQuery, runScope, SettingsInput, TestThreadInput, WebhookInput, WebhookUpdate, type Rule } from "./src/rules.ts";
 import { deleteRun, getRun, getRunWorkflow, listRuns, rateRun } from "./src/runHistory.ts";
+import { saveRule } from "./src/ruleAdmin.ts";
 import { startPullRequestBackfill, syncPullRequests } from "./src/runPullRequests.ts";
 import { handleSlackEvent } from "./src/secondPass.ts";
 import { Sentry } from "./src/sentryInbox.ts";
@@ -55,7 +56,7 @@ type ApiServices = HandlerServices | AppConfig | Poller | Sentry | Updater | Sla
 const json = (body: unknown, status = 200) => HttpServerResponse.jsonUnsafe(body, { status });
 
 /** HTTP status for the typed errors routes let through; anything else is a 500 with its message. */
-const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, RunWithoutThreadError: 409, RunWithoutWorkflowError: 409, CommandError: 502, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409, QueueNotPausedError: 409 };
+const STATUS: Record<string, number> = { SchemaError: 400, HttpServerError: 400, PromptNotFoundError: 404, RunNotFoundError: 404, InvalidFollowUpError: 400, RunActiveError: 409, RunWithoutThreadError: 409, RunWithoutWorkflowError: 409, CommandError: 502, WorkflowInputError: 400, RuleNotFoundError: 404, WebhookNotFoundError: 404, WebhookSecretError: 401, InvalidPayloadError: 400, T3HttpError: 502, T3RpcError: 502, InboxSourceError: 502, UpdateError: 409, QueueNotPausedError: 409 };
 
 const api = HttpRouter.use((router) =>
   Effect.gen(function* () {
@@ -336,11 +337,7 @@ const api = HttpRouter.use((router) =>
       "/api/rules/:id",
       route(
         Effect.gen(function* () {
-          const rule = yield* store.updateRule(yield* param("id"), yield* body(RuleUpdate));
-          if (!rule) return json({ error: "not found" }, 404);
-          // A raised limit lets queued runs start now rather than at the next settle.
-          yield* startQueued(rule.id);
-          return json(rule);
+          return json(yield* saveRule(yield* param("id"), yield* body(RuleUpdate)));
         }),
       ),
     );

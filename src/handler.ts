@@ -374,7 +374,8 @@ export const dispatchPrompt = Effect.fn("handler.dispatchPrompt")(function* (pre
 const withPreviousReview = (ctx: WebhookContext, repo: string, prNumber: string) =>
   Effect.gen(function* () {
     const store = yield* Store;
-    const previous = (yield* store.finishedRunsForPullRequest(repo, prNumber)).find((run) => run.event !== HANDOFF_EVENT);
+    // Handoffs and workflow runs are not reviews.
+    const previous = (yield* store.finishedRunsForPullRequest(repo, prNumber)).find((run) => run.event !== HANDOFF_EVENT && !run.workflowRunId);
     if (!previous?.result) return;
     ctx.previous_result = previous.result;
     if (previous.threadUrl) ctx.previous_thread_url = previous.threadUrl;

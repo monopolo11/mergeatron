@@ -121,8 +121,11 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
     if (inputError) return setError(inputError);
     setSaving(true);
     try {
+      // A rule only starts a workflow once its JSON input is live (the server refuses otherwise), so that switch promotes first.
+      const toWorkflow = value.workflow !== null && saved.workflow === null;
+      if (toWorkflow) await versions.save(value.prompt, promote);
       if (settingsChanged) await onSave(id, value);
-      await versions.save(value.prompt, promote);
+      if (!toWorkflow) await versions.save(value.prompt, promote);
       setSaved(value);
       setError(null);
     } catch (e) {

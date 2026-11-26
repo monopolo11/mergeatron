@@ -1,7 +1,8 @@
 import { Data, Effect, Schema } from "effect";
-import { startQueued } from "./handler.ts";
+import { startQueued, WorkflowInputError } from "./handler.ts";
 import { logger } from "./log.ts";
 import { RuleInput, RuleUpdate } from "./rules.ts";
+import { renderJsonTemplate } from "./template.ts";
 import { Store } from "./store.ts";
 
 const log = logger("rules");
@@ -36,11 +37,28 @@ export const updateRule = Effect.fn("rules.update")(function* (id: string, patch
   const rule = yield* store.getRule(id);
   if (!rule) return yield* Effect.fail(notFound(id));
   const input = yield* Schema.decodeUnknownEffect(RuleUpdate)({ ...rule, ...patch, filters: { ...rule.filters, ...patch.filters } }, { errors: "all" });
+  const updated = yield* saveRule(id, input);
+  yield* log.info("rule updated", { id, fields: Object.keys(patch).join(",") });
+  return updated;
+});
+
+/**
+ * Saves a rule's settings, from the UI or an agent. A rule that starts a
+ * workflow sends its live prompt as the workflow's input, so it must already
+ * have a JSON object live: switch to a workflow after promoting one.
+ */
+export const saveRule = Effect.fn("rules.save")(function* (id: string, input: RuleUpdate) {
+  const store = yield* Store;
+  const rule = yield* store.getRule(id);
+  if (!rule) return yield* Effect.fail(notFound(id));
+  if (input.workflow !== null) {
+    const live = renderJsonTemplate(rule.prompt);
+    if (!live.ok) return yield* Effect.fail(new WorkflowInputError({ message: `The live prompt is not a workflow input (${live.error}). Promote a JSON version before switching to a workflow.` }));
+  }
   const updated = yield* store.updateRule(id, input);
   if (!updated) return yield* Effect.fail(notFound(id));
   // A raised limit lets queued runs start now rather than at the next settle.
   yield* startQueued(id);
-  yield* log.info("rule updated", { id, fields: Object.keys(patch).join(",") });
   return updated;
 });
 

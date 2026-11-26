@@ -42,6 +42,7 @@ const EXPECTED = new Set([
   "InvalidFollowUpError",
   "RuleNotFoundError",
   "SchemaError",
+  "WorkflowInputError",
 ]);
 
 const prUrl = z.string().describe("GitHub pull request URL, https://github.com/<owner>/<repo>/pull/<number>");
