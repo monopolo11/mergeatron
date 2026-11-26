@@ -77,10 +77,16 @@ export type PromptVersions = ReturnType<typeof usePromptVersions>;
 export function VersionSelect({ versions, onEditFrom }: { versions: PromptVersions; onEditFrom: (body: string) => void }) {
   const { history, base, viewed } = versions;
   const [busy, setBusy] = useState(false);
+  // Why the last promotion was refused, such as prose going live on a workflow rule.
+  const [error, setError] = useState<string | null>(null);
   const shown = viewed?.version ?? base;
   const promote = (version: number) => {
     setBusy(true);
-    versions.promote(version).finally(() => setBusy(false));
+    versions
+      .promote(version)
+      .then(() => setError(null))
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
   };
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -105,6 +111,7 @@ export function VersionSelect({ versions, onEditFrom }: { versions: PromptVersio
           <Button type="button" size="xs" variant="ghost" className="text-primary" onClick={() => onEditFrom(versions.editFrom(viewed.version))}>
             Edit from this
           </Button>
+          {error && <span className="text-destructive">{error}</span>}
         </>
       )}
     </div>

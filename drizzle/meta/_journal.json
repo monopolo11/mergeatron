@@ -253,6 +253,13 @@
       "when": 1793985920474,
       "tag": "0035_sentry_limit_and_issue_tags",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1795675475679,
+      "tag": "0036_rule_workflows",
+      "breakpoints": true
     }
   ]
 }

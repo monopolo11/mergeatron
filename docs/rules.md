@@ -1,6 +1,6 @@
 # Rules
 
-A rule says: when this event happens, start a T3 thread with this prompt. Everything the service does starts from one.
+A rule says: when this event happens, start a T3 thread with this prompt, or a [T3 workflow](#workflows) with this input. Everything the service does starts from one.
 
 **Rules** lists them on the left with their runs in the range, and the selected rule's editor beside it. Changes save with **Save**; see [Prompt versions](#prompt-versions).
 
@@ -13,6 +13,7 @@ A rule says: when this event happens, start a T3 thread with this prompt. Everyt
 | **Requested reviewer** | GitHub only. A login or team slug, so only reviews requested from you fire, not every review request on the repo |
 | **Slack channel** | Slack only. A channel id. Empty matches any channel the bot is in |
 | **Skip my own PRs** | On by default. When the PR author is the GitHub login in **Settings → Defaults**, the run is recorded as skipped |
+| **Starts** | A thread (default), or a [T3 workflow](#workflows) by name |
 | **T3 project** | Explicit, or auto-matched by comparing the webhook repository to each project's git remote |
 | **Workspace** | `worktree`: T3 starts the thread in a new worktree from `origin/<PR head>` (or the default branch for non-PR events). `local`: in the project checkout |
 | **Model** | Optional override; otherwise the project default, then the global default. Pickers list only what T3's own provider config offers |
@@ -38,6 +39,20 @@ Dispatch presets and each rule's own prompt are versioned. Saving never edits a 
 Rule settings save with the same buttons and apply at once. Agents read and version prompts through the [MCP tools](slack.md#mcp-server-for-agents); their versions are marked `mcp`.
 
 HTTP: `GET` and `POST /api/{prompts,rules}/:id/versions` (`{ body, note?, promote? }`) and `POST /api/{prompts,rules}/:id/versions/:version/promote`.
+
+## Workflows
+
+A rule can start a T3 workflow run instead of a thread: pick it under **Starts**, from the workflows T3 has registered (Settings → Labs → Workflows in T3). The workflow picks its own project, workspace and models, so those fields go away, and the prompt becomes the workflow's **Input**: a JSON object whose strings take variables.
+
+```json
+{ "project": "/home/me/Dev/app", "task": "{{issue_title}}\n\n{{issue_body}}" }
+```
+
+Each value renders inside its own string, so quotes and newlines in a title never break the JSON. The input is versioned like any prompt.
+
+The run counts against the rule's concurrency and the one-run-per-PR limit while the workflow runs, however long it waits on a question or a sleep. Its detail follows the workflow (`waiting: approve-spec`), and its details on the Runs page list the steps live, each agent step linking to its thread. It ends `done` when the workflow completes, stops or skips, and `failed` when it is cancelled; the workflow's result is the run's result, posted to Slack for Slack rules.
+
+T3 starts workflow runs only for its own clients, so mergeatron starts them with the `t3` CLI in `T3CODE_HOME` (`~/.t3/bin/t3`): T3 must run on the same machine.
 
 ## How runs behave
 

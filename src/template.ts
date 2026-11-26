@@ -45,6 +45,36 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+/**
+ * A workflow rule's input: `template` is a JSON object whose strings may hold
+ * `{{ name }}` placeholders, rendered one string at a time so a value with
+ * quotes or newlines never breaks the JSON. Without `vars` it only checks the
+ * template. The error says why the template is not a JSON object.
+ */
+export function renderJsonTemplate(template: string, vars: Record<string, string | undefined> = {}): { ok: true; value: { [key: string]: JsonValue } } | { ok: false; error: string } {
+  let parsed: JsonValue;
+  try {
+    parsed = JSON.parse(template) as JsonValue;
+  } catch (error) {
+    // Browsers name the line and column ("... at position 60 (line 4 column 2)"); Bun only says what it found.
+    const message = error instanceof Error ? error.message : String(error);
+    const at = /line (\d+) column (\d+)/.exec(message);
+    return { ok: false, error: at ? `Invalid JSON at line ${at[1]}, column ${at[2]}` : `Invalid JSON: ${message.replace(/^JSON Parse error: /, "")}` };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false, error: "The input must be a JSON object, like { \"title\": \"{{pr_title}}\" }." };
+  const render = (value: JsonValue): JsonValue =>
+    typeof value === "string"
+      ? renderTemplate(value, vars)
+      : Array.isArray(value)
+        ? value.map(render)
+        : typeof value === "object" && value !== null
+          ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, render(child)]))
+          : value;
+  return { ok: true, value: Object.fromEntries(Object.entries(parsed).map(([key, child]) => [key, render(child)])) };
+}
+
 /** One message from several prompt bodies, in order: how the dispatch dialog stacks presets and how runs rebuild their message. */
 export function joinPrompts(bodies: string[]): string {
   return bodies.join("\n\n");

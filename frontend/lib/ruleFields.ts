@@ -16,8 +16,8 @@ export function eventKinds(events: string[]) {
 }
 
 /**
- * The draft as it should be saved: text trimmed, and every matching field the
- * editor hides for these events cleared. A hidden value still filters
+ * The draft as it should be saved: text trimmed, every matching field the
+ * editor hides for these events cleared, and no preset on a workflow rule. A hidden value still filters
  * deliveries (a reviewer left over from a GitHub event blocks every Slack
  * message), and nothing in the form could show or remove it.
  */
@@ -28,5 +28,7 @@ export function applicable(draft: RuleDraft): RuleDraft {
     reviewer: (isWebhook && draft.reviewer?.trim()) || null,
     channel: (isSlack && draft.channel?.trim()) || null,
     filters: { ...draft.filters, query: isInbox || isWebhook || isSlack ? draft.filters.query.trim() : "" },
+    // A workflow rule's prompt is its input, never a preset's thread prompt.
+    presetId: draft.workflow ? null : draft.presetId,
   };
 }

@@ -29,6 +29,7 @@ const rule: Omit<Rule, "id" | "livePromptVersion" | "createdAt" | "updatedAt"> =
   model: null,
   prompt: "Check {{payload.service}} at {{payload.deploy.sha}}{{payload.missing}}",
   presetId: null,
+  workflow: null,
 };
 
 describe("custom webhooks", () => {

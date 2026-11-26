@@ -73,6 +73,7 @@ export const rule: Rule = {
   prompt: "x",
   livePromptVersion: 1,
   presetId: null,
+  workflow: null,
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 };

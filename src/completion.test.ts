@@ -169,6 +169,10 @@ describe("changesRequestedStreak", () => {
     expect(changesRequestedStreak([review("APPROVED"), CR, CR])).toHaveLength(0);
     expect(changesRequestedStreak([])).toHaveLength(0);
   });
+
+  test("a workflow run's result is its own data, never a verdict", () => {
+    expect(changesRequestedStreak([{ ...review('{"approved": true}'), workflowRunId: "wf1" }, CR])).toHaveLength(1);
+  });
 });
 
 describe("pausedReview", () => {

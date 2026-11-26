@@ -5,7 +5,7 @@ import { ChildProcessSpawner } from "effect/process";
 import { Socket } from "effect/socket";
 import { join } from "node:path";
 import { AppConfig } from "./config.ts";
-import { execOk, type CommandError } from "./exec.ts";
+import { CommandError, execOk } from "./exec.ts";
 import { logger } from "./log.ts";
 import { memoSuccess } from "./memo.ts";
 import type { ModelSelection } from "./rules.ts";
@@ -192,6 +192,50 @@ export type StartThreadInput = {
 
 export type StartedThread = { threadId: string; threadUrl: string };
 
+/** `WorkflowRunStatus` in T3's packages/contracts/src/workflow.ts. A run has ended once `endedAt` is set. */
+export type T3WorkflowStatus = "running" | "waiting" | "paused" | "completed" | "stopped" | "skipped" | "cancelled";
+
+/** A durable workflow run, trimmed from T3's `WorkflowRun`. */
+export type T3WorkflowRun = {
+  runId: string;
+  workflow: string;
+  version: number;
+  title: string;
+  status: T3WorkflowStatus;
+  /** Why it is paused, what it waits on, or how it ended. */
+  detail: string | null;
+  result: unknown;
+  /** When a paused run resumes on its own; null when it waits for a person. */
+  resumesAt: string | null;
+  startedAt: string;
+  updatedAt: string;
+  endedAt: string | null;
+};
+
+/** One step of a workflow run, trimmed from T3's `WorkflowStep`. Agent steps name the thread they ran in. */
+export type T3WorkflowStep = {
+  name: string;
+  kind: "step" | "wait" | "agent" | "ask" | "sleep" | "queue";
+  status: "running" | "completed" | "failed";
+  attempts: number;
+  detail: string | null;
+  threadId: string | null;
+  /** The linked environment the thread is in; null when it is this one. */
+  environmentId: string | null;
+  startedAt: string;
+  endedAt: string | null;
+};
+
+/** A run and its steps, as `workflows.get` and `t3 workflow start --json` return them. */
+export type T3WorkflowRunDetail = { run: T3WorkflowRun; steps: T3WorkflowStep[] };
+
+export type StartWorkflowInput = {
+  workflow: string;
+  input: Record<string, unknown>;
+  /** Starting again with the same key is the same run, not a second one. */
+  key: string;
+};
+
 /** Effect RPC JSON envelopes we care about (effect/rpc/RpcMessage). */
 type RpcExit =
   | { _tag: "Success"; value: unknown }
@@ -231,10 +275,30 @@ export type T3Shape = {
    * worktrees of items that name no branch (Linear and Sentry issues).
    */
   readonly defaultBranch: (project: Pick<T3Project, "workspaceRoot">) => Effect.Effect<string, CommandError>;
+  /** Names of the workflows T3 has registered, from its definition files. */
+  readonly workflows: () => Effect.Effect<string[], T3Error>;
+  /**
+   * Starts a workflow run. T3 starts runs only for MCP clients, which need
+   * approval, so this goes through the `t3` CLI under `T3CODE_HOME`, which
+   * signs in on its own: the T3 server must run on this machine.
+   */
+  readonly startWorkflow: (input: StartWorkflowInput) => Effect.Effect<T3WorkflowRunDetail, CommandError>;
+  /** A workflow run and its steps; null when T3 has no run with that id. */
+  readonly workflowRun: (runId: string) => Effect.Effect<T3WorkflowRunDetail | null, T3Error>;
+  /** Where T3's web app shows a workflow run, and a thread (of this environment, or of a linked one). */
+  readonly workflowUrl: (runId: string) => Effect.Effect<string, T3HttpError>;
+  readonly threadUrl: (threadId: string, environmentId?: string | null) => Effect.Effect<string, T3HttpError>;
 };
 
-/** Builds the client for one origin and token. Needs an `HttpClient`, a `WebSocketConstructor` and a `ChildProcessSpawner` (for git). */
-export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: string) {
+/** `WorkflowDefinitionFiles`: each file lists the workflows its last good version defines, as `name@version`. */
+type WorkflowDefinitions = { files: Array<{ workflows: string[] }> };
+
+/**
+ * Builds the client for one origin and token. `t3Home` is T3's data
+ * directory, where the `t3` CLI that starts workflows lives. Needs an
+ * `HttpClient`, a `WebSocketConstructor` and a `ChildProcessSpawner` (for git and the CLI).
+ */
+export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: string, t3Home: string) {
   const client = yield* HttpClient.HttpClient;
   const sockets = yield* Socket.WebSocketConstructor;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -338,6 +402,9 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
 
   const dispatch = (command: Record<string, unknown>) => rpc<{ sequence: number }>("orchestration.dispatchCommand", command);
 
+  const threadUrl = (threadId: string, environmentId?: string | null) =>
+    Effect.map(environment, (own) => `${origin}/${environmentId ?? own.environmentId}/${threadId}`);
+
   /**
    * Returns once T3 accepted the launch; the worktree and setup script are
    * prepared in the background, and a failure there fails the thread's run.
@@ -374,8 +441,7 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
       }).pipe(Effect.catch((error) => log.warn("pull request link failed", { thread: threadId, error: error.message })));
     }
 
-    const { environmentId } = yield* environment;
-    return { threadId, threadUrl: `${origin}/${environmentId}/${threadId}` };
+    return { threadId, threadUrl: yield* threadUrl(threadId) };
   });
 
   const shape: T3Shape = {
@@ -397,6 +463,26 @@ export const makeT3 = Effect.fn("T3.make")(function* (origin: string, token: str
         Effect.map((output) => output.stdout.trim().replace(/^origin\//, "")),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
+    workflows: () =>
+      Effect.map(rpc<WorkflowDefinitions>("workflows.getDefinition", {}), (definitions) => [
+        ...new Set(definitions.files.flatMap((file) => file.workflows.map((workflow) => workflow.replace(/@\d+$/, "")))),
+      ].toSorted()),
+    startWorkflow: (input) =>
+      execOk(join(t3Home, "bin", "t3"), ["workflow", "start", input.workflow, "--key", input.key, "--input", JSON.stringify(input.input), "--json", "--base-dir", t3Home]).pipe(
+        Effect.flatMap((output) =>
+          Effect.try({
+            try: () => JSON.parse(output.stdout) as T3WorkflowRunDetail,
+            catch: () => new CommandError({ command: "t3 workflow start", exitCode: 0, stderr: `unreadable reply: ${output.stdout.slice(0, 200)}` }),
+          }),
+        ),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.withSpan("t3.startWorkflow", { attributes: { workflow: input.workflow } }),
+      ),
+    // T3 answers an unknown run with a WorkflowRequestError: "Workflow run <id> was not found."
+    workflowRun: (runId) =>
+      rpc<T3WorkflowRunDetail>("workflows.get", { runId }).pipe(Effect.catchIf((error) => error._tag === "T3RpcError" && error.message.includes("was not found"), () => Effect.succeed(null))),
+    workflowUrl: (runId) => Effect.map(environment, ({ environmentId }) => `${origin}/workflows?env=${encodeURIComponent(environmentId)}&run=${encodeURIComponent(runId)}`),
+    threadUrl,
   };
   return shape;
 });
@@ -422,7 +508,7 @@ export class T3 extends Context.Service<T3, T3Shape>()("T3") {
     this,
     Effect.gen(function* () {
       const config = yield* AppConfig;
-      return yield* makeT3(yield* resolveOrigin(config), Redacted.value(config.t3Token));
+      return yield* makeT3(yield* resolveOrigin(config), Redacted.value(config.t3Token), config.t3Home);
     }),
   );
 }

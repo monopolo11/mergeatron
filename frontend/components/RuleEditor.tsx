@@ -54,11 +54,13 @@ import {
   type EventSource,
 } from "../../src/shared.ts";
 import type { T3Project, T3Provider } from "../../src/t3.ts";
-import { renderTemplate, schemaVariables } from "../../src/template.ts";
+import { renderJsonTemplate, renderTemplate, schemaVariables } from "../../src/template.ts";
 
 /** Radix Select cannot hold an empty string, so "auto" gets a sentinel. */
 const AUTO_PROJECT = "__auto__";
 const OWN_PROMPT = "__own__";
+/** The "Starts" select's value for a thread; any other value is a workflow name. */
+const THREAD = "__thread__";
 const mono = "font-mono text-xs";
 
 /** Variables only webhook payloads carry; hidden on rules that listen to the inbox alone, and from dispatch presets. */
@@ -101,19 +103,29 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   const draft = useStore(form.store, (s) => s.values);
   const value = useMemo(() => applicable(draft), [draft]);
 
+  const isWorkflow = draft.workflow !== null;
+  // A workflow's input must be a JSON object; saving waits until it is.
+  const input = isWorkflow ? renderJsonTemplate(value.prompt) : null;
+  const inputError = input && !input.ok ? input.error : null;
   const promptChanged = value.prompt !== versions.baseBody;
   // Against the stored rule as is, so a stored value the form hides (and clears) shows as unsaved until saved away.
   const settingsChanged = JSON.stringify({ ...value, prompt: "" }) !== JSON.stringify({ ...saved, prompt: "" });
   const dirty = promptChanged || settingsChanged;
+  // Switching between a thread and a workflow changes what the prompt is, so the text shown goes live with the switch: a draft would leave runs on the old one.
+  const mustPromote = (draft.workflow === null) !== (saved.workflow === null) && (promptChanged || versions.base !== history.liveVersion);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useUnsavedGuard(dirty);
 
   const save = async (promote: boolean) => {
+    if (inputError) return setError(inputError);
     setSaving(true);
     try {
+      // A rule only starts a workflow once its JSON input is live (the server refuses otherwise), so that switch promotes first.
+      const toWorkflow = value.workflow !== null && saved.workflow === null;
+      if (toWorkflow) await versions.save(value.prompt, promote);
       if (settingsChanged) await onSave(id, value);
-      await versions.save(value.prompt, promote);
+      if (!toWorkflow) await versions.save(value.prompt, promote);
       setSaved(value);
       setError(null);
     } catch (e) {
@@ -143,6 +155,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api<InboxResponse>("/api/inbox"), refetchInterval: 15_000, enabled: isInbox });
   const prompts = useQuery({ queryKey: ["prompts"], queryFn: () => api<Prompt[]>("/api/prompts") });
   const webhooks = useQuery({ queryKey: ["webhooks"], queryFn: () => api<Webhook[]>("/api/webhooks") });
+  const workflows = useQuery({ queryKey: ["t3", "workflows"], queryFn: () => api<string[]>("/api/t3/workflows"), staleTime: 30_000, retry: false });
   // Labels synced from the rule's provider, so suggestions cover labels no inbox item carries yet.
   const synced = useQuery({ queryKey: ["labels"], queryFn: () => api<LabelsResponse>("/api/labels"), enabled: isInbox || isWebhook, staleTime: 5 * 60_000 });
   const candidates = (inbox.data?.items ?? []).filter((item) => events.includes(itemEvent(item)));
@@ -201,10 +214,11 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
   const previewCtx = sample?.context ?? (matched[0] ? itemContext(matched[0].item) : null);
   const previewLabel = sample ? `Preview with delivery from ${timeAgo(sample.createdAt)}` : matched[0] ? `Preview with ${matched[0].item.identifier}` : "Preview";
   // A linked preset replaces the rule's own text when a thread starts, so the preview follows it.
-  const linked = prompts.data?.find((prompt) => prompt.id === draft.presetId) ?? null;
+  // Workflow rules keep their own input: presets are thread prompts.
+  const linked = (!isWorkflow && prompts.data?.find((prompt) => prompt.id === draft.presetId)) || null;
   // What the prompt box shows: the linked preset, a version picked to view, or the draft.
   const shownPrompt = linked?.body ?? versions.viewed?.body ?? draft.prompt;
-  const preview = previewCtx ? renderTemplate(shownPrompt, previewCtx) : null;
+  const preview = !previewCtx ? null : isWorkflow ? workflowPreview(shownPrompt, previewCtx) : renderTemplate(shownPrompt, previewCtx);
 
   // A custom webhook's body is `{{payload}}`; its schema's properties are offered as paths into it.
   const payloadVars = (webhooks.data ?? []).filter((webhook) => events.includes(customWebhookEvent(webhook.slug))).flatMap((webhook) => schemaVariables(webhook.payloadSchema));
@@ -228,11 +242,13 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
       <Toolbar title={draft.name || "Untitled rule"}>
         <span className={cn("ml-auto", error ? "text-destructive" : "text-warn")}>{error ? "Save failed" : dirty ? "Unsaved changes" : ""}</span>
         <Button size="xs" variant="ghost" disabled={!dirty || saving} onClick={discard}>Discard</Button>
-        <Button size="xs" variant="outline" disabled={!dirty || saving} onClick={() => void save(false)}>
-          {promptChanged ? "Save draft" : "Save"}
-        </Button>
+        {!mustPromote && (
+          <Button size="xs" variant="outline" disabled={!dirty || saving || inputError !== null} onClick={() => void save(false)}>
+            {promptChanged ? "Save draft" : "Save"}
+          </Button>
+        )}
         {(promptChanged || versions.base !== history.liveVersion) && (
-          <Button size="xs" disabled={saving} onClick={() => void save(true)}>Save and promote</Button>
+          <Button size="xs" disabled={saving || inputError !== null} onClick={() => void save(true)}>Save and promote</Button>
         )}
         <DeleteButton name={draft.name} onConfirm={() => onDelete(rule)} />
       </Toolbar>
@@ -271,6 +287,36 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                 }
               >
                 <EventPicker value={field.state.value} webhooks={webhooks.data ?? []} onChange={field.handleChange} />
+              </Field>
+            )}
+          </form.Field>
+
+          <form.Field name="workflow">
+            {(field) => (
+              <Field
+                label="Starts"
+                hint={workflows.error ? `No workflows from T3: ${workflows.error.message}` : field.state.value ? "Picks its own project and models. Needs T3 on this machine." : undefined}
+              >
+                <Select
+                  value={field.state.value ?? THREAD}
+                  onValueChange={(v) => {
+                    const workflow = v === THREAD ? null : v;
+                    field.handleChange(workflow);
+                    // A workflow's input is JSON: start from an object when the prompt is not one.
+                    if (workflow && !renderJsonTemplate(draft.prompt).ok) form.setFieldValue("prompt", starterInput(vars));
+                  }}
+                >
+                  <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={THREAD}>A thread</SelectItem>
+                    {[...new Set([...(workflows.data ?? []), ...(field.state.value ? [field.state.value] : [])])].map((name) => (
+                      <SelectItem key={name} value={name}>
+                        <span><span className="text-muted-foreground">Workflow</span> <span className="font-mono font-medium">{name}</span></span>
+                        {workflows.data && !workflows.data.includes(name) && <span className="ml-1 text-warn">not registered</span>}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </Field>
             )}
           </form.Field>
@@ -347,7 +393,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
           )}
           <form.Field name="maxConcurrent">
             {(field) => (
-              <Field label="Concurrency" hint="Threads of this rule running at once. Further matches queue and start as earlier ones settle. 0 is unlimited.">
+              <Field label="Concurrency" hint={`${isWorkflow ? "Workflow runs" : "Threads"} of this rule running at once. Further matches queue and start as earlier ones settle. 0 is unlimited.`}>
                 <div className="flex h-8 items-center gap-3">
                   <Input type="number" min={0} className={cn("w-20", mono)} value={field.state.value} onChange={(e) => field.handleChange(Math.max(0, Math.floor(Number(e.target.value) || 0)))} />
                   <span className="text-xs text-muted-foreground">
@@ -358,6 +404,8 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
             )}
           </form.Field>
 
+          {!isWorkflow && (
+          <>
           <form.Field name="projectId">
             {(field) => (
               <Field
@@ -424,6 +472,8 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
               </Field>
             )}
           </form.Field>
+          </>
+          )}
         </div>
 
         {isInbox && (
@@ -458,15 +508,17 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
         <form.Field name="prompt">
           {(field) => (
             <Field
-              label="Prompt"
+              label={isWorkflow ? "Input" : "Prompt"}
               hint={
-                linked
-                  ? `Follows the live version of the preset "${linked.name}": promoting one in Settings changes this rule too.`
-                  : `First message of the thread. Runs use the live version. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`
+                isWorkflow
+                  ? inputError ? undefined : `JSON object. Variables render inside strings.${isSlack ? " The result is posted back to the Slack thread." : ""}`
+                  : linked
+                    ? `Follows the live version of the preset "${linked.name}": promoting one in Settings changes this rule too.`
+                    : `First message of the thread. Runs use the live version. Click a variable to insert it at the cursor.${isSlack ? " The final reply is posted back to the Slack thread." : ""}`
               }
             >
               <div className="flex flex-wrap items-center gap-2">
-                {prompts.data && prompts.data.length > 0 && (
+                {!isWorkflow && prompts.data && prompts.data.length > 0 && (
                   <form.Field name="presetId">
                     {(preset) => (
                       <>
@@ -495,10 +547,12 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
               </div>
               <PromptEditor
                 ref={promptRef}
-                className={cn("min-h-52 leading-relaxed", mono, versions.viewed && !linked && "text-muted-foreground")}
+                className={cn(isWorkflow ? "min-h-20" : "min-h-52", "leading-relaxed", mono, versions.viewed && !linked && "text-muted-foreground", inputError && !versions.viewed && "border-destructive focus-within:border-destructive focus-within:ring-0")}
                 value={shownPrompt}
                 readOnly={linked !== null || versions.viewed !== null}
                 source={eventsService(events)}
+                skills={!isWorkflow}
+                spellCheck={!isWorkflow}
                 onChange={field.handleChange}
               />
               {!linked && !versions.viewed && (
@@ -508,7 +562,7 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                       {`{{${name}}}`}
                     </Button>
                   ))}
-                  {prompts.data && prompts.data.length > 0 && (
+                  {!isWorkflow && prompts.data && prompts.data.length > 0 && (
                     <Popover>
                       <PopoverTrigger asChild>
                         <Button type="button" variant="ghost" size="xs" className="h-5 px-1 text-primary">insert preset ▾</Button>
@@ -527,20 +581,33 @@ function RuleForm({ rule, projects, providers, runs, githubLogin, onSave, onDele
                   )}
                 </div>
               )}
+              {inputError && <p className="text-xs text-destructive">{versions.viewed ? `Draft: ${inputError}` : inputError}</p>}
             </Field>
           )}
         </form.Field>
 
-        <Field label={previewLabel}>
+        {!inputError && <Field label={previewLabel}>
           {preview ? (
             <pre className={cn("max-h-48 overflow-auto rounded-md border bg-input/20 p-3 whitespace-pre-wrap text-muted-foreground", mono)}>{preview}</pre>
           ) : (
             <span className="text-xs text-muted-foreground">{isInbox ? "Appears once an inbox item matches." : "Appears after the first delivery matching this event."}</span>
           )}
-        </Field>
+        </Field>}
       </form>
     </div>
   );
+}
+
+/** A workflow input rendered with a delivery, as the JSON the workflow would get; the reason when it does not render. */
+function workflowPreview(template: string, ctx: Record<string, string>): string {
+  const input = renderJsonTemplate(template, ctx);
+  return input.ok ? JSON.stringify(input.value, null, 2) : input.error;
+}
+
+/** First input of a rule switched to a workflow: the title of what it fires on, when it has one. */
+function starterInput(vars: string[]): string {
+  const title = ["pr_title", "issue_title"].find((name) => vars.includes(name));
+  return title ? `{\n  "title": "{{${title}}}"\n}` : "{}";
 }
 
 /** What gets saved: blank reviewer and channel become null, like an untouched field. */

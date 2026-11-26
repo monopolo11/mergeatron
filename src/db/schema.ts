@@ -74,6 +74,12 @@ export const rules = sqliteTable("rules", {
   livePromptVersion: integer("live_prompt_version").notNull().default(1),
   /** A dispatch preset whose body replaces `prompt` at start time, so editing the preset updates every rule using it. */
   presetId: text("preset_id"),
+  /**
+   * A T3 workflow to start instead of a thread, by name. Its prompt is then
+   * the workflow's input: JSON whose strings take `{{variables}}` (see
+   * `renderJsonTemplate`). Project, workspace and model are the workflow's.
+   */
+  workflow: text(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -102,7 +108,7 @@ export const webhooks = sqliteTable("webhooks", {
  * per run in `runActions` and `runPrompts`, since the rule may change while
  * the run waits and a dispatch from the inbox has no stored rule at all.
  */
-export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "presetId" | "maxConcurrent"> & {
+export type RunAction = Pick<typeof rules.$inferSelect, "name" | "skipSelfReview" | "projectId" | "workspace" | "model" | "presetId" | "maxConcurrent" | "workflow"> & {
   promptRefs: PromptRef[];
 };
 
@@ -278,7 +284,10 @@ export const runs = sqliteTable(
     status: text({ enum: RUN_STATUSES }).notNull(),
     detail: text().notNull().default(""),
     threadId: text("thread_id"),
+    /** Where to open the run in T3: its thread, or for a workflow run the workflow run's page. */
     threadUrl: text("thread_url"),
+    /** The T3 workflow run a workflow rule started (see `rules.workflow`); null for thread runs. */
+    workflowRunId: text("workflow_run_id"),
     /** Template variables extracted from the delivery, used to preview prompts in the UI. */
     context: text({ mode: "json" }).$type<Record<string, string>>(),
     /** Final assistant message of the thread's first turn, once it settles. */
@@ -400,6 +409,8 @@ export const runActions = sqliteTable(
     /** Preset whose live version replaces the run's prompt at start; null once the preset is deleted. */
     presetId: text("preset_id").references(() => prompts.id, { onDelete: "set null" }),
     maxConcurrent: integer("max_concurrent").notNull(),
+    /** Workflow the run starts instead of a thread; null for thread rules. */
+    workflow: text(),
   },
   (table) => [
     index("run_actions_project_idx").on(table.projectId),

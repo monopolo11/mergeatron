@@ -17,6 +17,7 @@ const draft = (events: string[]): RuleDraft => ({
   model: null,
   prompt: "",
   presetId: null,
+  workflow: null,
 });
 
 describe("applicable", () => {

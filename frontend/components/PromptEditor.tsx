@@ -230,6 +230,7 @@ export function PromptEditor({
   className,
   readOnly = false,
   skills: skillsEnabled = true,
+  spellCheck = true,
   source = null,
   ref,
 }: {
@@ -240,6 +241,8 @@ export function PromptEditor({
   className?: string;
   readOnly?: boolean;
   skills?: boolean;
+  /** Off for text that is not prose, such as a workflow's JSON input. */
+  spellCheck?: boolean;
   /** The one service the prompt runs for, whose logo shared variables show (see `eventsService`). */
   source?: VariableService | null;
   ref?: Ref<PromptEditorHandle>;
@@ -256,7 +259,7 @@ export function PromptEditor({
   const open = skillsEnabled && focused && !readOnly && trigger !== null && trigger.from !== dismissedAt;
 
   // The editor's handlers are bound once; they read the latest render through this.
-  const latest = useRef({ onChange, skills, source, items, active, open, trigger, editor: null as Editor | null });
+  const latest = useRef({ onChange, skills, source, spellCheck, items, active, open, trigger, editor: null as Editor | null });
 
   const pick = (skill: T3Skill) => {
     const { trigger: current, editor } = latest.current;
@@ -272,6 +275,7 @@ export function PromptEditor({
     editable: !readOnly,
     coreExtensionOptions: { clipboardTextSerializer: { blockSeparator: "\n" } },
     editorProps: {
+      attributes: () => ({ spellcheck: String(latest.current.spellCheck) }),
       handleKeyDown: (_view, event) => {
         const { open, items, active } = latest.current;
         if (!open || items.length === 0 || event.isComposing) return false;
@@ -300,7 +304,7 @@ export function PromptEditor({
     onBlur: () => setFocused(false),
   });
 
-  latest.current = { onChange, skills, source, items, active, open, trigger, editor };
+  latest.current = { onChange, skills, source, spellCheck, items, active, open, trigger, editor };
 
   useImperativeHandle(ref, () => ({ insert: (text) => editor && insertText(editor, text, latest.current.skills, latest.current.source) }), [editor]);
 

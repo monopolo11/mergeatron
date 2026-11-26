@@ -2,7 +2,8 @@ import { Data, Effect } from "effect";
 import { logger } from "./log.ts";
 import type { PromptRef, Run, RunAction, RunPullRequest, RunUsage } from "./rules.ts";
 import { SETTLED, Store, type RunFilter, type RunRating } from "./store.ts";
-import { joinPrompts, renderTemplate } from "./template.ts";
+import { T3, type T3WorkflowRun, type T3WorkflowStep } from "./t3.ts";
+import { joinPrompts, renderJsonTemplate, renderTemplate } from "./template.ts";
 
 const log = logger("runs");
 
@@ -14,6 +15,9 @@ export class InvalidFollowUpError extends Data.TaggedError("InvalidFollowUpError
 
 /** The run is queued or its thread is still working, so it holds a slot in its rule's queue. */
 export class RunActiveError extends Data.TaggedError("RunActiveError")<{ readonly message: string }> {}
+
+/** The run started no T3 workflow, so it has no steps to show. */
+export class RunWithoutWorkflowError extends Data.TaggedError("RunWithoutWorkflowError")<{ readonly message: string }> {}
 
 /** The run never opened a T3 thread of its own (it failed to start, or was skipped), so there is nothing to read its status from. */
 export class RunWithoutThreadError extends Data.TaggedError("RunWithoutThreadError")<{ readonly message: string }> {}
@@ -45,7 +49,8 @@ export type RunSummary = Omit<RunWithPrompts, "context" | "result"> & RunSubject
 /**
  * One run in full: what it was set to start with (its rule's settings, see
  * RunAction) and its first message, rendered again from its prompt versions
- * and context. Null for handoffs and connection tests, which have neither.
+ * and context; for a workflow run, the JSON input it started with. Null for
+ * handoffs and connection tests, which have neither.
  */
 export type RunDetail = RunWithPrompts & RunSubject & { action: RunAction | null; prompt: string | null };
 
@@ -84,9 +89,35 @@ export const getRun = Effect.fn("runs.get")(function* (id: string) {
     ...withPrompts!,
     ...subject(run.context),
     action: yield* store.getRunAction(id),
-    prompt: bodies && run.context ? renderTemplate(joinPrompts(bodies), run.context) : null,
+    prompt: bodies && run.context ? renderPrompt(joinPrompts(bodies), run.context, run.workflowRunId !== null) : null,
   };
   return detail;
+});
+
+/** A workflow run's input as indented JSON (the template as stored when it no longer parses), a thread's message as text. */
+const renderPrompt = (template: string, context: Record<string, string>, workflow: boolean) => {
+  if (!workflow) return renderTemplate(template, context);
+  const input = renderJsonTemplate(template, context);
+  return input.ok ? JSON.stringify(input.value, null, 2) : template;
+};
+
+/** A workflow run as the run's details show it: its state and steps, each agent step with a link to its thread. */
+export type RunWorkflow = { run: T3WorkflowRun; steps: Array<T3WorkflowStep & { threadUrl: string | null }> };
+
+/** The run's workflow run, read from T3 now. Null when T3 no longer has it. */
+export const getRunWorkflow = Effect.fn("runs.workflow")(function* (id: string) {
+  const store = yield* Store;
+  const t3 = yield* T3;
+  const run = yield* store.getRun(id);
+  if (!run) return yield* Effect.fail(new RunNotFoundError({ message: `No run ${id}.` }));
+  if (!run.workflowRunId) return yield* Effect.fail(new RunWithoutWorkflowError({ message: `Run ${id} started no workflow.` }));
+  const read = yield* t3.workflowRun(run.workflowRunId);
+  if (!read) return null;
+  const steps = yield* Effect.forEach(read.steps, (step) =>
+    Effect.map(step.threadId ? t3.threadUrl(step.threadId, step.environmentId) : Effect.succeed(null), (threadUrl) => ({ ...step, threadUrl })),
+  );
+  const workflow: RunWorkflow = { run: read.run, steps };
+  return workflow;
 });
 
 /** Rates a run, replacing an earlier rating. `followUpOf` must be another existing run. */
